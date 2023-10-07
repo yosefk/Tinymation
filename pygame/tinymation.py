@@ -28,15 +28,30 @@ def load_cursor(file):
 pencil_cursor = load_cursor('pencil.png')
 pg.mouse.set_cursor(pencil_cursor)
 
+class HistoryItem:
+    def __init__(self, surface):
+        self.surface = surface
+    def undo(self):
+        screen.blit(self.surface, screen.get_rect())
+        pygame.display.flip()
+
+history = []
 isPressed = False
 escape = False
 prevDrawn = None
 while not escape: 
   for event in pygame.event.get():
    try:
-    if event.type == pygame.KEYDOWN and event.key == 27: # ESC pressed
-        escape = True
+    if event.type == pygame.KEYDOWN:
+        if event.key == 27: # ESC pressed
+            escape = True
+        elif event.key == ord(' '):
+            if history:
+                history[-1].undo()
+                history.pop()
+            
     if event.type == pygame.MOUSEBUTTONDOWN:
+      history.append(HistoryItem(screen.copy()))
       isPressed = True
     elif event.type == pygame.MOUSEBUTTONUP:
       isPressed = False
