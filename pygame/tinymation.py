@@ -19,9 +19,15 @@ def drawCircle( screen, x, y, color, width):
 def drawLine(screen, pos1, pos2, color, width):
   pygame.draw.line( screen, color, pos1, pos2, width )
 
+def make_surface(width, height):
+    return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
+
+def scale_image(surface, width, height):
+    return pg.transform.smoothscale(surface, (width, height))
+
 def load_cursor(file, flip=False):
   surface = pg.image.load(file)
-  surface = pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
+  surface = scale_image(surface, CURSOR_SIZE, CURSOR_SIZE)#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
       surface = pg.transform.flip(surface, True, True)
   for y in range(CURSOR_SIZE):
@@ -64,7 +70,7 @@ class HistoryItem:
         self.miny = max(self.miny, bottom)
         self.maxy = min(self.maxy, top-1)
         
-        affected = pg.Surface((self.maxx-self.minx+1, self.maxy-self.miny+1), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
+        affected = make_surface(self.maxx-self.minx+1, self.maxy-self.miny+1)
         affected.blit(self.surface, (0,0), (self.minx, self.miny, self.maxx+1, self.maxy+1))
         self.surface = affected
         self.optimized = True
@@ -77,8 +83,7 @@ class PenTool:
 
     def draw(self, rect, cursor_surface):
         left, bottom, width, height = rect
-        surface = pg.transform.scale(cursor_surface, (width, height))
-        print(width, height)
+        surface = scale_image(cursor_surface, width, height)
         screen.blit(surface, (left, bottom), (0, 0, width, height))
 
     def on_mouse_down(self, x, y):
@@ -135,16 +140,25 @@ class Layout:
         self.elems = []
         _, _, self.width, self.height = screen.get_rect()
         self.is_pressed = False
+        self.is_playing = False
         self.tool = PenTool()
 
     def add(self, rect, elem):
         left, bottom, width, height = rect
         srect = (int(left*self.width), int(bottom*self.height), int(width*self.width), int(height*self.height))
         self.elems.append((srect, elem))
-        elem.draw(srect)
+        elem.rect = srect
+        elem.draw()
         pygame.draw.rect(screen, PEN, srect, 1, 1)
 
     def on_event(self,event):
+        if self.is_playing:
+            # TODO: this isn't the way - should allow the stop button to be pressed
+            # need to disable the other operations differently from this
+            if event.type == TIMER_EVENT:
+                next_frame()
+            return
+        
         x, y = pygame.mouse.get_pos()
         for rect, elem in self.elems:
             left, bottom, width, height = rect
@@ -164,25 +178,63 @@ class Layout:
         elif event.type == pygame.MOUSEMOTION and self.is_pressed:
             elem.on_mouse_move(x,y)
             pygame.display.flip()
+
+    def drawing_area(self):
+        assert isinstance(self.elems[0][1], DrawingArea)
+        return self.elems[0][1]
+
+    def toggle_playing(self):
+        self.is_playing = not self.is_playing
             
 class DrawingArea:
     def __init__(self):
         pass
-    def draw(self,rect): pass
+    def draw(self):
+        try:
+            m = movie
+        except:
+            return
+        left, bottom, width, height = self.rect
+        screen.blit(m.curr_frame(), (left, bottom), (0, 0, width, height))
     def on_mouse_down(self,x,y):
         layout.tool.on_mouse_down(x,y)
     def on_mouse_up(self,x,y):
         layout.tool.on_mouse_up(x,y)
     def on_mouse_move(self,x,y):
         layout.tool.on_mouse_move(x,y)
+    def get_frame(self):
+        _, _, width, height = self.rect
+        frame = make_surface(width, height)
+        frame.blit(screen, (0,0), self.rect)
+        return frame
+    def new_frame(self):
+        _, _, width, height = self.rect
+        frame = make_surface(width, height)
+        frame.fill(BACKGROUND)
+        return frame
 
 class ToolSelectionButton:
     def __init__(self, tool):
         self.tool = tool
-    def draw(self,rect):
-        self.tool.tool.draw(rect,self.tool.cursor[1])
+    def draw(self):
+        self.tool.tool.draw(self.rect,self.tool.cursor[1])
     def on_mouse_down(self,x,y):
         set_tool(self.tool)
+    def on_mouse_up(self,x,y): pass
+    def on_mouse_move(self,x,y): pass
+
+class FunctionButton:
+    def __init__(self, function, icon=None):
+        self.function = function
+        self.icon = icon
+    def draw(self):
+        # TODO: show it was pressed (tool selection button shows it by changing the cursor, maybe still should show it was pressed)
+        if self.icon:
+            left, bottom, width, height = rect
+            surface = pg.transform.scale(cursor_surface, (width, height))
+            screen.blit(surface, (left, bottom), (0, 0, width, height))
+    def on_mouse_down(self,x,y):
+        self.function()
     def on_mouse_up(self,x,y): pass
     def on_mouse_move(self,x,y): pass
 
@@ -195,9 +247,48 @@ TOOLS = {
     'eraser-big': Tool(PenTool(BACKGROUND, WIDTH*20), eraser_cursor, 'tT'),
 }
 
+class Movie:
+    def __init__(self):
+        self.frames = [layout.drawing_area().get_frame()]
+        self.pos = 0
+
+    def insert_frame(self):
+        self.frames[self.pos] = layout.drawing_area().get_frame()
+        self.frames.insert(self.pos+1, layout.drawing_area().new_frame())
+        self.next_frame()
+
+    def next_frame(self):
+        self.frames[self.pos] = layout.drawing_area().get_frame()
+        self.pos = (self.pos + 1) % len(self.frames)
+        layout.drawing_area().draw()
+        pygame.display.flip()
+
+    def prev_frame(self):
+        self.frames[self.pos] = layout.drawing_area().get_frame()
+        self.pos = (self.pos - 1) % len(self.frames)
+        layout.drawing_area().draw()
+        pygame.display.flip()
+
+    def curr_frame(self):
+        return self.frames[self.pos]
+
+
+def insert_frame(): movie.insert_frame()
+def next_frame(): movie.next_frame()
+def prev_frame(): movie.prev_frame()
+def toggle_playing(): layout.toggle_playing()
+
+FUNCTIONS = {
+    'insert-frame': (insert_frame, '='),
+    'next-frame': (next_frame, '.'),
+    'prev-frame': (prev_frame, ','),
+    'toggle-playing': (toggle_playing, '\r'),
+}
+
 def set_tool(tool):
     layout.tool = tool.tool
-    pg.mouse.set_cursor(tool.cursor[0])
+    if tool.cursor:
+        pg.mouse.set_cursor(tool.cursor[0])
 
 def init_layout():
     screen.fill(BACKGROUND)
@@ -206,6 +297,7 @@ def init_layout():
     layout = Layout()
     layout.add((0.15,0.15,0.85,0.85), DrawingArea())
     layout.add((0,0.85,0.075, 0.15), ToolSelectionButton(TOOLS['pencil']))
+    layout.add((0,0.15,0.075, 0.3), FunctionButton(insert_frame))
     color_w = 0.025
     i = 0
     
@@ -221,15 +313,25 @@ def init_layout():
 
 init_layout()
 
+movie = Movie()
+
+# TODO: make per-frame?.. what about undoing the deletion of a frame?..
 history = []
 escape = False
+
+TIMER_EVENT = pygame.USEREVENT + 1
+
+time_delay = 1000//12 # we play at 12 fps
+timer_event = TIMER_EVENT
+pygame.time.set_timer(timer_event, time_delay)
+
 while not escape: 
   for event in pygame.event.get():
    try:
       if event.type == pygame.KEYDOWN:
         if event.key == 27: # ESC pressed
             escape = True
-  
+
         if layout.is_pressed:
             continue # ignore keystrokes (except ESC) when a mouse tool is being used
         
@@ -241,6 +343,10 @@ while not escape:
         for tool in TOOLS.values():
             if event.key in [ord(c) for c in tool.chars]:
                 set_tool(tool)
+
+        for func, chars in FUNCTIONS.values():
+            if event.key in [ord(c) for c in chars]:
+                func()
                 
       else:
           layout.on_event(event)
