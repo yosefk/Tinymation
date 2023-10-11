@@ -43,12 +43,16 @@ pg.mouse.set_cursor(pencil_cursor[0])
 class HistoryItem:
     def __init__(self):
         self.surface = screen.copy()
+        self.pos = movie.pos
         self.minx = 10**9
         self.miny = 10**9
         self.maxx = -10**9
         self.maxy = -10**9
         self.optimized = False
     def undo(self):
+        if self.pos != movie.pos:
+            print(f'WARNING: HistoryItem at the wrong position! should be {self.pos}, but is {movie.pos}')
+        movie.seek_frame(self.pos) # we should already be here, but just in case
         if self.optimized:
             screen.blit(self.surface, (self.minx, self.miny), (0, 0, self.maxx-self.minx+1, self.maxy-self.miny+1))
         else:
@@ -75,11 +79,15 @@ class HistoryItem:
         self.surface = affected
         self.optimized = True
 
+    def __str__(self):
+        return f'HistoryItem(pos={self.pos}, rect=({self.minx}, {self.miny}, {self.maxx}, {self.maxy}))'
+
 class PenTool:
     def __init__(self, color=PEN, width=WIDTH):
         self.prev_drawn = None
         self.color = color
         self.width = width
+        self.history_item = None
 
     def draw(self, rect, cursor_surface):
         left, bottom, width, height = rect
@@ -87,16 +95,18 @@ class PenTool:
         screen.blit(surface, (left, bottom), (0, 0, width, height))
 
     def on_mouse_down(self, x, y):
-        history.append(HistoryItem())
+        self.history_item = HistoryItem()
 
     def on_mouse_up(self, x, y):
         self.prev_drawn = None
-        if history:
-            history[-1].optimize()
+        if self.history_item:
+            self.history_item.optimize()
+            history.append(self.history_item)
+            self.history_item = None
 
     def on_mouse_move(self, x, y):
-       if history:
-            history[-1].affected(x-self.width,y-self.width,x+self.width,y+self.width)
+       if self.history_item:
+            self.history_item.affected(x-self.width,y-self.width,x+self.width,y+self.width)
        if self.prev_drawn:
             drawLine(screen, self.prev_drawn, (x,y), self.color, self.width)
        drawCircle( screen, x, y, self.color, self.width )
@@ -252,36 +262,107 @@ class Movie:
         self.frames = [layout.drawing_area().get_frame()]
         self.pos = 0
 
-    def insert_frame(self):
+    def seek_frame(self,pos):
+        assert pos >= 0 and pos < len(self.frames)
+        if pos == self.pos:
+            return
+
         self.frames[self.pos] = layout.drawing_area().get_frame()
+        self.pos = pos
+        layout.drawing_area().draw()
+        pygame.display.flip()
+
+    def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
+    def prev_frame(self): self.seek_frame((self.pos - 1) % len(self.frames))
+
+    def insert_frame(self):
         self.frames.insert(self.pos+1, layout.drawing_area().new_frame())
         self.next_frame()
 
-    def next_frame(self):
+    def insert_frame_at_pos(self, pos, frame):
+        assert pos >= 0 and pos <= len(self.frames)
         self.frames[self.pos] = layout.drawing_area().get_frame()
-        self.pos = (self.pos + 1) % len(self.frames)
+
+        self.pos = pos
+        self.frames.insert(self.pos, frame)
         layout.drawing_area().draw()
         pygame.display.flip()
 
-    def prev_frame(self):
-        self.frames[self.pos] = layout.drawing_area().get_frame()
-        self.pos = (self.pos - 1) % len(self.frames)
+    # TODO: this works with pos modified from the outside but it's scary as the API
+    def remove_frame(self, new_pos=-1):
+        if len(self.frames) <= 1:
+            return
+
+        removed = layout.drawing_area().get_frame()
+
+        del self.frames[self.pos]
+        if self.pos >= len(self.frames):
+            self.pos = 0
+
+        if new_pos >= 0:
+            self.pos = new_pos
+
         layout.drawing_area().draw()
         pygame.display.flip()
+
+        return removed
 
     def curr_frame(self):
         return self.frames[self.pos]
 
+class SeekFrameHistoryItem:
+    def __init__(self, pos): self.pos = pos
+    def undo(self): movie.seek_frame(self.pos) 
+    def __str__(self): return f'SeekFrameHistoryItem(restoring pos to {self.pos})'
 
-def insert_frame(): movie.insert_frame()
-def next_frame(): movie.next_frame()
-def prev_frame(): movie.prev_frame()
+class InsertFrameHistoryItem:
+    def __init__(self, pos): self.pos = pos
+    def undo(self):
+        movie.pos = self.pos
+        # normally remove_frame brings you to the next frame after the one you removed.
+        # but when undoing insert_frame, we bring you to the previous frame after the one
+        # you removed - it's the one where you inserted the frame we're now removing to undo
+        # the insert, so this is where we should go to bring you back in time.
+        movie.remove_frame(new_pos=(self.pos-1)%len(movie.frames))
+    def __str__(self):
+        return f'InsertFrameHistoryItem(removing at pos {self.pos}, then seeking to pos {(self.pos-1)%len(movie.frames)})'
+
+class RemoveFrameHistoryItem:
+    def __init__(self, pos, frame):
+        self.pos = pos
+        self.frame = frame
+    def undo(self):
+        movie.insert_frame_at_pos(self.pos, self.frame)
+    def __str__(self):
+        return f'RemoveFrameHistoryItem(inserting at pos {self.pos})'
+
+def append_seek_frame_history_item_if_frame_is_dirty():
+    if history and not isinstance(history[-1], SeekFrameHistoryItem):
+        history.append(SeekFrameHistoryItem(movie.pos))
+
+def insert_frame():
+    movie.insert_frame()
+    history.append(InsertFrameHistoryItem(movie.pos))
+
+def remove_frame():
+    removed = movie.remove_frame()
+    history.append(RemoveFrameHistoryItem(movie.pos if movie.pos else len(movie.frames), removed))
+
+def next_frame():
+    append_seek_frame_history_item_if_frame_is_dirty()
+    movie.next_frame()
+
+def prev_frame():
+    append_seek_frame_history_item_if_frame_is_dirty()
+    movie.prev_frame()
+
 def toggle_playing(): layout.toggle_playing()
 
 FUNCTIONS = {
-    'insert-frame': (insert_frame, '='),
-    'next-frame': (next_frame, '.'),
-    'prev-frame': (prev_frame, ','),
+    'insert-frame': (insert_frame, '=+'),
+    'remove-frame': (remove_frame, '-_'),
+    'next-frame': (next_frame, '.<'),
+    'prev-frame': (prev_frame, ',>'),
     'toggle-playing': (toggle_playing, '\r'),
 }
 
@@ -315,7 +396,12 @@ init_layout()
 
 movie = Movie()
 
-# TODO: make per-frame?.. what about undoing the deletion of a frame?..
+# The history is "global" for all operations. In some (rare) animation programs
+# there's a history per frame. One problem with this is how to undo timeline
+# operations like frame deletions (do you have a separate undo function for this?)
+# It's also somewhat less intuitive in that you might have long forgotten
+# what you've done on some frame when you visit it and press undo one time
+# too many
 history = []
 escape = False
 
@@ -337,6 +423,9 @@ while not escape:
         
         if event.key == ord(' '): # undo
             if history:
+                # TODO: we might want a loop here since some undo ops
+                # turn out to be "no-ops" (specifically seek frame where we're already there.)
+                # as it is right now, you might press undo and nothing will happen which might be confusing
                 history[-1].undo()
                 history.pop()
 
