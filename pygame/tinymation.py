@@ -42,7 +42,7 @@ pg.mouse.set_cursor(pencil_cursor[0])
 
 class HistoryItem:
     def __init__(self):
-        self.surface = screen.copy()
+        self.surface = movie.curr_frame().copy()
         self.pos = movie.pos
         self.minx = 10**9
         self.miny = 10**9
@@ -53,11 +53,11 @@ class HistoryItem:
         if self.pos != movie.pos:
             print(f'WARNING: HistoryItem at the wrong position! should be {self.pos}, but is {movie.pos}')
         movie.seek_frame(self.pos) # we should already be here, but just in case
+        frame = movie.curr_frame()
         if self.optimized:
-            screen.blit(self.surface, (self.minx, self.miny), (0, 0, self.maxx-self.minx+1, self.maxy-self.miny+1))
+            frame.blit(self.surface, (self.minx, self.miny), (0, 0, self.maxx-self.minx+1, self.maxy-self.miny+1))
         else:
-            screen.blit(self.surface, screen.get_rect())
-        pygame.display.flip()
+            frame.blit(self.surface, frame.get_rect())
     def affected(self,minx,miny,maxx,maxy):
         self.minx = min(minx,self.minx)
         self.maxx = max(maxx,self.maxx)
@@ -66,7 +66,7 @@ class HistoryItem:
     def optimize(self):
         if self.minx == 10**9:
             return
-        left, bottom, width,height = screen.get_rect()
+        left, bottom, width,height = movie.curr_frame().get_rect()
         right = left+width
         top = bottom+height
         self.minx = max(self.minx, left)
@@ -107,9 +107,10 @@ class PenTool:
     def on_mouse_move(self, x, y):
        if self.history_item:
             self.history_item.affected(x-self.width,y-self.width,x+self.width,y+self.width)
+       frame = movie.curr_frame()
        if self.prev_drawn:
-            drawLine(screen, self.prev_drawn, (x,y), self.color, self.width)
-       drawCircle( screen, x, y, self.color, self.width )
+            drawLine(frame, self.prev_drawn, (x,y), self.color, self.width)
+       drawCircle(frame, x, y, self.color, self.width)
        self.prev_drawn = (x,y)
 
 class PaintBucketTool:
@@ -120,7 +121,7 @@ class PaintBucketTool:
     def on_mouse_down(self, x, y):
         history.append(HistoryItem())
         # TODO: would be better to optimize the history item
-        surface = screen
+        surface = movie.curr_frame()
         fill_color = surface.map_rgb(self.color)
         surf_array = pygame.surfarray.pixels2d(surface)  # Create an array from the surface.
         flood_fill(surf_array, (x,y), fill_color, in_place=True)
@@ -156,10 +157,14 @@ class Layout:
     def add(self, rect, elem):
         left, bottom, width, height = rect
         srect = (int(left*self.width), int(bottom*self.height), int(width*self.width), int(height*self.height))
-        self.elems.append((srect, elem))
         elem.rect = srect
-        elem.draw()
-        pygame.draw.rect(screen, PEN, srect, 1, 1)
+        self.elems.append(elem)
+
+    def draw(self):
+        screen.fill(BACKGROUND)
+        for elem in self.elems:
+            elem.draw()
+            pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
 
     def on_event(self,event):
         if self.is_playing:
@@ -170,8 +175,8 @@ class Layout:
             return
         
         x, y = pygame.mouse.get_pos()
-        for rect, elem in self.elems:
-            left, bottom, width, height = rect
+        for elem in self.elems:
+            left, bottom, width, height = elem.rect
             if x>=left and x<left+width and y>=bottom and y<bottom+height:
                 # mouse position is within this element
                 self._dispatch_event(elem, event, x, y)
@@ -180,18 +185,15 @@ class Layout:
         if event.type == pygame.MOUSEBUTTONDOWN:
             self.is_pressed = True
             elem.on_mouse_down(x,y)
-            pygame.display.flip()
         elif event.type == pygame.MOUSEBUTTONUP:
             self.is_pressed = False
             elem.on_mouse_up(x,y)
-            pygame.display.flip()
         elif event.type == pygame.MOUSEMOTION and self.is_pressed:
             elem.on_mouse_move(x,y)
-            pygame.display.flip()
 
     def drawing_area(self):
-        assert isinstance(self.elems[0][1], DrawingArea)
-        return self.elems[0][1]
+        assert isinstance(self.elems[0], DrawingArea)
+        return self.elems[0]
 
     def toggle_playing(self):
         self.is_playing = not self.is_playing
@@ -207,11 +209,14 @@ class DrawingArea:
         left, bottom, width, height = self.rect
         screen.blit(m.curr_frame(), (left, bottom), (0, 0, width, height))
     def on_mouse_down(self,x,y):
-        layout.tool.on_mouse_down(x,y)
+        left, bottom, _, _ = self.rect
+        layout.tool.on_mouse_down(x-left,y-bottom)
     def on_mouse_up(self,x,y):
-        layout.tool.on_mouse_up(x,y)
+        left, bottom, _, _ = self.rect
+        layout.tool.on_mouse_up(x-left,y-bottom)
     def on_mouse_move(self,x,y):
-        layout.tool.on_mouse_move(x,y)
+        left, bottom, _, _ = self.rect
+        layout.tool.on_mouse_move(x-left,y-bottom)
     def get_frame(self):
         _, _, width, height = self.rect
         frame = make_surface(width, height)
@@ -264,13 +269,7 @@ class Movie:
 
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
-        if pos == self.pos:
-            return
-
-        self.frames[self.pos] = layout.drawing_area().get_frame()
         self.pos = pos
-        layout.drawing_area().draw()
-        pygame.display.flip()
 
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
     def prev_frame(self): self.seek_frame((self.pos - 1) % len(self.frames))
@@ -280,30 +279,21 @@ class Movie:
         self.next_frame()
 
     def insert_frame_at_pos(self, pos, frame):
-        assert pos >= 0 and pos <= len(self.frames)
-        self.frames[self.pos] = layout.drawing_area().get_frame()
-
-        self.pos = pos
+        self.seek_frame(pos)
         self.frames.insert(self.pos, frame)
-        layout.drawing_area().draw()
-        pygame.display.flip()
 
     # TODO: this works with pos modified from the outside but it's scary as the API
     def remove_frame(self, new_pos=-1):
         if len(self.frames) <= 1:
             return
 
-        removed = layout.drawing_area().get_frame()
-
+        removed = self.frames[self.pos]
         del self.frames[self.pos]
         if self.pos >= len(self.frames):
             self.pos = 0
 
         if new_pos >= 0:
             self.pos = new_pos
-
-        layout.drawing_area().draw()
-        pygame.display.flip()
 
         return removed
 
@@ -390,7 +380,7 @@ def init_layout():
             layout.add((x,y,color_w,color_w), ToolSelectionButton(tool))
             i += 1
 
-    pygame.display.flip()
+    layout.draw()
 
 init_layout()
 
@@ -439,6 +429,11 @@ while not escape:
                 
       else:
           layout.on_event(event)
+
+      # TODO: might be good to optimize repainting beyond "just repaint everything
+      # upon every event"
+      layout.draw()
+      pygame.display.flip()
    except:
     print('INTERNAL ERROR (printing and continuing)')
     import traceback
