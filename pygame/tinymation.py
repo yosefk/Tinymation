@@ -161,6 +161,9 @@ class Layout:
         self.elems.append(elem)
 
     def draw(self):
+        if self.is_pressed and self.focus_elem is self.drawing_area():
+            self.drawing_area().draw()
+            return
         screen.fill(BACKGROUND)
         for elem in self.elems:
             elem.draw()
@@ -178,6 +181,7 @@ class Layout:
         for elem in self.elems:
             left, bottom, width, height = elem.rect
             if x>=left and x<left+width and y>=bottom and y<bottom+height:
+                self.focus_elem = elem
                 # mouse position is within this element
                 self._dispatch_event(elem, event, x, y)
 
@@ -207,7 +211,8 @@ class DrawingArea:
         except:
             return
         left, bottom, width, height = self.rect
-        screen.blit(m.curr_frame(), (left, bottom), (0, 0, width, height))
+        frame = m.curr_frame()
+        screen.blit(frame, (left, bottom), (0, 0, width, height))
     def on_mouse_down(self,x,y):
         left, bottom, _, _ = self.rect
         layout.tool.on_mouse_down(x-left,y-bottom)
@@ -237,12 +242,43 @@ class TimelineArea:
         except:
             return
         left, bottom, width, height = self.rect
-        thumb_width = movie.curr_frame().get_width() * height // movie.curr_frame().get_height()
+        frame_width = movie.curr_frame().get_width()
+        frame_height = movie.curr_frame().get_height()
+        #thumb_width = movie.curr_frame().get_width() * height // movie.curr_frame().get_height()
         x = left
-        for frame in movie.frames:
+        factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.14]
+        i = 0
+
+        def draw_frame(frame, x, thumb_width):
             scaled = scale_image(frame, thumb_width, height)
             screen.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
-            x += thumb_width
+            pygame.draw.rect(screen, PEN, (x, bottom, thumb_width, height), 1, 1)
+
+        def thumb_width(factor):
+            return int((frame_width * height // frame_height) * factor)
+
+        # current frame
+        curr_frame_width = thumb_width(1)
+        centerx = (left+width)/2
+        draw_frame(movie.curr_frame(), centerx - curr_frame_width/2, curr_frame_width)
+
+        # next frames
+        x = centerx + curr_frame_width/2
+        for i,frame in enumerate(movie.frames[movie.pos+1:]):
+            if i >= len(factors):
+                break
+            ith_frame_width = thumb_width(factors[i])
+            draw_frame(frame, x, ith_frame_width)
+            x += ith_frame_width
+
+        # previous frames
+        x = centerx - curr_frame_width/2
+        for i,frame in enumerate(reversed((movie.frames[0:movie.pos]))):
+            if i >= len(factors):
+                break
+            ith_frame_width = thumb_width(factors[i])
+            x -= ith_frame_width
+            draw_frame(frame, x, ith_frame_width)
 
 class ToolSelectionButton:
     def __init__(self, tool):
@@ -366,10 +402,14 @@ def remove_frame():
     history.append(RemoveFrameHistoryItem(pos, removed))
 
 def next_frame():
+    if movie.pos >= len(movie.frames)-1:
+        return
     append_seek_frame_history_item_if_frame_is_dirty()
     movie.next_frame()
 
 def prev_frame():
+    if movie.pos <= 0:
+        return
     append_seek_frame_history_item_if_frame_is_dirty()
     movie.prev_frame()
 
@@ -429,8 +469,18 @@ time_delay = 1000//12 # we play at 12 fps
 timer_event = TIMER_EVENT
 pygame.time.set_timer(timer_event, time_delay)
 
+interesting_events = [
+    pygame.KEYDOWN,
+    pygame.MOUSEMOTION,
+    pygame.MOUSEBUTTONDOWN,
+    pygame.MOUSEBUTTONUP,
+    TIMER_EVENT,
+]
+
 while not escape: 
   for event in pygame.event.get():
+   if event.type not in interesting_events:
+       continue
    try:
       if event.type == pygame.KEYDOWN:
         if event.key == 27: # ESC pressed
@@ -460,10 +510,7 @@ while not escape:
 
       # TODO: might be good to optimize repainting beyond "just repaint everything
       # upon every event"
-      if event.type == pygame.MOUSEMOTION:
-          layout.drawing_area().draw()
-      else:
-          layout.draw()
+      layout.draw()
       pygame.display.flip()
    except:
     print('INTERNAL ERROR (printing and continuing)')
