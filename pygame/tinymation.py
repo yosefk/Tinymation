@@ -152,6 +152,7 @@ class Layout:
         _, _, self.width, self.height = screen.get_rect()
         self.is_pressed = False
         self.is_playing = False
+        self.playing_index = 0
         self.tool = PenTool()
 
     def add(self, rect, elem):
@@ -174,7 +175,7 @@ class Layout:
             # TODO: this isn't the way - should allow the stop button to be pressed
             # need to disable the other operations differently from this
             if event.type == TIMER_EVENT:
-                next_frame()
+                self.playing_index = (self.playing_index + 1) % len(movie.frames)
             return
         
         x, y = pygame.mouse.get_pos()
@@ -211,7 +212,7 @@ class DrawingArea:
         except:
             return
         left, bottom, width, height = self.rect
-        frame = m.curr_frame()
+        frame = m.frames[layout.playing_index] if layout.is_playing else m.curr_frame()
         screen.blit(frame, (left, bottom), (0, 0, width, height))
     def on_mouse_down(self,x,y):
         left, bottom, _, _ = self.rect
