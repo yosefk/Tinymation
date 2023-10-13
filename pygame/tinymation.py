@@ -228,6 +228,22 @@ class DrawingArea:
         frame.fill(BACKGROUND)
         return frame
 
+class TimelineArea:
+    def __init__(self):
+        pass
+    def draw(self):
+        try:
+            m = movie
+        except:
+            return
+        left, bottom, width, height = self.rect
+        thumb_width = movie.curr_frame().get_width() * height // movie.curr_frame().get_height()
+        x = left
+        for frame in movie.frames:
+            scaled = scale_image(frame, thumb_width, height)
+            screen.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
+            x += thumb_width
+
 class ToolSelectionButton:
     def __init__(self, tool):
         self.tool = tool
@@ -265,10 +281,13 @@ TOOLS = {
 class Movie:
     def __init__(self):
         self.frames = [layout.drawing_area().get_frame()]
+        self.thumbnails = []
         self.pos = 0
+        self.update_thumbnail()
 
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
+        self.update_thumbnail()
         self.pos = pos
 
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
@@ -277,10 +296,13 @@ class Movie:
     def insert_frame(self):
         self.frames.insert(self.pos+1, layout.drawing_area().new_frame())
         self.next_frame()
+        self.update_thumbnail()
 
     def insert_frame_at_pos(self, pos, frame):
-        self.seek_frame(pos)
+        assert pos >= 0 and pos <= len(self.frames)
+        self.pos = pos
         self.frames.insert(self.pos, frame)
+        self.update_thumbnail()
 
     # TODO: this works with pos modified from the outside but it's scary as the API
     def remove_frame(self, new_pos=-1):
@@ -299,6 +321,10 @@ class Movie:
 
     def curr_frame(self):
         return self.frames[self.pos]
+
+    def update_thumbnail(self):
+        # TODO actually use thumbnails
+        pass
 
 class SeekFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
@@ -335,8 +361,9 @@ def insert_frame():
     history.append(InsertFrameHistoryItem(movie.pos))
 
 def remove_frame():
+    pos = movie.pos
     removed = movie.remove_frame()
-    history.append(RemoveFrameHistoryItem(movie.pos if movie.pos else len(movie.frames), removed))
+    history.append(RemoveFrameHistoryItem(pos, removed))
 
 def next_frame():
     append_seek_frame_history_item_if_frame_is_dirty()
@@ -367,6 +394,7 @@ def init_layout():
     global layout
     layout = Layout()
     layout.add((0.15,0.15,0.85,0.85), DrawingArea())
+    layout.add((0, 0, 1, 0.15), TimelineArea())
     layout.add((0,0.85,0.075, 0.15), ToolSelectionButton(TOOLS['pencil']))
     layout.add((0,0.15,0.075, 0.3), FunctionButton(insert_frame))
     color_w = 0.025
@@ -432,7 +460,10 @@ while not escape:
 
       # TODO: might be good to optimize repainting beyond "just repaint everything
       # upon every event"
-      layout.draw()
+      if event.type == pygame.MOUSEMOTION:
+          layout.drawing_area().draw()
+      else:
+          layout.draw()
       pygame.display.flip()
    except:
     print('INTERNAL ERROR (printing and continuing)')
