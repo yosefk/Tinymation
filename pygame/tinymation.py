@@ -236,7 +236,12 @@ class DrawingArea:
 
 class TimelineArea:
     def __init__(self):
-        pass
+        self.frame_boundaries = set()
+        self.prevx = 0
+    def x2frame(self, x):
+        for left, right, pos in self.frame_boundaries:
+            if x >= left and x <= right:
+                return pos
     def draw(self):
         try:
             m = movie
@@ -250,10 +255,14 @@ class TimelineArea:
         factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.14]
         i = 0
 
+        self.frame_boundaries = set()
+
         def draw_frame(frame, x, thumb_width):
-            scaled = scale_image(frame, thumb_width, height)
+            surface, pos = frame
+            scaled = scale_image(surface, thumb_width, height)
             screen.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             pygame.draw.rect(screen, PEN, (x, bottom, thumb_width, height), 1, 1)
+            self.frame_boundaries.add((x, x+thumb_width, pos))
 
         def thumb_width(factor):
             return int((frame_width * height // frame_height) * factor)
@@ -261,11 +270,11 @@ class TimelineArea:
         # current frame
         curr_frame_width = thumb_width(1)
         centerx = (left+width)/2
-        draw_frame(movie.curr_frame(), centerx - curr_frame_width/2, curr_frame_width)
+        draw_frame((movie.curr_frame(), movie.pos), centerx - curr_frame_width/2, curr_frame_width)
 
         # next frames
         x = centerx + curr_frame_width/2
-        for i,frame in enumerate(movie.frames[movie.pos+1:]):
+        for i,frame in enumerate(movie.frames_and_positions(movie.pos+1,len(movie.frames))):
             if i >= len(factors):
                 break
             ith_frame_width = thumb_width(factors[i])
@@ -274,12 +283,37 @@ class TimelineArea:
 
         # previous frames
         x = centerx - curr_frame_width/2
-        for i,frame in enumerate(reversed((movie.frames[0:movie.pos]))):
+        for i,frame in enumerate(reversed(list(movie.frames_and_positions(0,movie.pos)))):
             if i >= len(factors):
                 break
             ith_frame_width = thumb_width(factors[i])
             x -= ith_frame_width
             draw_frame(frame, x, ith_frame_width)
+
+    def on_mouse_down(self,x,y):
+        print('down')
+        self.prevx = x
+    def on_mouse_up(self,x,y):
+        self.on_mouse_move(x,y)
+        print('up')
+    def on_mouse_move(self,x,y):
+        print('should diff',x,self.prevx)
+        prev_pos = self.x2frame(self.prevx)
+        curr_pos = self.x2frame(x)
+        print(prev_pos, curr_pos)
+        if prev_pos is None and curr_pos is None:
+            self.prevx = x
+            print('ret')
+            return
+        if curr_pos is not None and prev_pos is not None:
+            pos_dist = prev_pos - curr_pos
+        else:
+            print('checking x vs prevx',x,self.prevx,x>self.prevx)
+            pos_dist = -1 if x > self.prevx else 1
+        self.prevx = x
+        print(pos_dist)
+        if pos_dist != 0:
+            movie.seek_frame(min(max(0, movie.pos + pos_dist), len(movie.frames)-1))
 
 class ToolSelectionButton:
     def __init__(self, tool):
@@ -320,11 +354,9 @@ class Movie:
         self.frames = [layout.drawing_area().get_frame()]
         self.thumbnails = []
         self.pos = 0
-        self.update_thumbnail()
 
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
-        self.update_thumbnail()
         self.pos = pos
 
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
@@ -333,13 +365,11 @@ class Movie:
     def insert_frame(self):
         self.frames.insert(self.pos+1, layout.drawing_area().new_frame())
         self.next_frame()
-        self.update_thumbnail()
 
     def insert_frame_at_pos(self, pos, frame):
         assert pos >= 0 and pos <= len(self.frames)
         self.pos = pos
         self.frames.insert(self.pos, frame)
-        self.update_thumbnail()
 
     # TODO: this works with pos modified from the outside but it's scary as the API
     def remove_frame(self, new_pos=-1):
@@ -359,9 +389,8 @@ class Movie:
     def curr_frame(self):
         return self.frames[self.pos]
 
-    def update_thumbnail(self):
-        # TODO actually use thumbnails
-        pass
+    def frames_and_positions(self, pos_begin, pos_end):
+        return zip(self.frames[pos_begin:pos_end], range(pos_begin, pos_end))
 
 class SeekFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
