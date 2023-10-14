@@ -320,6 +320,7 @@ class TimelineArea:
             self.combined_mask = masks[0]
         else:
             mask = masks[0]
+            # FIXME: mask has a different color from the rest this way
             mask.blits([(m, (0, 0), (0, 0, mask.get_width(), mask.get_height())) for m in masks[1:]])
             self.combined_mask = mask
         return self.combined_mask
@@ -343,9 +344,8 @@ class TimelineArea:
         factors = self.factors
         self.frame_boundaries = set()
 
-        def draw_frame(frame, x, thumb_width):
-            surface, pos = frame
-            scaled = scale_image(surface, thumb_width, height)
+        def draw_frame(pos, x, thumb_width):
+            scaled = movie.get_thumbnail(pos, thumb_width, height)
             screen.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             pygame.draw.rect(screen, PEN, (x, bottom, thumb_width, height), 1, 1)
             self.frame_boundaries.add((x, x+thumb_width, pos))
@@ -356,25 +356,25 @@ class TimelineArea:
         # current frame
         curr_frame_width = thumb_width(1)
         centerx = (left+width)/2
-        draw_frame((movie.curr_frame(), movie.pos), centerx - curr_frame_width/2, curr_frame_width)
+        draw_frame(movie.pos, centerx - curr_frame_width/2, curr_frame_width)
 
         # next frames
         x = centerx + curr_frame_width/2
-        for i,frame in enumerate(movie.frames_and_positions(movie.pos+1,len(movie.frames))):
+        for i,pos in enumerate(range(movie.pos+1,len(movie.frames))):
             if i >= len(factors):
                 break
             ith_frame_width = thumb_width(factors[i])
-            draw_frame(frame, x, ith_frame_width)
+            draw_frame(pos, x, ith_frame_width)
             x += ith_frame_width
 
         # previous frames
         x = centerx - curr_frame_width/2
-        for i,frame in enumerate(reversed(list(movie.frames_and_positions(0,movie.pos)))):
+        for i,pos in enumerate(reversed(list(range(0,movie.pos)))):
             if i >= len(factors):
                 break
             ith_frame_width = thumb_width(factors[i])
             x -= ith_frame_width
-            draw_frame(frame, x, ith_frame_width)
+            draw_frame(pos, x, ith_frame_width)
 
     def on_mouse_down(self,x,y):
         self.prevx = x
@@ -433,29 +433,53 @@ class LightTableMask:
         self.surface = None
         self.color = None
         self.transparency = None
+        self.movie_pos = None
+        self.movie_len = None
+
+class Thumbnail:
+    def __init__(self):
+        self.surface = None
+        self.width = None
+        self.height = None
+        self.movie_pos = None
+        self.movie_len = None
 
 class Movie:
     def __init__(self):
         self.frames = [layout.drawing_area().get_frame()]
         self.pos = 0
         self.mask_cache = {}
+        self.thumbnail_cache = {}
 
     def get_mask(self, pos, color, transparency):
+        assert pos != self.pos
         mask = self.mask_cache.setdefault(pos, LightTableMask())
-        if mask.color == color and mask.transparency == transparency:
+        if mask.color == color and mask.transparency == transparency \
+            and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
             return mask.surface
         mask.surface = pen2mask(self.frames[pos], color, transparency)
         mask.color = color
         mask.transparency = transparency
+        mask.movie_pos = self.pos
+        mask.movie_len = len(self.frames)
         return mask.surface
 
-    def clear_mask_cache(self):
-        self.mask_cache = {}
+    def get_thumbnail(self, pos, width, height):
+        thumbnail = self.thumbnail_cache.setdefault(pos, Thumbnail())
+        # self.pos is "volatile" (being edited right now) - don't cache 
+        if pos != self.pos and thumbnail.width == width and thumbnail.height == height and \
+            thumbnail.movie_pos == self.pos and thumbnail.movie_len == len(self.frames):
+            return thumbnail.surface
+        thumbnail.movie_pos = self.pos
+        thumbnail.movie_len = len(self.frames)
+        thumbnail.width = width
+        thumbnail.height = height
+        thumbnail.surface = scale_image(self.frames[pos], width, height)
+        return thumbnail.surface
 
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
         self.pos = pos
-        self.clear_mask_cache()
 
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
     def prev_frame(self): self.seek_frame((self.pos - 1) % len(self.frames))
@@ -468,14 +492,11 @@ class Movie:
         assert pos >= 0 and pos <= len(self.frames)
         self.pos = pos
         self.frames.insert(self.pos, frame)
-        self.clear_mask_cache()
 
     # TODO: this works with pos modified from the outside but it's scary as the API
     def remove_frame(self, new_pos=-1):
         if len(self.frames) <= 1:
             return
-
-        self.clear_mask_cache()
 
         removed = self.frames[self.pos]
         del self.frames[self.pos]
@@ -489,9 +510,6 @@ class Movie:
 
     def curr_frame(self):
         return self.frames[self.pos]
-
-    def frames_and_positions(self, pos_begin, pos_end):
-        return zip(self.frames[pos_begin:pos_end], range(pos_begin, pos_end))
 
 class SeekFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
