@@ -291,27 +291,20 @@ class TimelineArea:
             draw_frame(frame, x, ith_frame_width)
 
     def on_mouse_down(self,x,y):
-        print('down')
         self.prevx = x
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
-        print('up')
     def on_mouse_move(self,x,y):
-        print('should diff',x,self.prevx)
         prev_pos = self.x2frame(self.prevx)
         curr_pos = self.x2frame(x)
-        print(prev_pos, curr_pos)
         if prev_pos is None and curr_pos is None:
             self.prevx = x
-            print('ret')
             return
         if curr_pos is not None and prev_pos is not None:
             pos_dist = prev_pos - curr_pos
         else:
-            print('checking x vs prevx',x,self.prevx,x>self.prevx)
             pos_dist = -1 if x > self.prevx else 1
         self.prevx = x
-        print(pos_dist)
         if pos_dist != 0:
             movie.seek_frame(min(max(0, movie.pos + pos_dist), len(movie.frames)-1))
 
