@@ -200,6 +200,10 @@ class Layout:
         assert isinstance(self.elems[0], DrawingArea)
         return self.elems[0]
 
+    def timeline_area(self):
+        assert isinstance(self.elems[1], TimelineArea)
+        return self.elems[1]
+
     def toggle_playing(self):
         self.is_playing = not self.is_playing
             
@@ -225,12 +229,11 @@ class DrawingArea:
         left, bottom, width, height = self.rect
         frame = m.frames[layout.playing_index] if layout.is_playing else m.curr_frame()
         screen.blit(frame, (left, bottom), (0, 0, width, height))
-        if not layout.is_playing and m.pos > 0:
-            prev = m.get_mask(m.pos-1, (0, 0, 128), 0.3)
-            screen.blit(prev, (left, bottom), (0, 0, width, height))
-        if not layout.is_playing and m.pos < len(m.frames)-1:
-            prev = m.get_mask(m.pos+1, (0, 128, 0), 0.3)
-            screen.blit(prev, (left, bottom), (0, 0, width, height))
+
+        if not layout.is_playing:
+            mask = layout.timeline_area().combined_light_table_mask()
+            if mask:
+                screen.blit(mask, (left, bottom), (0, 0, width, height))
     def on_mouse_down(self,x,y):
         left, bottom, _, _ = self.rect
         layout.tool.on_mouse_down(x-left,y-bottom)
@@ -253,8 +256,74 @@ class DrawingArea:
 
 class TimelineArea:
     def __init__(self):
+        # stuff for drawing the timeline
         self.frame_boundaries = set()
         self.prevx = 0
+        self.factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.14]
+
+        # stuff for light table [what positions are enabled and what the resulting
+        # mask to be rendered together with the current frame is]
+        self.on_light_table = {}
+        for pos_dist in range(-len(self.factors),len(self.factors)+1):
+            self.on_light_table[pos_dist] = False
+        self.on_light_table[-2] = True
+        self.on_light_table[-1] = True
+        self.on_light_table[1] = True
+        self.on_light_table[2] = True
+        # the order in which we traverse the masks matters, for one thing,
+        # because we might cover the same position distance from movie.pos twice
+        # due to wraparound, and we want to decide if it's covered as being
+        # "before" or "after" movie pos [it affects the mask color]
+        self.traversal_order = []
+        for pos_dist in range(1,len(self.factors)+1):
+            self.traversal_order.append(-pos_dist)
+            self.traversal_order.append(pos_dist)
+
+        # we can precombine the light table mask which doesn't change
+        # unless we seek to a different frame, or the the definition of which
+        # frames are on the light table changes
+        self.combined_mask = None
+        self.combined_on_light_table = None
+        self.combined_movie_pos = None
+        self.combined_movie_len = None
+
+    def light_table_masks(self):
+        masks = []
+        # TODO: order 
+        covered_positions = {movie.pos} # the current position is definitely covered,
+        # don't paint over it...
+        for pos_dist in self.traversal_order:
+            if not self.on_light_table[pos_dist]:
+                continue
+            pos = (movie.pos + pos_dist) % len(movie.frames)
+            if pos in covered_positions:
+                continue # for short movies, avoid covering the same position twice
+                # upon wraparound
+            covered_positions.add(pos)
+            color = (0,0,128) if pos_dist < 0 else (0,128,0)
+            transparency = 0.3
+            masks.append(movie.get_mask(pos, color, transparency))
+        return masks
+
+    def combined_light_table_mask(self):
+        if movie.pos == self.combined_movie_pos and self.on_light_table == self.combined_on_light_table \
+                and len(movie.frames) == self.combined_movie_len:
+            return self.combined_mask
+        self.combined_movie_pos = movie.pos
+        self.combined_movie_len = len(movie.frames)
+        self.combined_on_light_table = self.on_light_table.copy()
+        
+        masks = self.light_table_masks()
+        if len(masks) == 0:
+            self.combined_mask = None
+        elif len(masks) == 1:
+            self.combined_mask = masks[0]
+        else:
+            mask = masks[0]
+            mask.blits([(m, (0, 0), (0, 0, mask.get_width(), mask.get_height())) for m in masks[1:]])
+            self.combined_mask = mask
+        return self.combined_mask
+
     def x2frame(self, x):
         for left, right, pos in self.frame_boundaries:
             if x >= left and x <= right:
@@ -269,9 +338,9 @@ class TimelineArea:
         frame_height = movie.curr_frame().get_height()
         #thumb_width = movie.curr_frame().get_width() * height // movie.curr_frame().get_height()
         x = left
-        factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.14]
         i = 0
 
+        factors = self.factors
         self.frame_boundaries = set()
 
         def draw_frame(frame, x, thumb_width):
