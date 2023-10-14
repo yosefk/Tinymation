@@ -203,6 +203,17 @@ class Layout:
     def toggle_playing(self):
         self.is_playing = not self.is_playing
             
+def pen2mask(image, rgb, transparency):
+    image_alpha = pygame.Surface((image.get_width(), image.get_height()), pygame.SRCALPHA, image.copy())
+    arr = pygame.surfarray.array2d(image)
+    pen = image.map_rgb(PEN)
+    color = image_alpha.map_rgb(rgb)
+    bitmask = (arr==pen)
+    arr = bitmask*color
+    pygame.surfarray.blit_array(image_alpha, arr)
+    image_alpha.set_alpha(int(transparency*255))
+    return image_alpha
+
 class DrawingArea:
     def __init__(self):
         pass
@@ -214,6 +225,12 @@ class DrawingArea:
         left, bottom, width, height = self.rect
         frame = m.frames[layout.playing_index] if layout.is_playing else m.curr_frame()
         screen.blit(frame, (left, bottom), (0, 0, width, height))
+        if not layout.is_playing and m.pos > 0:
+            prev = pen2mask(m.frames[m.pos-1], (0, 0, 128), 0.3)
+            screen.blit(prev, (left, bottom), (0, 0, width, height))#, pygame.BLEND_PREMULTIPLIED)
+        if not layout.is_playing and m.pos < len(m.frames)-1:
+            prev = pen2mask(m.frames[m.pos+1], (0, 128, 0), 0.3)
+            screen.blit(prev, (left, bottom), (0, 0, width, height))#, pygame.BLEND_PREMULTIPLIED)
     def on_mouse_down(self,x,y):
         left, bottom, _, _ = self.rect
         layout.tool.on_mouse_down(x-left,y-bottom)
