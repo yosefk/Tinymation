@@ -226,11 +226,11 @@ class DrawingArea:
         frame = m.frames[layout.playing_index] if layout.is_playing else m.curr_frame()
         screen.blit(frame, (left, bottom), (0, 0, width, height))
         if not layout.is_playing and m.pos > 0:
-            prev = pen2mask(m.frames[m.pos-1], (0, 0, 128), 0.3)
-            screen.blit(prev, (left, bottom), (0, 0, width, height))#, pygame.BLEND_PREMULTIPLIED)
+            prev = m.get_mask(m.pos-1, (0, 0, 128), 0.3)
+            screen.blit(prev, (left, bottom), (0, 0, width, height))
         if not layout.is_playing and m.pos < len(m.frames)-1:
-            prev = pen2mask(m.frames[m.pos+1], (0, 128, 0), 0.3)
-            screen.blit(prev, (left, bottom), (0, 0, width, height))#, pygame.BLEND_PREMULTIPLIED)
+            prev = m.get_mask(m.pos+1, (0, 128, 0), 0.3)
+            screen.blit(prev, (left, bottom), (0, 0, width, height))
     def on_mouse_down(self,x,y):
         left, bottom, _, _ = self.rect
         layout.tool.on_mouse_down(x-left,y-bottom)
@@ -359,15 +359,34 @@ TOOLS = {
     'eraser-big': Tool(PenTool(BACKGROUND, WIDTH*20), eraser_cursor, 'tT'),
 }
 
+class LightTableMask:
+    def __init__(self):
+        self.surface = None
+        self.color = None
+        self.transparency = None
+
 class Movie:
     def __init__(self):
         self.frames = [layout.drawing_area().get_frame()]
-        self.thumbnails = []
         self.pos = 0
+        self.mask_cache = {}
+
+    def get_mask(self, pos, color, transparency):
+        mask = self.mask_cache.setdefault(pos, LightTableMask())
+        if mask.color == color and mask.transparency == transparency:
+            return mask.surface
+        mask.surface = pen2mask(self.frames[pos], color, transparency)
+        mask.color = color
+        mask.transparency = transparency
+        return mask.surface
+
+    def clear_mask_cache(self):
+        self.mask_cache = {}
 
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
         self.pos = pos
+        self.clear_mask_cache()
 
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
     def prev_frame(self): self.seek_frame((self.pos - 1) % len(self.frames))
@@ -380,11 +399,14 @@ class Movie:
         assert pos >= 0 and pos <= len(self.frames)
         self.pos = pos
         self.frames.insert(self.pos, frame)
+        self.clear_mask_cache()
 
     # TODO: this works with pos modified from the outside but it's scary as the API
     def remove_frame(self, new_pos=-1):
         if len(self.frames) <= 1:
             return
+
+        self.clear_mask_cache()
 
         removed = self.frames[self.pos]
         del self.frames[self.pos]
