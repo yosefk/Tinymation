@@ -22,7 +22,9 @@ def drawLine(screen, pos1, pos2, color, width):
 def make_surface(width, height):
     return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
 
-def scale_image(surface, width, height):
+def scale_image(surface, width, height=None):
+    if not height:
+        height = int(surface.get_height() * width / surface.get_width())
     return pg.transform.smoothscale(surface, (width, height))
 
 def load_cursor(file, flip=False):
@@ -206,6 +208,7 @@ class Layout:
 
     def toggle_playing(self):
         self.is_playing = not self.is_playing
+        self.playing_index = 0
             
 def pen2mask(image, rgb, transparency):
     image_alpha = pygame.Surface((image.get_width(), image.get_height()), pygame.SRCALPHA, image.copy())
@@ -257,19 +260,22 @@ class DrawingArea:
 class TimelineArea:
     def __init__(self):
         # stuff for drawing the timeline
-        self.frame_boundaries = set()
+        self.frame_boundaries = []
+        self.eye_boundaries = []
         self.prevx = 0
         self.factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.14]
+
+        self.eye_open = pg.image.load('eye_open.png')
+        self.eye_open = scale_image(self.eye_open, int(screen.get_width() * 0.15*0.14))
+        self.eye_shut = pg.image.load('eye_shut.png')
+        self.eye_shut = scale_image(self.eye_shut, int(screen.get_width() * 0.15*0.14))
 
         # stuff for light table [what positions are enabled and what the resulting
         # mask to be rendered together with the current frame is]
         self.on_light_table = {}
         for pos_dist in range(-len(self.factors),len(self.factors)+1):
             self.on_light_table[pos_dist] = False
-        self.on_light_table[-2] = True
         self.on_light_table[-1] = True
-        self.on_light_table[1] = True
-        self.on_light_table[2] = True
         # the order in which we traverse the masks matters, for one thing,
         # because we might cover the same position distance from movie.pos twice
         # due to wraparound, and we want to decide if it's covered as being
@@ -292,6 +298,11 @@ class TimelineArea:
         # TODO: order 
         covered_positions = {movie.pos} # the current position is definitely covered,
         # don't paint over it...
+
+        num_enabled_pos = sum([enabled for pos_dist, enabled in self.on_light_table.items() if pos_dist>0])
+        num_enabled_neg = sum([enabled for pos_dist, enabled in self.on_light_table.items() if pos_dist<0])
+        curr_pos = 0
+        curr_neg = 0
         for pos_dist in self.traversal_order:
             if not self.on_light_table[pos_dist]:
                 continue
@@ -300,14 +311,23 @@ class TimelineArea:
                 continue # for short movies, avoid covering the same position twice
                 # upon wraparound
             covered_positions.add(pos)
-            color = (0,0,128) if pos_dist < 0 else (0,128,0)
+            if pos_dist > 0:
+                curr = curr_pos
+                num = num_enabled_pos
+                curr_pos += 1
+            else:
+                curr = curr_neg
+                num = num_enabled_neg
+                curr_neg += 1
+            brightness = int((200 * (num - curr - 1) / (num - 1)) + 55 if num > 1 else 255)
+            color = (0,0,brightness) if pos_dist < 0 else (0,brightness,0)
             transparency = 0.3
             masks.append(movie.get_mask(pos, color, transparency))
         return masks
 
     def combined_light_table_mask(self):
         if movie.pos == self.combined_movie_pos and self.on_light_table == self.combined_on_light_table \
-                and len(movie.frames) == self.combined_movie_len:
+                and len(movie.frames) == self.combined_movie_len and self.combined_mask:
             return self.combined_mask
         self.combined_movie_pos = movie.pos
         self.combined_movie_len = len(movie.frames)
@@ -319,9 +339,14 @@ class TimelineArea:
         elif len(masks) == 1:
             self.combined_mask = masks[0]
         else:
-            mask = masks[0]
-            # FIXME: mask has a different color from the rest this way
+            mask = masks[0].copy()
+            alphas = []
+            for m in masks[1:]:
+                alphas.append(m.get_alpha())
+                m.set_alpha(255) # TODO: this assumes the same transparency in all masks - might want to change
             mask.blits([(m, (0, 0), (0, 0, mask.get_width(), mask.get_height())) for m in masks[1:]])
+            for m,a in zip(masks[1:],alphas):
+                m.set_alpha(a)
             self.combined_mask = mask
         return self.combined_mask
 
@@ -342,13 +367,20 @@ class TimelineArea:
         i = 0
 
         factors = self.factors
-        self.frame_boundaries = set()
+        self.frame_boundaries = []
+        self.eye_boundaries = []
 
         def draw_frame(pos, x, thumb_width):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
             screen.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             pygame.draw.rect(screen, PEN, (x, bottom, thumb_width, height), 1, 1)
-            self.frame_boundaries.add((x, x+thumb_width, pos))
+            self.frame_boundaries.append((x, x+thumb_width, pos))
+            if pos != movie.pos:
+                pos_dist = pos - movie.pos
+                eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
+                eye_x = x + 2 if pos > movie.pos else x+thumb_width-eye.get_width() - 2
+                screen.blit(eye, (eye_x, bottom), eye.get_rect())
+                self.eye_boundaries.append((eye_x, bottom, eye_x+eye.get_width(), bottom+eye.get_height(), pos_dist))
 
         def thumb_width(factor):
             return int((frame_width * height // frame_height) * factor)
@@ -376,7 +408,13 @@ class TimelineArea:
             x -= ith_frame_width
             draw_frame(pos, x, ith_frame_width)
 
+    def update_on_light_table(self,x,y):
+        for left, bottom, right, top, pos_dist in self.eye_boundaries:
+            if y >= bottom and y <= top and x >= left and x <= right:
+                self.on_light_table[pos_dist] = not self.on_light_table[pos_dist]
+
     def on_mouse_down(self,x,y):
+        self.update_on_light_table(x,y)
         self.prevx = x
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
@@ -477,9 +515,14 @@ class Movie:
         thumbnail.surface = scale_image(self.frames[pos], width, height)
         return thumbnail.surface
 
+    def clear_cache(self):
+        self.mask_cache = {}
+        self.thumbnail_cache = {}
+
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
         self.pos = pos
+        self.clear_cache()
 
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
     def prev_frame(self): self.seek_frame((self.pos - 1) % len(self.frames))
@@ -492,11 +535,14 @@ class Movie:
         assert pos >= 0 and pos <= len(self.frames)
         self.pos = pos
         self.frames.insert(self.pos, frame)
+        self.clear_cache()
 
     # TODO: this works with pos modified from the outside but it's scary as the API
     def remove_frame(self, new_pos=-1):
         if len(self.frames) <= 1:
             return
+
+        self.clear_cache()
 
         removed = self.frames[self.pos]
         del self.frames[self.pos]
@@ -659,8 +705,9 @@ while not escape:
 
       # TODO: might be good to optimize repainting beyond "just repaint everything
       # upon every event"
-      layout.draw()
-      pygame.display.flip()
+      if layout.is_playing or event.type != TIMER_EVENT:
+        layout.draw()
+        pygame.display.flip()
    except:
     print('INTERNAL ERROR (printing and continuing)')
     import traceback
