@@ -1,6 +1,10 @@
 import pygame
 import collections
 import numpy as np
+import threading
+import queue
+import imageio
+import os
 
 # this requires numpy to be installed in addition to scikit-image
 from skimage.morphology import flood_fill
@@ -12,6 +16,28 @@ PEN = (20, 20, 20)
 BACKGROUND = (240, 235, 220)
 WIDTH = 5
 CURSOR_SIZE = int(screen.get_width() * 0.07)
+FRAME_RATE = 12
+
+APPDATA = os.getenv('LOCALAPPDATA')
+WD = os.path.join(APPDATA if APPDATA else '.', 'Tinymate-Clips')
+if not os.path.exists(WD):
+    os.makedirs(WD)
+print('clips read from, and saved to',WD)
+
+import time
+def saving_thread():
+    while True:
+        item = saving_queue.get()
+        if not item:
+            break
+        name, frames = item
+        with imageio.get_writer(os.path.join(WD,name+'.gif'), fps=FRAME_RATE, format='GIF-PIL', quantizer=0, mode='I') as writer:
+            for frame in frames:
+                writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2]))
+
+saving_queue = queue.Queue()
+thread = threading.Thread(target=saving_thread) 
+thread.start()
 
 def drawCircle( screen, x, y, color, width):
   pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -179,8 +205,12 @@ class Layout:
         if self.is_playing:
             # TODO: this isn't the way - should allow the stop button to be pressed
             # need to disable the other operations differently from this
-            if event.type == TIMER_EVENT:
+            if event.type == PLAYBACK_TIMER_EVENT:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
+            return
+
+        if event.type == SAVING_TIMER_EVENT and saving_queue.empty():
+            saving_queue.put(('clip', [f.copy() for f in movie.frames]))
             return
         
         x, y = pygame.mouse.get_pos()
@@ -661,18 +691,19 @@ movie = Movie()
 history = []
 escape = False
 
-TIMER_EVENT = pygame.USEREVENT + 1
+PLAYBACK_TIMER_EVENT = pygame.USEREVENT + 1
+SAVING_TIMER_EVENT = pygame.USEREVENT + 2
 
-time_delay = 1000//12 # we play at 12 fps
-timer_event = TIMER_EVENT
-pygame.time.set_timer(timer_event, time_delay)
+pygame.time.set_timer(PLAYBACK_TIMER_EVENT, 1000//FRAME_RATE)
+pygame.time.set_timer(SAVING_TIMER_EVENT, 1000) # we save a copy of the current clip every second
 
 interesting_events = [
     pygame.KEYDOWN,
     pygame.MOUSEMOTION,
     pygame.MOUSEBUTTONDOWN,
     pygame.MOUSEBUTTONUP,
-    TIMER_EVENT,
+    PLAYBACK_TIMER_EVENT,
+    SAVING_TIMER_EVENT,
 ]
 
 while not escape: 
@@ -708,7 +739,7 @@ while not escape:
 
       # TODO: might be good to optimize repainting beyond "just repaint everything
       # upon every event"
-      if layout.is_playing or event.type != TIMER_EVENT:
+      if layout.is_playing or event.type != PLAYBACK_TIMER_EVENT:
         layout.draw()
         pygame.display.flip()
    except:
@@ -716,5 +747,8 @@ while not escape:
     import traceback
     traceback.print_exc()
       
+saving_queue.put(None)
+thread.join()
+
 pygame.display.quit()
 pygame.quit()
