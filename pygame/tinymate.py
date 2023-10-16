@@ -11,7 +11,7 @@ screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
 PEN = (20, 20, 20)
 BACKGROUND = (240, 235, 220)
 WIDTH = 5
-CURSOR_SIZE = 150
+CURSOR_SIZE = int(screen.get_width() * 0.07)
 
 def drawCircle( screen, x, y, color, width):
   pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -27,19 +27,22 @@ def scale_image(surface, width, height=None):
         height = int(surface.get_height() * width / surface.get_width())
     return pg.transform.smoothscale(surface, (width, height))
 
-def load_cursor(file, flip=False):
+def load_cursor(file, flip=False, size=CURSOR_SIZE):
   surface = pg.image.load(file)
-  surface = scale_image(surface, CURSOR_SIZE, CURSOR_SIZE)#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
+  surface = scale_image(surface, size, size)#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
       surface = pg.transform.flip(surface, True, True)
-  for y in range(CURSOR_SIZE):
-      for x in range(CURSOR_SIZE):
+  for y in range(size):
+      for x in range(size):
           r,g,b,a = surface.get_at((x,y))
           surface.set_at((x,y), (r,g,b,min(a,192)))
-  return pg.cursors.Cursor((10,CURSOR_SIZE-7), surface), surface
+  return pg.cursors.Cursor((0,size-1), surface), surface
 
 pencil_cursor = load_cursor('pencil.png')
-eraser_cursor = load_cursor('pencil.png',flip=True)
+eraser_cursor = load_cursor('eraser.png')
+eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5))
+eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2))
+paint_bucket_cursor = load_cursor('paint_bucket.png')
 pg.mouse.set_cursor(pencil_cursor[0])
 
 class HistoryItem:
@@ -462,8 +465,8 @@ Tool = collections.namedtuple('Tool', ['tool', 'cursor', 'chars'])
 TOOLS = {
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
-    'eraser-medium': Tool(PenTool(BACKGROUND, WIDTH*5), eraser_cursor, 'rR'),
-    'eraser-big': Tool(PenTool(BACKGROUND, WIDTH*20), eraser_cursor, 'tT'),
+    'eraser-medium': Tool(PenTool(BACKGROUND, WIDTH*5), eraser_medium_cursor, 'rR'),
+    'eraser-big': Tool(PenTool(BACKGROUND, WIDTH*20), eraser_big_cursor, 'tT'),
 }
 
 class LightTableMask:
@@ -639,7 +642,7 @@ def init_layout():
         for x in np.arange(0,0.15-0.001,color_w):            
             rgb = pygame.Color(0)
             rgb.hsla = (i*10 % 360, 50, 50, 100)
-            tool = Tool(PaintBucketTool(rgb), eraser_cursor, '')
+            tool = Tool(PaintBucketTool(rgb), paint_bucket_cursor, '')
             layout.add((x,y,color_w,color_w), ToolSelectionButton(tool))
             i += 1
 
