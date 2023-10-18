@@ -1,9 +1,11 @@
 import pygame
+import pygame.gfxdraw
 import collections
 import numpy as np
 import threading
 import queue
 import imageio
+import math
 import os
 
 # this requires numpy to be installed in addition to scikit-image
@@ -11,12 +13,15 @@ from skimage.morphology import flood_fill
 pg = pygame
 
 screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+pygame.display.set_caption("Tinymate")
+#screen = pygame.display.set_mode((500, 500))
 
 PEN = (20, 20, 20)
 BACKGROUND = (240, 235, 220)
-WIDTH = 5
+WIDTH = 5 
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 FRAME_RATE = 12
+SCALE = 1
 
 APPDATA = os.getenv('LOCALAPPDATA')
 WD = os.path.join(APPDATA if APPDATA else '.', 'Tinymate-Clips')
@@ -43,7 +48,24 @@ def drawCircle( screen, x, y, color, width):
   pygame.draw.circle( screen, color, ( x, y ), width/2 )
 
 def drawLine(screen, pos1, pos2, color, width):
-  pygame.draw.line( screen, color, pos1, pos2, width )
+    if True or width != 5:
+        pygame.draw.line(screen, color, pos1, pos2, width)
+        return
+    def oft(p,x,y):
+        return p[0]+x, p[1]+y
+    pygame.draw.aaline(screen, color, pos1, pos2)
+    pygame.draw.aaline(screen, color, oft(pos1,-1,-1), oft(pos2,-1,-1))
+    pygame.draw.aaline(screen, color, oft(pos1,-1,1), oft(pos2,-1,1))
+    pygame.draw.aaline(screen, color, oft(pos1,1,1), oft(pos2,1,1))
+    pygame.draw.aaline(screen, color, oft(pos1,1,-1), oft(pos2,1,-1))
+    pygame.draw.aaline(screen, color, oft(pos1,1,0), oft(pos2,1,0))
+    pygame.draw.aaline(screen, color, oft(pos1,-1,0), oft(pos2,-1,0))
+    pygame.draw.aaline(screen, color, oft(pos1,0,1), oft(pos2,0,1))
+    pygame.draw.aaline(screen, color, oft(pos1,0,-1), oft(pos2,0,-1))
+    pygame.draw.aaline(screen, color, oft(pos1,2,0), oft(pos2,2,0))
+    pygame.draw.aaline(screen, color, oft(pos1,-2,0), oft(pos2,-2,0))
+    pygame.draw.aaline(screen, color, oft(pos1,0,2), oft(pos2,0,2))
+    pygame.draw.aaline(screen, color, oft(pos1,0,-2), oft(pos2,0,-2))
 
 def make_surface(width, height):
     return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
@@ -117,7 +139,8 @@ class PenTool:
     def __init__(self, color=PEN, width=WIDTH):
         self.prev_drawn = None
         self.color = color
-        self.width = width
+        self.width = width*SCALE
+        self.circle_width = (width//2)*2*SCALE
         self.history_item = None
 
     def draw(self, rect, cursor_surface):
@@ -127,9 +150,14 @@ class PenTool:
 
     def on_mouse_down(self, x, y):
         self.history_item = HistoryItem()
+        frame = movie.curr_frame()
+        drawCircle(frame, x, y, self.color, self.circle_width)
+        self.on_mouse_move(x,y)
 
     def on_mouse_up(self, x, y):
         self.prev_drawn = None
+        frame = movie.curr_frame()
+        drawCircle(frame, x, y, self.color, self.circle_width)
         if self.history_item:
             self.history_item.optimize()
             history.append(self.history_item)
@@ -141,7 +169,7 @@ class PenTool:
        frame = movie.curr_frame()
        if self.prev_drawn:
             drawLine(frame, self.prev_drawn, (x,y), self.color, self.width)
-       drawCircle(frame, x, y, self.color, self.width)
+       drawCircle(frame, x, y, self.color, self.circle_width)
        self.prev_drawn = (x,y)
 
 class PaintBucketTool:
@@ -263,30 +291,28 @@ class DrawingArea:
         except:
             return
         left, bottom, width, height = self.rect
-        frame = m.frames[layout.playing_index] if layout.is_playing else m.curr_frame()
+        frame = to_scale(m.frames[layout.playing_index] if layout.is_playing else m.curr_frame())
         screen.blit(frame, (left, bottom), (0, 0, width, height))
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
             if mask:
                 screen.blit(mask, (left, bottom), (0, 0, width, height))
-    def on_mouse_down(self,x,y):
+
+    def fix_xy(self,x,y):
         left, bottom, _, _ = self.rect
-        layout.tool.on_mouse_down(x-left,y-bottom)
+        return (x-left)*SCALE, (y-bottom)*SCALE
+    def on_mouse_down(self,x,y):
+        layout.tool.on_mouse_down(*self.fix_xy(x,y))
     def on_mouse_up(self,x,y):
         left, bottom, _, _ = self.rect
-        layout.tool.on_mouse_up(x-left,y-bottom)
+        layout.tool.on_mouse_up(*self.fix_xy(x,y))
     def on_mouse_move(self,x,y):
         left, bottom, _, _ = self.rect
-        layout.tool.on_mouse_move(x-left,y-bottom)
-    def get_frame(self):
-        _, _, width, height = self.rect
-        frame = make_surface(width, height)
-        frame.blit(screen, (0,0), self.rect)
-        return frame
+        layout.tool.on_mouse_move(*self.fix_xy(x,y))
     def new_frame(self):
         _, _, width, height = self.rect
-        frame = make_surface(width, height)
+        frame = make_surface(width*SCALE, height*SCALE)
         frame.fill(BACKGROUND)
         return frame
 
@@ -515,9 +541,15 @@ class Thumbnail:
         self.movie_pos = None
         self.movie_len = None
 
+def to_scale(frame):
+    if SCALE==1:
+        return frame
+    _,_,w,h = frame.get_rect()
+    return scale_image(frame,w/SCALE,h/SCALE)
+
 class Movie:
     def __init__(self):
-        self.frames = [layout.drawing_area().get_frame()]
+        self.frames = [layout.drawing_area().new_frame()]
         self.pos = 0
         self.mask_cache = {}
         self.thumbnail_cache = {}
@@ -528,7 +560,7 @@ class Movie:
         if mask.color == color and mask.transparency == transparency \
             and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
             return mask.surface
-        mask.surface = pen2mask(self.frames[pos], color, transparency)
+        mask.surface = to_scale(pen2mask(self.frames[pos], color, transparency))
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
@@ -739,7 +771,7 @@ while not escape:
 
       # TODO: might be good to optimize repainting beyond "just repaint everything
       # upon every event"
-      if layout.is_playing or event.type != PLAYBACK_TIMER_EVENT:
+      if layout.is_playing or event.type not in [PLAYBACK_TIMER_EVENT, SAVING_TIMER_EVENT]:
         layout.draw()
         pygame.display.flip()
    except:
