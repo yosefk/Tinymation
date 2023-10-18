@@ -4,6 +4,7 @@ import collections
 import numpy as np
 import threading
 import queue
+import uuid
 import imageio
 import math
 import os
@@ -238,7 +239,8 @@ class Layout:
             return
 
         if event.type == SAVING_TIMER_EVENT and saving_queue.empty():
-            saving_queue.put(('clip', [f.copy() for f in movie.frames]))
+            movie.frames[movie.pos].save()
+            saving_queue.put(('clip', [f.surface.copy() for f in movie.frames]))
             return
         
         x, y = pygame.mouse.get_pos()
@@ -291,7 +293,7 @@ class DrawingArea:
         except:
             return
         left, bottom, width, height = self.rect
-        frame = to_scale(m.frames[layout.playing_index] if layout.is_playing else m.curr_frame())
+        frame = to_scale(m.frames[layout.playing_index].surface if layout.is_playing else m.curr_frame())
         screen.blit(frame, (left, bottom), (0, 0, width, height))
 
         if not layout.is_playing:
@@ -547,12 +549,47 @@ def to_scale(frame):
     _,_,w,h = frame.get_rect()
     return scale_image(frame,w/SCALE,h/SCALE)
 
+class Frame:
+    def __init__(self, surface, dir):
+        self.surface = surface
+        self.dir = dir
+        self.id = str(uuid.uuid1())
+
+    def filename(self): return os.path.join(self.dir, f'{self.id}.bmp')
+    def save(self):
+        pygame.image.save(self.surface, self.filename())
+    def delete(self):
+        fname = self.filename()
+        if os.path.exists(fname):
+            os.unlink(fname)
+    #def make_curr(self):
+    #    self.hist_state = history[-1] if history else None
+    #def dirty(self):
+    #    return self.hist_state is (history[-1] if history else None)
+
 class Movie:
-    def __init__(self):
-        self.frames = [layout.drawing_area().new_frame()]
+    def __init__(self, dir):
+        self.dir = dir
+        if not os.path.isdir(dir): # new clip
+            os.makedirs(dir)
+            self.frames = [Frame(layout.drawing_area().new_frame(), self.dir)]
+            self.frames[0].save()
+        else:
+            with open(os.path.join(self.dir, 'frame_order.txt'), 'r') as frame_order:
+                ids = frame_order.read().strip().split()
+            self.frames = []
+            for id in ids:
+                self.frames.append(Frame(pg.image.load(os.path.join(self.dir, f'{id}.bmp')).convert(), self.dir))
+                self.frames[-1].id = id
         self.pos = 0
         self.mask_cache = {}
         self.thumbnail_cache = {}
+        self.save_meta()
+
+    def save_meta(self):
+        with open(os.path.join(self.dir, 'frame_order.txt'), 'w') as frame_order:
+            for frame in self.frames:
+                frame_order.write(f'{frame.id}\n')
 
     def get_mask(self, pos, color, transparency):
         assert pos != self.pos
@@ -560,7 +597,7 @@ class Movie:
         if mask.color == color and mask.transparency == transparency \
             and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
             return mask.surface
-        mask.surface = to_scale(pen2mask(self.frames[pos], color, transparency))
+        mask.surface = to_scale(pen2mask(self.frames[pos].surface, color, transparency))
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
@@ -577,7 +614,7 @@ class Movie:
         thumbnail.movie_len = len(self.frames)
         thumbnail.width = width
         thumbnail.height = height
-        thumbnail.surface = scale_image(self.frames[pos], width, height)
+        thumbnail.surface = scale_image(self.frames[pos].surface, width, height)
         return thumbnail.surface
 
     def clear_cache(self):
@@ -586,41 +623,57 @@ class Movie:
 
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
+        self.frames[self.pos].save()
         self.pos = pos
         self.clear_cache()
+        self.save_meta()
 
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
     def prev_frame(self): self.seek_frame((self.pos - 1) % len(self.frames))
 
     def insert_frame(self):
-        self.frames.insert(self.pos+1, layout.drawing_area().new_frame())
+        self.frames.insert(self.pos+1, Frame(layout.drawing_area().new_frame(), self.dir))
         self.next_frame()
 
     def insert_frame_at_pos(self, pos, frame):
         assert pos >= 0 and pos <= len(self.frames)
+        self.frames[self.pos].save()
         self.pos = pos
         self.frames.insert(self.pos, frame)
         self.clear_cache()
+        frame.save()
+        self.save_meta()
 
     # TODO: this works with pos modified from the outside but it's scary as the API
-    def remove_frame(self, new_pos=-1):
+    def remove_frame(self, at_pos=-1, new_pos=-1):
         if len(self.frames) <= 1:
             return
 
         self.clear_cache()
 
+        if at_pos == -1:
+            at_pos = self.pos
+        else:
+            self.frames[self.pos].save()
+        self.pos = at_pos
+
         removed = self.frames[self.pos]
+
         del self.frames[self.pos]
+        removed.delete()
+
         if self.pos >= len(self.frames):
             self.pos = 0
 
         if new_pos >= 0:
             self.pos = new_pos
 
+        self.save_meta()
+
         return removed
 
     def curr_frame(self):
-        return self.frames[self.pos]
+        return self.frames[self.pos].surface
 
 class SeekFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
@@ -630,12 +683,11 @@ class SeekFrameHistoryItem:
 class InsertFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
     def undo(self):
-        movie.pos = self.pos
         # normally remove_frame brings you to the next frame after the one you removed.
         # but when undoing insert_frame, we bring you to the previous frame after the one
         # you removed - it's the one where you inserted the frame we're now removing to undo
         # the insert, so this is where we should go to bring you back in time.
-        movie.remove_frame(new_pos=(self.pos-1)%len(movie.frames))
+        movie.remove_frame(at_pos=self.pos, new_pos=(self.pos-1)%len(movie.frames))
     def __str__(self):
         return f'InsertFrameHistoryItem(removing at pos {self.pos}, then seeking to pos {(self.pos-1)%len(movie.frames)})'
 
@@ -712,7 +764,7 @@ def init_layout():
 
 init_layout()
 
-movie = Movie()
+movie = Movie('test-clip')
 
 # The history is "global" for all operations. In some (rare) animation programs
 # there's a history per frame. One problem with this is how to undo timeline
@@ -774,11 +826,16 @@ while not escape:
       if layout.is_playing or event.type not in [PLAYBACK_TIMER_EVENT, SAVING_TIMER_EVENT]:
         layout.draw()
         pygame.display.flip()
+   except KeyboardInterrupt:
+    print('Ctrl-C - exiting')
+    break
    except:
     print('INTERNAL ERROR (printing and continuing)')
     import traceback
     traceback.print_exc()
       
+movie.frames[movie.pos].save()
+
 saving_queue.put(None)
 thread.join()
 
