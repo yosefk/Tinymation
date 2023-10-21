@@ -19,6 +19,7 @@ pygame.display.set_caption("Tinymate")
 
 PEN = (20, 20, 20)
 BACKGROUND = (240, 235, 220)
+UNDRAWABLE = (220, 215, 190)
 WIDTH = 5 
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 FRAME_RATE = 12
@@ -76,22 +77,32 @@ def scale_image(surface, width, height=None):
         height = int(surface.get_height() * width / surface.get_width())
     return pg.transform.smoothscale(surface, (width, height))
 
-def load_cursor(file, flip=False, size=CURSOR_SIZE):
+def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1)):
   surface = pg.image.load(file)
-  surface = scale_image(surface, size, size)#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
+  surface = scale_image(surface, size, size*surface.get_height()/surface.get_width())#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
       surface = pg.transform.flip(surface, True, True)
-  for y in range(size):
-      for x in range(size):
+  for y in range(surface.get_height()):
+      for x in range(surface.get_width()):
           r,g,b,a = surface.get_at((x,y))
           surface.set_at((x,y), (r,g,b,min(a,192)))
-  return pg.cursors.Cursor((0,size-1), surface), surface
+  def minmax(v, minv, maxv):
+      return min(maxv,max(minv,v))
+  hotx = minmax(int(hot_spot[0] * surface.get_width()), 0, surface.get_width()-1)
+  hoty = minmax(int(hot_spot[1] * surface.get_height()), 0, surface.get_height()-1)
+  return pg.cursors.Cursor((hotx, hoty), surface), surface
 
 pencil_cursor = load_cursor('pencil.png')
+pencil_cursor = (pencil_cursor[0], pg.image.load('pencil-tool.png'))
 eraser_cursor = load_cursor('eraser.png')
+eraser_cursor = (eraser_cursor[0], pg.image.load('eraser-tool.png'))
 eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5))
+eraser_medium_cursor = (eraser_medium_cursor[0], eraser_cursor[1])
 eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2))
+eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
 paint_bucket_cursor = load_cursor('paint_bucket.png')
+blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
+garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 pg.mouse.set_cursor(pencil_cursor[0])
 
 class HistoryItem:
@@ -146,8 +157,10 @@ class PenTool:
 
     def draw(self, rect, cursor_surface):
         left, bottom, width, height = rect
-        surface = scale_image(cursor_surface, width, height)
-        screen.blit(surface, (left, bottom), (0, 0, width, height))
+        _, _, w, h = cursor_surface.get_rect()
+        scaled_width = w*height/h
+        surface = scale_image(cursor_surface, scaled_width, height)
+        screen.blit(surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
 
     def on_mouse_down(self, x, y):
         self.history_item = HistoryItem()
@@ -173,6 +186,14 @@ class PenTool:
        drawCircle(frame, x, y, self.color, self.circle_width)
        self.prev_drawn = (x,y)
 
+class TimelineTool(PenTool):
+    def __init__(self, func):
+        self.func = func
+
+    def on_mouse_down(self, x, y): pass
+    def on_mouse_up(self, x, y): pass
+    def on_mouse_move(self, x, y): pass
+
 class PaintBucketTool:
     def __init__(self,color):
         self.color = color
@@ -182,6 +203,8 @@ class PaintBucketTool:
         history.append(HistoryItem())
         # TODO: would be better to optimize the history item
         surface = movie.curr_frame()
+        if surface.get_at((x,y)) == PEN:
+            return # never flood pen lines or the light table won't work properly
         fill_color = surface.map_rgb(self.color)
         surf_array = pygame.surfarray.pixels2d(surface)  # Create an array from the surface.
         flood_fill(surf_array, (x,y), fill_color, in_place=True)
@@ -214,10 +237,11 @@ class Layout:
         self.is_playing = False
         self.playing_index = 0
         self.tool = PenTool()
+        self.full_tool = TOOLS['pencil']
 
     def add(self, rect, elem):
         left, bottom, width, height = rect
-        srect = (int(left*self.width), int(bottom*self.height), int(width*self.width), int(height*self.height))
+        srect = (round(left*self.width), round(bottom*self.height), round(width*self.width), round(height*self.height))
         elem.rect = srect
         self.elems.append(elem)
 
@@ -225,10 +249,10 @@ class Layout:
         if self.is_pressed and self.focus_elem is self.drawing_area():
             self.drawing_area().draw()
             return
-        screen.fill(BACKGROUND)
+        screen.fill(UNDRAWABLE)
         for elem in self.elems:
             elem.draw()
-            pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
+            #pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
 
     def on_event(self,event):
         if self.is_playing:
@@ -474,12 +498,23 @@ class TimelineArea:
             if y >= bottom and y <= top and x >= left and x <= right:
                 self.on_light_table[pos_dist] = not self.on_light_table[pos_dist]
 
+    def timetable_tool(self): return isinstance(layout.tool, TimelineTool) 
+
     def on_mouse_down(self,x,y):
+        if self.timetable_tool():
+            if self.x2frame(x) == movie.pos:
+                layout.tool.func()
+                restore_tool() # we don't want multiple clicks in a row to delete lots of frames etc
+            return
         self.update_on_light_table(x,y)
         self.prevx = x
     def on_mouse_up(self,x,y):
+        if self.timetable_tool():
+            return
         self.on_mouse_move(x,y)
     def on_mouse_move(self,x,y):
+        if self.timetable_tool():
+            return
         prev_pos = self.x2frame(self.prevx)
         curr_pos = self.x2frame(x)
         if prev_pos is None and curr_pos is None:
@@ -507,25 +542,20 @@ class FunctionButton:
     def __init__(self, function, icon=None):
         self.function = function
         self.icon = icon
+        self.scaled = None
     def draw(self):
         # TODO: show it was pressed (tool selection button shows it by changing the cursor, maybe still should show it was pressed)
         if self.icon:
-            left, bottom, width, height = rect
-            surface = pg.transform.scale(cursor_surface, (width, height))
-            screen.blit(surface, (left, bottom), (0, 0, width, height))
+            left, bottom, width, height = self.rect
+            if not self.scaled:
+                self.scaled = scale_image(self.icon, width, height)
+            screen.blit(self.scaled, (left, bottom), (0, 0, width, height))
     def on_mouse_down(self,x,y):
         self.function()
     def on_mouse_up(self,x,y): pass
     def on_mouse_move(self,x,y): pass
 
 Tool = collections.namedtuple('Tool', ['tool', 'cursor', 'chars'])
-
-TOOLS = {
-    'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
-    'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
-    'eraser-medium': Tool(PenTool(BACKGROUND, WIDTH*5), eraser_medium_cursor, 'rR'),
-    'eraser-big': Tool(PenTool(BACKGROUND, WIDTH*20), eraser_big_cursor, 'tT'),
-}
 
 class LightTableMask:
     def __init__(self):
@@ -663,7 +693,7 @@ class Movie:
         removed.delete()
 
         if self.pos >= len(self.frames):
-            self.pos = 0
+            self.pos = len(self.frames)-1
 
         if new_pos >= 0:
             self.pos = new_pos
@@ -687,7 +717,7 @@ class InsertFrameHistoryItem:
         # but when undoing insert_frame, we bring you to the previous frame after the one
         # you removed - it's the one where you inserted the frame we're now removing to undo
         # the insert, so this is where we should go to bring you back in time.
-        movie.remove_frame(at_pos=self.pos, new_pos=(self.pos-1)%len(movie.frames))
+        movie.remove_frame(at_pos=self.pos, new_pos=max(0, self.pos-1))
     def __str__(self):
         return f'InsertFrameHistoryItem(removing at pos {self.pos}, then seeking to pos {(self.pos-1)%len(movie.frames)})'
 
@@ -727,29 +757,65 @@ def prev_frame():
 
 def toggle_playing(): layout.toggle_playing()
 
-FUNCTIONS = {
-    'insert-frame': (insert_frame, '=+'),
-    'remove-frame': (remove_frame, '-_'),
-    'next-frame': (next_frame, '.<'),
-    'prev-frame': (prev_frame, ',>'),
-    'toggle-playing': (toggle_playing, '\r'),
+TOOLS = {
+    'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
+    'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
+    'eraser-medium': Tool(PenTool(BACKGROUND, WIDTH*5), eraser_medium_cursor, 'rR'),
+    'eraser-big': Tool(PenTool(BACKGROUND, WIDTH*20), eraser_big_cursor, 'tT'),
+    # insert/remove frame are both a "tool" (with a special cursor) and a "function."
+    # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
+    # without any more ceremony. but when it's used thru a button, the user needs to
+    # actually press on the current image in the timeline to remove/insert. this,
+    # to avoid accidental removes/inserts thru misclicks and a resulting confusion
+    # (a changing cursor is more obviously "I clicked a wrong button, I should click
+    # a different one" than inserting/removing a frame where you need to undo but to
+    # do that, you need to understand what just happened)
+    'insert-frame': Tool(TimelineTool(insert_frame), blank_page_cursor, ''),
+    'remove-frame': Tool(TimelineTool(remove_frame), garbage_bin_cursor, ''),
 }
 
+FUNCTIONS = {
+    # FIXME
+    'insert-frame': (insert_frame, '=+', pg.image.load('sheets.png')),
+    'remove-frame': (remove_frame, '-_', pg.image.load('garbage.png')),
+    'next-frame': (next_frame, '.<', None),
+    'prev-frame': (prev_frame, ',>', None),
+    'toggle-playing': (toggle_playing, '\r', None),
+}
+
+prev_tool = None
 def set_tool(tool):
+    global prev_tool
+    prev = layout.full_tool
     layout.tool = tool.tool
+    layout.full_tool = tool
+    if not isinstance(prev.tool, TimelineTool):
+        prev_tool = prev
     if tool.cursor:
         pg.mouse.set_cursor(tool.cursor[0])
 
+def restore_tool():
+    set_tool(prev_tool)
+
 def init_layout():
-    screen.fill(BACKGROUND)
+    screen.fill(UNDRAWABLE)
 
     global layout
     layout = Layout()
     layout.add((0.15,0.15,0.85,0.85), DrawingArea())
     layout.add((0, 0, 1, 0.15), TimelineArea())
-    layout.add((0,0.85,0.075, 0.15), ToolSelectionButton(TOOLS['pencil']))
-    layout.add((0,0.15,0.075, 0.3), FunctionButton(insert_frame))
-    color_w = 0.025
+
+    tools_width_height = [
+        ('pencil', 0.33, 1),
+        ('eraser-big', 0.31, 1),
+        ('eraser-medium', 0.21, 0.8),
+        ('eraser', 0.11, 0.6),
+    ]
+    offset = 0
+    for tool, width, height in tools_width_height:
+        layout.add((offset*0.15,0.85+(0.15*(1-height)),width*0.15, 0.15*height), ToolSelectionButton(TOOLS[tool]))
+        offset += width
+    color_w = 0.025*2
     i = 0
     
     for y in np.arange(0.3,0.85-0.001,color_w):
@@ -759,6 +825,16 @@ def init_layout():
             tool = Tool(PaintBucketTool(rgb), paint_bucket_cursor, '')
             layout.add((x,y,color_w,color_w), ToolSelectionButton(tool))
             i += 1
+
+    funcs_width = [
+        ('insert-frame', 0.3),
+        ('remove-frame', 0.2),
+    ]
+    offset = 0
+    for func, width in funcs_width:
+        #f, _, icon = FUNCTIONS[func]
+        layout.add((offset*0.15,0.15,width*0.15, 0.1), ToolSelectionButton(TOOLS[func]))#FunctionButton(f, icon))
+        offset += width
 
     layout.draw()
 
@@ -814,7 +890,7 @@ while not escape:
             if event.key in [ord(c) for c in tool.chars]:
                 set_tool(tool)
 
-        for func, chars in FUNCTIONS.values():
+        for func, chars, _ in FUNCTIONS.values():
             if event.key in [ord(c) for c in chars]:
                 func()
                 
