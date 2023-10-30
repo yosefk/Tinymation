@@ -1,13 +1,31 @@
 import pygame
-import pygame.gfxdraw
-import collections
 import numpy as np
-import threading
-import queue
-import uuid
-import imageio
-import math
+import sys
 import os
+
+FRAME_RATE = 12
+
+if len(sys.argv)>1 and os.path.isdir(sys.argv[1]):
+    # we're saving a clip
+    import imageio
+
+    def save_clip(clip_dir):
+        frames = [os.path.join(clip_dir, f+'.bmp') for f in open(os.path.join(clip_dir, 'frame_order.txt')).read().strip().split()]
+        with imageio.get_writer(clip_dir + '.gif', fps=FRAME_RATE, format='GIF-PIL', quantizer=0, mode='I') as writer:
+            for frame in frames:
+                writer.append_data(np.transpose(pygame.surfarray.pixels3d(pygame.image.load(frame)), [1,0,2]))
+
+    save_clip(sys.argv[1])
+
+    exit()
+
+import pygame.gfxdraw
+import winpath
+import subprocess
+import collections
+import uuid
+import math
+import datetime
 
 # this requires numpy to be installed in addition to scikit-image
 from skimage.morphology import flood_fill
@@ -22,29 +40,14 @@ BACKGROUND = (240, 235, 220)
 UNDRAWABLE = (220, 215, 190)
 WIDTH = 5 
 CURSOR_SIZE = int(screen.get_width() * 0.07)
-FRAME_RATE = 12
 SCALE = 1
 
-APPDATA = os.getenv('LOCALAPPDATA')
-WD = os.path.join(APPDATA if APPDATA else '.', 'Tinymate-Clips')
+DESKTOP = winpath.get_desktop()
+WD = os.path.join(DESKTOP if DESKTOP else '.', 'Tinymate')
 if not os.path.exists(WD):
     os.makedirs(WD)
 print('clips read from, and saved to',WD)
 
-import time
-def saving_thread():
-    while True:
-        item = saving_queue.get()
-        if not item:
-            break
-        name, frames = item
-        with imageio.get_writer(os.path.join(WD,name+'.gif'), fps=FRAME_RATE, format='GIF-PIL', quantizer=0, mode='I') as writer:
-            for frame in frames:
-                writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2]))
-
-saving_queue = queue.Queue()
-thread = threading.Thread(target=saving_thread) 
-thread.start()
 
 def drawCircle( screen, x, y, color, width):
   pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -263,9 +266,9 @@ class Layout:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
             return
 
-        if event.type == SAVING_TIMER_EVENT and saving_queue.empty():
+        if event.type == SAVING_TIMER_EVENT:
             movie.frames[movie.pos].save()
-            saving_queue.put(('clip', [f.surface.copy() for f in movie.frames]))
+            movie.update_gif()
             return
         
         x, y = pygame.mouse.get_pos()
@@ -617,6 +620,8 @@ class Movie:
         self.thumbnail_cache = {}
         self.save_meta()
 
+        self.gif_process = None
+
     def save_meta(self):
         with open(os.path.join(self.dir, 'frame_order.txt'), 'w') as frame_order:
             for frame in self.frames:
@@ -705,6 +710,16 @@ class Movie:
 
     def curr_frame(self):
         return self.frames[self.pos].surface
+
+    def update_gif(self):
+        if self.gif_process and self.gif_process.poll() is None:
+            # still waiting for the previous process
+            return
+
+        self.gif_process = subprocess.Popen([sys.executable, os.path.realpath(sys.argv[0]), self.dir])
+
+    def wait_for_gif(self):
+        self.gif_process.wait()
 
 class SeekFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
@@ -902,7 +917,20 @@ def init_layout():
 
 init_layout()
 
-movie = Movie('test-clip')
+def new_movie_clip_dir():
+    now = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    return os.path.join(WD, now)
+
+def default_clip_dir():
+    clip_dirs = os.listdir(WD)
+    if not clip_dirs:
+        # first clip - create a new directory
+        return new_movie_clip_dir()
+    else:
+        # TODO: pick the clip with the last-modified clip
+        return os.path.join(WD, clip_dirs[0])
+
+movie = Movie(default_clip_dir())
 
 # The history is "global" for all operations. In some (rare) animation programs
 # there's a history per frame. One problem with this is how to undo timeline
@@ -916,8 +944,8 @@ escape = False
 PLAYBACK_TIMER_EVENT = pygame.USEREVENT + 1
 SAVING_TIMER_EVENT = pygame.USEREVENT + 2
 
-pygame.time.set_timer(PLAYBACK_TIMER_EVENT, 1000//FRAME_RATE)
-pygame.time.set_timer(SAVING_TIMER_EVENT, 1000) # we save a copy of the current clip every second
+pygame.time.set_timer(PLAYBACK_TIMER_EVENT, 1000//FRAME_RATE) # we play back at 12 fps
+pygame.time.set_timer(SAVING_TIMER_EVENT, 15*1000) # we save a copy of the current clip every 15 seconds
 
 interesting_events = [
     pygame.KEYDOWN,
@@ -973,9 +1001,11 @@ while not escape:
     traceback.print_exc()
       
 movie.frames[movie.pos].save()
-
-saving_queue.put(None)
-thread.join()
+movie.wait_for_gif() # wait for the current gif-updating process
+# to avoid losing changes thru update_gif refusing to do anything
+# having observed a still-running gif-updating process
+movie.update_gif()
+movie.wait_for_gif()
 
 pygame.display.quit()
 pygame.quit()
