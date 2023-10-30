@@ -77,6 +77,9 @@ def scale_image(surface, width, height=None):
         height = int(surface.get_height() * width / surface.get_width())
     return pg.transform.smoothscale(surface, (width, height))
 
+def minmax(v, minv, maxv):
+    return min(maxv,max(minv,v))
+
 def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1)):
   surface = pg.image.load(file)
   surface = scale_image(surface, size, size*surface.get_height()/surface.get_width())#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
@@ -86,8 +89,6 @@ def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1)):
       for x in range(surface.get_width()):
           r,g,b,a = surface.get_at((x,y))
           surface.set_at((x,y), (r,g,b,min(a,192)))
-  def minmax(v, minv, maxv):
-      return min(maxv,max(minv,v))
   hotx = minmax(int(hot_spot[0] * surface.get_width()), 0, surface.get_width()-1)
   hoty = minmax(int(hot_spot[1] * surface.get_height()), 0, surface.get_height()-1)
   return pg.cursors.Cursor((hotx, hoty), surface), surface
@@ -797,6 +798,67 @@ def set_tool(tool):
 def restore_tool():
     set_tool(prev_tool)
 
+class Palette:
+    def __init__(self, filename, rows=12, columns=3):
+        s = pg.image.load(filename)
+        color_hist = {}
+        first_color_hit = {}
+        white = (255,255,255)
+        for y in range(s.get_height()):
+            for x in range(s.get_width()):
+                r,g,b,a = s.get_at((x,y))
+                color = r,g,b
+                if color not in first_color_hit:
+                    first_color_hit[color] = (y / (s.get_height()/3))*s.get_width() + x
+                if color != white:
+                    color_hist[color] = color_hist.get(color,0) + 1
+
+        colors = [[None for col in range(columns)] for row in range(rows)]
+        colors[0] = [BACKGROUND, BACKGROUND, white]
+        color2popularity = dict(list(reversed(sorted(list(color_hist.items()), key=lambda x: x[1])))[:(rows-1)*columns])
+        hit2color = [(first_hit, color) for color, first_hit in sorted(list(first_color_hit.items()), key=lambda x: x[1])]
+
+        row = 1
+        col = 0
+        for hit, color in hit2color:
+            if color in color2popularity:
+                colors[row][col] = color
+                row+=1
+                if row == rows:
+                    row = 1
+                    col += 1
+
+        self.rows = rows
+        self.columns = columns
+        self.colors = colors
+
+        self.init_cursors()
+
+    def init_cursors(self):
+        global paint_bucket_cursor
+        s = paint_bucket_cursor[1]
+        self.cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
+        for row in range(self.rows):
+            for col in range(self.columns):
+                cleanest = (0x1a,0x13,0xc5)
+                color = self.colors[row][col]
+                sc = s.copy()
+                for y in range(s.get_height()):
+                    for x in range(s.get_width()):
+                        r,g,b,a = s.get_at((x,y))
+                        if a < 10:
+                            continue
+                        if r < b-50:
+                            dist = (r-cleanest[0], g-cleanest[1], b-cleanest[2])
+                        else:
+                            dist = (r-155, g-155, b-155)
+                        new = tuple([minmax(x, 0, 255) for x in [color[i]+dist[i] for i in range(3)]])
+                        sc.set_at((x,y), new+(a,))
+        
+                self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), sc)
+
+palette = Palette('palette.png')
+
 def init_layout():
     screen.fill(UNDRAWABLE)
 
@@ -818,11 +880,11 @@ def init_layout():
     color_w = 0.025*2
     i = 0
     
-    for y in np.arange(0.3,0.85-0.001,color_w):
-        for x in np.arange(0,0.15-0.001,color_w):            
-            rgb = pygame.Color(0)
-            rgb.hsla = (i*10 % 360, 50, 50, 100)
-            tool = Tool(PaintBucketTool(rgb), paint_bucket_cursor, '')
+    for row,y in enumerate(np.arange(0.25,0.85-0.001,color_w)):
+        for col,x in enumerate(np.arange(0,0.15-0.001,color_w)):            
+            #rgb = pygame.Color(0)
+            #rgb.hsla = (i*10 % 360, 50, 50, 100)
+            tool = Tool(PaintBucketTool(palette.colors[len(palette.colors)-row-1][col]), palette.cursors[len(palette.colors)-row-1][col], '')
             layout.add((x,y,color_w,color_w), ToolSelectionButton(tool))
             i += 1
 
