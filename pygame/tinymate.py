@@ -228,6 +228,8 @@ class Layout:
         self.tool = PenTool()
         self.full_tool = TOOLS['pencil']
 
+    def aspect_ratio(self): return self.width/self.height
+
     def add(self, rect, elem):
         left, bottom, width, height = rect
         srect = (round(left*self.width), round(bottom*self.height), round(width*self.width), round(height*self.height))
@@ -240,7 +242,8 @@ class Layout:
             return
         screen.fill(UNDRAWABLE)
         for elem in self.elems:
-            elem.draw()
+            if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
+                elem.draw()
             #pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
 
     def on_event(self,event):
@@ -249,7 +252,6 @@ class Layout:
             # need to disable the other operations differently from this
             if event.type == PLAYBACK_TIMER_EVENT:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
-            return
 
         if event.type == SAVING_TIMER_EVENT:
             movie.frames[movie.pos].save()
@@ -260,8 +262,9 @@ class Layout:
             left, bottom, width, height = elem.rect
             if x>=left and x<left+width and y>=bottom and y<bottom+height:
                 self.focus_elem = elem
+                if not self.is_playing or isinstance(elem, TogglePlaybackButton):
                 # mouse position is within this element
-                self._dispatch_event(elem, event, x, y)
+                    self._dispatch_event(elem, event, x, y)
 
     def _dispatch_event(self, elem, event, x, y):
         if event.type == pygame.MOUSEBUTTONDOWN:
@@ -543,6 +546,24 @@ class FunctionButton:
     def on_mouse_up(self,x,y): pass
     def on_mouse_move(self,x,y): pass
 
+class TogglePlaybackButton:
+    def __init__(self, play_icon, pause_icon):
+        self.play = play_icon
+        self.pause = pause_icon
+        self.scaled = False
+    def draw(self):
+        left, bottom, width, height = self.rect
+        if not self.scaled:
+            self.play = scale_image(self.play, width, height)
+            self.pause = scale_image(self.pause, width, height)
+            self.scaled = True
+            
+        screen.blit(self.pause if layout.is_playing else self.play, (left, bottom), (0, 0, width, height))
+    def on_mouse_down(self,x,y):
+        toggle_playing()
+    def on_mouse_up(self,x,y): pass
+    def on_mouse_move(self,x,y): pass
+
 Tool = collections.namedtuple('Tool', ['tool', 'cursor', 'chars'])
 
 class LightTableMask:
@@ -806,7 +827,7 @@ class Palette:
                     color_hist[color] = color_hist.get(color,0) + 1
 
         colors = [[None for col in range(columns)] for row in range(rows)]
-        colors[0] = [BACKGROUND, BACKGROUND, white]
+        colors[0] = [BACKGROUND, (192, 192, 192), white]
         color2popularity = dict(list(reversed(sorted(list(color_hist.items()), key=lambda x: x[1])))[:(rows-1)*columns])
         hit2color = [(first_hit, color) for color, first_hit in sorted(list(first_color_hit.items()), key=lambda x: x[1])]
 
@@ -889,6 +910,9 @@ def init_layout():
         #f, _, icon = FUNCTIONS[func]
         layout.add((offset*0.15,0.15,width*0.15, 0.1), ToolSelectionButton(TOOLS[func]))#FunctionButton(f, icon))
         offset += width
+
+    width = 0.05
+    layout.add((0.1,0.15 + 0.1/2 - layout.aspect_ratio()*width/2,width, layout.aspect_ratio()*width), TogglePlaybackButton(pg.image.load('play.png'), pg.image.load('pause.png')))
 
     layout.draw()
 
