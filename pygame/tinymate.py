@@ -1,31 +1,15 @@
 import pygame
-import numpy as np
-import sys
-import os
-
-FRAME_RATE = 12
-
-if len(sys.argv)>1 and os.path.isdir(sys.argv[1]):
-    # we're saving a clip
-    import imageio
-
-    def save_clip(clip_dir):
-        frames = [os.path.join(clip_dir, f+'.bmp') for f in open(os.path.join(clip_dir, 'frame_order.txt')).read().strip().split()]
-        with imageio.get_writer(clip_dir + '.gif', fps=FRAME_RATE, format='GIF-PIL', quantizer=0, mode='I') as writer:
-            for frame in frames:
-                writer.append_data(np.transpose(pygame.surfarray.pixels3d(pygame.image.load(frame)), [1,0,2]))
-
-    save_clip(sys.argv[1])
-
-    exit()
-
 import pygame.gfxdraw
+import imageio
 import winpath
 import subprocess
 import collections
 import uuid
 import math
 import datetime
+import numpy as np
+import sys
+import os
 
 # this requires numpy to be installed in addition to scikit-image
 from skimage.morphology import flood_fill
@@ -35,6 +19,7 @@ screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
 pygame.display.set_caption("Tinymate")
 #screen = pygame.display.set_mode((500, 500))
 
+FRAME_RATE = 12
 PEN = (20, 20, 20)
 BACKGROUND = (240, 235, 220)
 UNDRAWABLE = (220, 215, 190)
@@ -268,7 +253,6 @@ class Layout:
 
         if event.type == SAVING_TIMER_EVENT:
             movie.frames[movie.pos].save()
-            movie.update_gif()
             return
         
         x, y = pygame.mouse.get_pos()
@@ -620,8 +604,6 @@ class Movie:
         self.thumbnail_cache = {}
         self.save_meta()
 
-        self.gif_process = None
-
     def save_meta(self):
         with open(os.path.join(self.dir, 'frame_order.txt'), 'w') as frame_order:
             for frame in self.frames:
@@ -711,15 +693,10 @@ class Movie:
     def curr_frame(self):
         return self.frames[self.pos].surface
 
-    def update_gif(self):
-        if self.gif_process and self.gif_process.poll() is None:
-            # still waiting for the previous process
-            return
-
-        self.gif_process = subprocess.Popen([sys.executable, os.path.realpath(sys.argv[0]), self.dir])
-
-    def wait_for_gif(self):
-        self.gif_process.wait()
+    def save_gif(self):
+        with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, format='GIF-PIL', quantizer=0, mode='I') as writer:
+            for frame in self.frames:
+                writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface), [1,0,2]))
 
 class SeekFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
@@ -957,6 +934,7 @@ interesting_events = [
 ]
 
 while not escape: 
+ try:
   for event in pygame.event.get():
    if event.type not in interesting_events:
        continue
@@ -964,6 +942,7 @@ while not escape:
       if event.type == pygame.KEYDOWN:
         if event.key == 27: # ESC pressed
             escape = True
+            break
 
         if layout.is_pressed:
             continue # ignore keystrokes (except ESC) when a mouse tool is being used
@@ -994,18 +973,18 @@ while not escape:
         pygame.display.flip()
    except KeyboardInterrupt:
     print('Ctrl-C - exiting')
+    escape = True
     break
    except:
     print('INTERNAL ERROR (printing and continuing)')
     import traceback
     traceback.print_exc()
+ except KeyboardInterrupt:
+  print('Ctrl-C - exiting')
+  break
       
 movie.frames[movie.pos].save()
-movie.wait_for_gif() # wait for the current gif-updating process
-# to avoid losing changes thru update_gif refusing to do anything
-# having observed a still-running gif-updating process
-movie.update_gif()
-movie.wait_for_gif()
+movie.save_gif()
 
 pygame.display.quit()
 pygame.quit()
