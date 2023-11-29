@@ -68,18 +68,19 @@ def scale_image(surface, width, height=None):
 def minmax(v, minv, maxv):
     return min(maxv,max(minv,v))
 
-def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1)):
+def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=192):
   surface = pg.image.load(file)
   surface = scale_image(surface, size, size*surface.get_height()/surface.get_width())#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
       surface = pg.transform.flip(surface, True, True)
+  non_transparent_surface = surface.copy()
   for y in range(surface.get_height()):
       for x in range(surface.get_width()):
           r,g,b,a = surface.get_at((x,y))
-          surface.set_at((x,y), (r,g,b,min(a,192)))
+          surface.set_at((x,y), (r,g,b,min(a,min_alpha)))
   hotx = minmax(int(hot_spot[0] * surface.get_width()), 0, surface.get_width()-1)
   hoty = minmax(int(hot_spot[1] * surface.get_height()), 0, surface.get_height()-1)
-  return pg.cursors.Cursor((hotx, hoty), surface), surface
+  return pg.cursors.Cursor((hotx, hoty), surface), non_transparent_surface
 
 pencil_cursor = load_cursor('pencil.png')
 pencil_cursor = (pencil_cursor[0], pg.image.load('pencil-tool.png'))
@@ -89,7 +90,7 @@ eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5))
 eraser_medium_cursor = (eraser_medium_cursor[0], eraser_cursor[1])
 eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2))
 eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
-paint_bucket_cursor = load_cursor('paint_bucket.png')
+paint_bucket_cursor = load_cursor('paint_bucket.png', min_alpha=255)
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 pg.mouse.set_cursor(pencil_cursor[0])
@@ -187,7 +188,14 @@ class PaintBucketTool:
     def __init__(self,color):
         self.color = color
     def draw(self, rect, cursor_surface):
-        pygame.draw.rect(screen, self.color, rect)
+        left, bottom, width, height = rect
+        x = left + width//2
+        y = bottom + height//2
+        rx = int(0.85*width)//2
+        ry = int(0.9*height)//2
+        pygame.gfxdraw.filled_ellipse(screen, x, y, rx, ry, self.color)
+        pygame.gfxdraw.aaellipse(screen, x, y, rx, ry, PEN)
+        pygame.gfxdraw.aaellipse(screen, x, y, rx-1, ry-1, PEN)
     def on_mouse_down(self, x, y):
         history.append(HistoryItem())
         # TODO: would be better to optimize the history item
@@ -853,22 +861,16 @@ class Palette:
         self.cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
         for row in range(self.rows):
             for col in range(self.columns):
-                cleanest = (0x1a,0x13,0xc5)
-                color = self.colors[row][col]
+                dr,dg,db = self.colors[row][col]
                 sc = s.copy()
                 for y in range(s.get_height()):
                     for x in range(s.get_width()):
                         r,g,b,a = s.get_at((x,y))
-                        if a < 10:
-                            continue
-                        if r < b-50:
-                            dist = (r-cleanest[0], g-cleanest[1], b-cleanest[2])
-                        else:
-                            dist = (r-155, g-155, b-155)
-                        new = tuple([minmax(x, 0, 255) for x in [color[i]+dist[i] for i in range(3)]])
+                        new = (int(r*dr/255), int(g*dg/255), int(b*db/255))
                         sc.set_at((x,y), new+(a,))
         
                 self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), sc)
+
 
 palette = Palette('palette.png')
 
@@ -882,9 +884,9 @@ def init_layout():
 
     tools_width_height = [
         ('pencil', 0.33, 1),
-        ('eraser-big', 0.31, 1),
+        ('eraser-big', 0.27, 1),
         ('eraser-medium', 0.21, 0.8),
-        ('eraser', 0.11, 0.6),
+        ('eraser', 0.15, 0.6),
     ]
     offset = 0
     for tool, width, height in tools_width_height:
@@ -902,8 +904,8 @@ def init_layout():
             i += 1
 
     funcs_width = [
-        ('insert-frame', 0.3),
-        ('remove-frame', 0.2),
+        ('insert-frame', 0.33),
+        ('remove-frame', 0.33),
     ]
     offset = 0
     for func, width in funcs_width:
