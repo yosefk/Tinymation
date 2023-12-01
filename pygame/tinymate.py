@@ -27,8 +27,8 @@ WIDTH = 5
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 SCALE = 1
 
-DESKTOP = winpath.get_desktop()
-WD = os.path.join(DESKTOP if DESKTOP else '.', 'Tinymate')
+MY_DOCUMENTS = winpath.get_my_documents()
+WD = os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymate')
 if not os.path.exists(WD):
     os.makedirs(WD)
 print('clips read from, and saved to',WD)
@@ -377,6 +377,8 @@ class TimelineArea:
         self.combined_movie_pos = None
         self.combined_movie_len = None
 
+        self.loop = False
+
     def light_table_masks(self):
         masks = []
         # TODO: order 
@@ -390,7 +392,10 @@ class TimelineArea:
         for pos_dist in self.traversal_order:
             if not self.on_light_table[pos_dist]:
                 continue
-            pos = (movie.pos + pos_dist) % len(movie.frames)
+            abs_pos = movie.pos + pos_dist
+            if not self.loop and (abs_pos < 0 or abs_pos >= len(movie.frames)):
+                continue
+            pos = abs_pos % len(movie.frames)
             if pos in covered_positions:
                 continue # for short movies, avoid covering the same position twice
                 # upon wraparound
@@ -723,7 +728,7 @@ class Movie:
         return self.frames[self.pos].surface
 
     def save_gif(self):
-        with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, format='GIF-PIL', quantizer=0, mode='I') as writer:
+        with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, mode='I') as writer:
             for frame in self.frames:
                 writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface), [1,0,2]))
 
