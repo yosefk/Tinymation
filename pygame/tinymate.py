@@ -97,7 +97,7 @@ pg.mouse.set_cursor(pencil_cursor[0])
 
 class HistoryItem:
     def __init__(self):
-        self.surface = movie.curr_frame().copy()
+        self.surface = movie.edit_curr_frame().copy()
         self.pos = movie.pos
         self.minx = 10**9
         self.miny = 10**9
@@ -108,7 +108,7 @@ class HistoryItem:
         if self.pos != movie.pos:
             print(f'WARNING: HistoryItem at the wrong position! should be {self.pos}, but is {movie.pos}')
         movie.seek_frame(self.pos) # we should already be here, but just in case
-        frame = movie.curr_frame()
+        frame = movie.edit_curr_frame()
         if self.optimized:
             frame.blit(self.surface, (self.minx, self.miny), (0, 0, self.maxx-self.minx+1, self.maxy-self.miny+1))
         else:
@@ -121,7 +121,7 @@ class HistoryItem:
     def optimize(self):
         if self.minx == 10**9:
             return
-        left, bottom, width,height = movie.curr_frame().get_rect()
+        left, bottom, width,height = movie.edit_curr_frame().get_rect()
         right = left+width
         top = bottom+height
         self.minx = max(self.minx, left)
@@ -154,13 +154,13 @@ class PenTool:
 
     def on_mouse_down(self, x, y):
         self.history_item = HistoryItem()
-        frame = movie.curr_frame()
+        frame = movie.edit_curr_frame()
         drawCircle(frame, x, y, self.color, self.circle_width)
         self.on_mouse_move(x,y)
 
     def on_mouse_up(self, x, y):
         self.prev_drawn = None
-        frame = movie.curr_frame()
+        frame = movie.edit_curr_frame()
         drawCircle(frame, x, y, self.color, self.circle_width)
         if self.history_item:
             self.history_item.optimize()
@@ -170,7 +170,7 @@ class PenTool:
     def on_mouse_move(self, x, y):
        if self.history_item:
             self.history_item.affected(x-self.width,y-self.width,x+self.width,y+self.width)
-       frame = movie.curr_frame()
+       frame = movie.edit_curr_frame()
        if self.prev_drawn:
             drawLine(frame, self.prev_drawn, (x,y), self.color, self.width)
        drawCircle(frame, x, y, self.color, self.circle_width)
@@ -200,7 +200,7 @@ class PaintBucketTool:
     def on_mouse_down(self, x, y):
         history.append(HistoryItem())
         # TODO: would be better to optimize the history item
-        surface = movie.curr_frame()
+        surface = movie.edit_curr_frame()
         if surface.get_at((x,y)) == PEN:
             return # never flood pen lines or the light table won't work properly
         fill_color = surface.map_rgb(self.color)
@@ -652,10 +652,17 @@ class Frame:
         self.surface = surface
         self.dir = dir
         self.id = str(uuid.uuid1())
+        # we don't aim to maintain a "perfect" dirty flag such as "doing 5 things and undoing
+        # them should result in dirty==False." The goal is to avoid gratuitous saving when
+        # scrolling thru the timeline, which slows things down and prevents reopening
+        # clips at the last actually-edited frame after exiting the program
+        self.dirty = True
 
     def filename(self): return os.path.join(self.dir, f'{self.id}.bmp')
     def save(self):
-        pygame.image.save(self.surface, self.filename())
+        if self.dirty:
+            pygame.image.save(self.surface, self.filename())
+            self.dirty = False
     def delete(self):
         fname = self.filename()
         if os.path.exists(fname):
@@ -677,12 +684,19 @@ class Movie:
             os.makedirs(dir)
             self.frames = [Frame(layout.drawing_area().new_frame(), self.dir)]
             self.frames[0].save()
+            self.pos = 0
         else:
             self.frames = []
+            fname2id = {}
             for frameid, fname in clip_frame_filenames(self.dir):
-                self.frames.append(Frame(pg.image.load(fname).convert(), self.dir))
-                self.frames[-1].id = frameid
-        self.pos = 0
+                fname2id[fname] = frameid
+                frame = Frame(pg.image.load(fname).convert(), self.dir)
+                frame.id = frameid
+                frame.dirty = False
+                self.frames.append(frame)
+            last_modified_id = fname2id[get_last_modified(fname2id.keys())]
+            # reopen at the last modified frame
+            self.pos = [frame.id for frame in self.frames].index(last_modified_id)
         self.mask_cache = {}
         self.thumbnail_cache = {}
         self.save_meta()
@@ -775,6 +789,10 @@ class Movie:
 
     def curr_frame(self):
         return self.frames[self.pos].surface
+
+    def edit_curr_frame(self):
+        self.frames[self.pos].dirty = True
+        return self.curr_frame()
 
     def save_gif(self):
         with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, mode='I') as writer:
