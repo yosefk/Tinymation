@@ -176,9 +176,10 @@ class PenTool:
        drawCircle(frame, x, y, self.color, self.circle_width)
        self.prev_drawn = (x,y)
 
-class TimelineTool(PenTool):
-    def __init__(self, func):
-        self.func = func
+class NewDeleteTool(PenTool):
+    def __init__(self, frame_func, clip_func):
+        self.frame_func = frame_func
+        self.clip_func = clip_func
 
     def on_mouse_down(self, x, y): pass
     def on_mouse_up(self, x, y): pass
@@ -291,6 +292,10 @@ class Layout:
     def timeline_area(self):
         assert isinstance(self.elems[1], TimelineArea)
         return self.elems[1]
+
+    def movie_list_area(self):
+        assert isinstance(self.elems[2], MovieListArea)
+        return self.elems[2]
 
     def toggle_playing(self):
         self.is_playing = not self.is_playing
@@ -502,22 +507,22 @@ class TimelineArea:
             if y >= bottom and y <= top and x >= left and x <= right:
                 self.on_light_table[pos_dist] = not self.on_light_table[pos_dist]
 
-    def timetable_tool(self): return isinstance(layout.tool, TimelineTool) 
+    def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
 
     def on_mouse_down(self,x,y):
-        if self.timetable_tool():
+        if self.new_delete_tool():
             if self.x2frame(x) == movie.pos:
-                layout.tool.func()
+                layout.tool.frame_func()
                 restore_tool() # we don't want multiple clicks in a row to delete lots of frames etc
             return
         self.update_on_light_table(x,y)
         self.prevx = x
     def on_mouse_up(self,x,y):
-        if self.timetable_tool():
+        if self.new_delete_tool():
             return
         self.on_mouse_move(x,y)
     def on_mouse_move(self,x,y):
-        if self.timetable_tool():
+        if self.new_delete_tool():
             return
         prev_pos = self.x2frame(self.prevx)
         curr_pos = self.x2frame(x)
@@ -531,6 +536,47 @@ class TimelineArea:
         self.prevx = x
         if pos_dist != 0:
             movie.seek_frame(min(max(0, movie.pos + pos_dist), len(movie.frames)-1))
+
+def get_last_modified(filenames):
+    f2mtime = {}
+    for f in filenames:
+        s = os.stat(f)
+        f2mtime[f] = s.st_mtime
+    return list(sorted(f2mtime.keys(), key=lambda f: f2mtime[f]))[-1]
+
+class MovieListArea:
+    def __init__(self):
+        self.reload()
+    def reload(self):
+        self.clips = []
+        self.images = []
+        for clipdir in get_clip_dirs():
+            clip = os.path.join(WD, clipdir)
+            try:
+                last_modified = get_last_modified([f for frameid, f in clip_frame_filenames(clip)])
+            except:
+                continue
+            self.clips.append(clip)
+            self.images.append(scale_image(pg.image.load(last_modified), int(screen.get_width() * 0.15)))
+    def draw(self):
+        left, bottom, width, height = self.rect
+        for image in self.images:
+            screen.blit(image, (left, bottom), image.get_rect()) 
+            pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), 1, 1)
+            bottom += image.get_height()
+    def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
+    def on_mouse_down(self,x,y):
+        if self.new_delete_tool():
+            # TODO: add condition on position
+            layout.tool.clip_func()
+            restore_tool()
+            return
+    def on_mouse_up(self,x,y):
+        if self.new_delete_tool():
+            return
+    def on_mouse_move(self,x,y):
+        if self.new_delete_tool():
+            return
 
 class ToolSelectionButton:
     def __init__(self, tool):
@@ -619,6 +665,11 @@ class Frame:
     #def dirty(self):
     #    return self.hist_state is (history[-1] if history else None)
 
+def clip_frame_filenames(clipdir):
+    with open(os.path.join(clipdir, 'frame_order.txt'), 'r') as frame_order:
+        ids = frame_order.read().strip().split()
+        return [(frameid, os.path.join(clipdir, f'{frameid}.bmp')) for frameid in ids]
+
 class Movie:
     def __init__(self, dir):
         self.dir = dir
@@ -627,12 +678,10 @@ class Movie:
             self.frames = [Frame(layout.drawing_area().new_frame(), self.dir)]
             self.frames[0].save()
         else:
-            with open(os.path.join(self.dir, 'frame_order.txt'), 'r') as frame_order:
-                ids = frame_order.read().strip().split()
             self.frames = []
-            for id in ids:
-                self.frames.append(Frame(pg.image.load(os.path.join(self.dir, f'{id}.bmp')).convert(), self.dir))
-                self.frames[-1].id = id
+            for frameid, fname in clip_frame_filenames(self.dir):
+                self.frames.append(Frame(pg.image.load(fname).convert(), self.dir))
+                self.frames[-1].id = frameid
         self.pos = 0
         self.mask_cache = {}
         self.thumbnail_cache = {}
@@ -782,6 +831,14 @@ def prev_frame():
     append_seek_frame_history_item_if_frame_is_dirty()
     movie.prev_frame()
 
+def insert_clip():
+    global movie
+    movie = Movie(new_movie_clip_dir())
+    layout.movie_list_area().reload()
+
+def remove_clip():
+    print('TODO')
+
 def toggle_playing(): layout.toggle_playing()
 
 TOOLS = {
@@ -797,8 +854,8 @@ TOOLS = {
     # (a changing cursor is more obviously "I clicked a wrong button, I should click
     # a different one" than inserting/removing a frame where you need to undo but to
     # do that, you need to understand what just happened)
-    'insert-frame': Tool(TimelineTool(insert_frame), blank_page_cursor, ''),
-    'remove-frame': Tool(TimelineTool(remove_frame), garbage_bin_cursor, ''),
+    'insert-frame': Tool(NewDeleteTool(insert_frame, insert_clip), blank_page_cursor, ''),
+    'remove-frame': Tool(NewDeleteTool(remove_frame, remove_clip), garbage_bin_cursor, ''),
 }
 
 FUNCTIONS = {
@@ -816,7 +873,7 @@ def set_tool(tool):
     prev = layout.full_tool
     layout.tool = tool.tool
     layout.full_tool = tool
-    if not isinstance(prev.tool, TimelineTool):
+    if not isinstance(prev.tool, NewDeleteTool):
         prev_tool = prev
     if tool.cursor:
         pg.mouse.set_cursor(tool.cursor[0])
@@ -879,13 +936,28 @@ class Palette:
 
 palette = Palette('palette.png')
 
+def get_clip_dirs():
+    '''returns the clip directories sorted by last modification time (latest first)'''
+    wdfiles = os.listdir(WD)
+    clipdirs = {}
+    for d in wdfiles:
+        try:
+            frame_order_file = os.path.join(os.path.join(WD, d), 'frame_order.txt')
+            s = os.stat(frame_order_file)
+            clipdirs[d] = s.st_mtime
+        except:
+            continue
+
+    return list(reversed(sorted(clipdirs.keys(), key=lambda d: clipdirs[d])))
+
 def init_layout():
     screen.fill(UNDRAWABLE)
 
     global layout
     layout = Layout()
-    layout.add((0.15,0.15,0.85,0.85), DrawingArea())
+    layout.add((0.15,0.15,0.7,0.85), DrawingArea())
     layout.add((0, 0, 1, 0.15), TimelineArea())
+    layout.add((0.85, 0.15, 0.15, 0.85), MovieListArea())
 
     tools_width_height = [
         ('pencil', 0.33, 1),
@@ -930,7 +1002,7 @@ def new_movie_clip_dir():
     return os.path.join(WD, now)
 
 def default_clip_dir():
-    clip_dirs = os.listdir(WD)
+    clip_dirs = get_clip_dirs() 
     if not clip_dirs:
         # first clip - create a new directory
         return new_movie_clip_dir()
