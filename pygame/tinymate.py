@@ -518,8 +518,6 @@ class TimelineArea:
         self.update_on_light_table(x,y)
         self.prevx = x
     def on_mouse_up(self,x,y):
-        if self.new_delete_tool():
-            return
         self.on_mouse_move(x,y)
     def on_mouse_move(self,x,y):
         if self.new_delete_tool():
@@ -558,25 +556,49 @@ class MovieListArea:
                 continue
             self.clips.append(clip)
             self.images.append(scale_image(pg.image.load(last_modified), int(screen.get_width() * 0.15)))
+        self.clip_pos = 0 
     def draw(self):
         left, bottom, width, height = self.rect
-        for image in self.images:
+        for image in self.images[self.clip_pos:]:
             screen.blit(image, (left, bottom), image.get_rect()) 
             pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), 1, 1)
             bottom += image.get_height()
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
+    def y2frame(self, y):
+        if not self.images:
+            return None
+        return y // self.images[0].get_height()
     def on_mouse_down(self,x,y):
         if self.new_delete_tool():
             # TODO: add condition on position
             layout.tool.clip_func()
             restore_tool()
             return
+        self.prevy = y
+    def on_mouse_move(self,x,y):
+        pass # opening a movie is a slow operation so we don't want it to be "too interactive"
+        # (like timeline scrolling)
     def on_mouse_up(self,x,y):
         if self.new_delete_tool():
             return
-    def on_mouse_move(self,x,y):
-        if self.new_delete_tool():
+        prev_pos = self.y2frame(self.prevy)
+        curr_pos = self.y2frame(y)
+        if prev_pos is None and curr_pos is None:
+            self.prevy = y
             return
+        if curr_pos is not None and prev_pos is not None:
+            pos_dist = prev_pos - curr_pos
+        else:
+            pos_dist = -1 if x > self.prevx else 1
+        self.prevy = y
+        self.open_clip(min(max(0, self.clip_pos + pos_dist), len(self.clips)-1))
+    def open_clip(self, clip_pos):
+        if clip_pos == self.clip_pos:
+            return
+        global movie
+        movie.save_before_closing()
+        movie = Movie(self.clips[clip_pos])
+        self.clip_pos = clip_pos
 
 class ToolSelectionButton:
     def __init__(self, tool):
@@ -798,6 +820,10 @@ class Movie:
         with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, mode='I') as writer:
             for frame in self.frames:
                 writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface), [1,0,2]))
+
+    def save_before_closing(self):
+        self.frames[self.pos].save()
+        self.save_gif()
 
 class SeekFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
@@ -1104,8 +1130,7 @@ while not escape:
   print('Ctrl-C - exiting')
   break
       
-movie.frames[movie.pos].save()
-movie.save_gif()
+movie.save_before_closing()
 
 pygame.display.quit()
 pygame.quit()
