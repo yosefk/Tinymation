@@ -544,6 +544,8 @@ def get_last_modified(filenames):
 
 class MovieListArea:
     def __init__(self):
+        self.show_pos = None
+        self.prevy = None
         self.reload()
     def reload(self):
         self.clips = []
@@ -557,15 +559,34 @@ class MovieListArea:
             self.clips.append(clip)
             self.images.append(scale_image(pg.image.load(last_modified), int(screen.get_width() * 0.15)))
         self.clip_pos = 0 
+    def remove_current_clip(self):
+        if len(self.clips) <= 1:
+            return # we never go to zero clips
+        movie.save_before_closing()
+        os.rename(movie.dir, movie.dir + '-deleted')
+        del self.clips[self.clip_pos]
+        del self.images[self.clip_pos]
+        self.clip_pos = min(self.clip_pos, len(self.clips)-1)
     def draw(self):
         left, bottom, width, height = self.rect
-        for image in self.images[self.clip_pos:]:
+        first = True
+        pos = self.show_pos if self.show_pos is not None else self.clip_pos
+        for image in self.images[pos:]:
+            if first and pos == self.clip_pos:
+                try:
+                    image = scale_image(movie.curr_frame(), image.get_width()) 
+                    self.images[pos] = image # this keeps the image correct when scrolled out of clip_pos
+                    # (we don't self.reload() upon scrolling so self.images can go stale when the current
+                    # clip is modified)
+                except:
+                    pass
+                first = False
             screen.blit(image, (left, bottom), image.get_rect()) 
             pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), 1, 1)
             bottom += image.get_height()
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
     def y2frame(self, y):
-        if not self.images:
+        if not self.images or y is None:
             return None
         return y // self.images[0].get_height()
     def on_mouse_down(self,x,y):
@@ -575,10 +596,12 @@ class MovieListArea:
             restore_tool()
             return
         self.prevy = y
+        self.show_pos = self.clip_pos
     def on_mouse_move(self,x,y):
-        pass # opening a movie is a slow operation so we don't want it to be "too interactive"
-        # (like timeline scrolling)
-    def on_mouse_up(self,x,y):
+        if self.prevy is None:
+            self.prevy = y # this happens eg when a new_delete_tool is used upon mouse down
+            # and then the original tool is restored
+            self.show_pos = self.clip_pos
         if self.new_delete_tool():
             return
         prev_pos = self.y2frame(self.prevy)
@@ -589,9 +612,16 @@ class MovieListArea:
         if curr_pos is not None and prev_pos is not None:
             pos_dist = prev_pos - curr_pos
         else:
-            pos_dist = -1 if x > self.prevx else 1
+            pos_dist = -1 if y > self.prevy else 1
         self.prevy = y
-        self.open_clip(min(max(0, self.clip_pos + pos_dist), len(self.clips)-1))
+        self.show_pos = min(max(0, self.show_pos + pos_dist), len(self.clips)-1) 
+    def on_mouse_up(self,x,y):
+        self.on_mouse_move(x,y)
+        # opening a movie is a slow operation so we don't want it to be "too interactive"
+        # (like timeline scrolling) - we wait for the mouse-up event to actually open the clip
+        self.open_clip(self.show_pos)
+        self.prevy = None
+        self.show_pos = None
     def open_clip(self, clip_pos):
         if clip_pos == self.clip_pos:
             return
@@ -881,7 +911,7 @@ def insert_clip():
     layout.movie_list_area().reload()
 
 def remove_clip():
-    print('TODO')
+    layout.movie_list_area().remove_current_clip()
 
 def toggle_playing(): layout.toggle_playing()
 
@@ -986,6 +1016,8 @@ def get_clip_dirs():
     clipdirs = {}
     for d in wdfiles:
         try:
+            if d.endswith('-deleted'):
+                continue
             frame_order_file = os.path.join(os.path.join(WD, d), 'frame_order.txt')
             s = os.stat(frame_order_file)
             clipdirs[d] = s.st_mtime
