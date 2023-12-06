@@ -472,7 +472,8 @@ class TimelineArea:
         def draw_frame(pos, x, thumb_width):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
             screen.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
-            pygame.draw.rect(screen, PEN, (x, bottom, thumb_width, height), 1, 1)
+            border = 1 + 2*(pos==movie.pos)
+            pygame.draw.rect(screen, PEN, (x, bottom, thumb_width, height), border)
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
                 pos_dist = pos - movie.pos
@@ -564,19 +565,12 @@ class MovieListArea:
             self.clips.append(clip)
             self.images.append(scale_image(pg.image.load(last_modified), int(screen.get_width() * 0.15)))
         self.clip_pos = 0 
-    def remove_current_clip(self):
-        if len(self.clips) <= 1:
-            return # we never go to zero clips
-        movie.save_before_closing()
-        os.rename(movie.dir, movie.dir + '-deleted')
-        del self.clips[self.clip_pos]
-        del self.images[self.clip_pos]
-        self.clip_pos = min(self.clip_pos, len(self.clips)-1)
     def draw(self):
         left, bottom, width, height = self.rect
         first = True
         pos = self.show_pos if self.show_pos is not None else self.clip_pos
         for image in self.images[pos:]:
+            border = 1 + first*2
             if first and pos == self.clip_pos:
                 try:
                     image = scale_image(movie.curr_frame(), image.get_width()) 
@@ -585,9 +579,9 @@ class MovieListArea:
                     # clip is modified)
                 except:
                     pass
-                first = False
+            first = False
             screen.blit(image, (left, bottom), image.get_rect()) 
-            pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), 1, 1)
+            pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), border)
             bottom += image.get_height()
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
     def y2frame(self, y):
@@ -857,6 +851,7 @@ class Movie:
                 writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface), [1,0,2]))
 
     def save_before_closing(self):
+        self.frames[self.pos].dirty = True # updates the image timestamp so we open at that image next time...
         self.frames[self.pos].save()
         self.save_gif()
 
@@ -916,7 +911,16 @@ def insert_clip():
     layout.movie_list_area().reload()
 
 def remove_clip():
-    layout.movie_list_area().remove_current_clip()
+    movie_list_area = layout.movie_list_area()
+    if len(movie_list_area.clips) <= 1:
+        return # we don't remove the last clip - if we did we'd need to create a blank one,
+        # which is a bit confusing. [we can't remove the last frame in a timeline, either]
+    global movie
+    movie.save_before_closing()
+    os.rename(movie.dir, movie.dir + '-deleted')
+    movie_list_area.reload()
+
+    movie = Movie(movie_list_area.clips[0])
 
 def toggle_playing(): layout.toggle_playing()
 
