@@ -236,6 +236,7 @@ class Layout:
         self.playing_index = 0
         self.tool = PenTool()
         self.full_tool = TOOLS['pencil']
+        self.focus_elem = None
 
     def aspect_ratio(self): return self.width/self.height
 
@@ -255,35 +256,39 @@ class Layout:
                 elem.draw()
             #pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
 
+    # note that pygame seems to miss mousemove events with a Wacom pen when it's not pressed.
+    # (not sure if entirely consistently.) no such issue with a regular mouse
     def on_event(self,event):
-        if self.is_playing:
-            # TODO: this isn't the way - should allow the stop button to be pressed
-            # need to disable the other operations differently from this
-            if event.type == PLAYBACK_TIMER_EVENT:
+        if event.type == PLAYBACK_TIMER_EVENT:
+            if self.is_playing:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
+            else:
+                return
 
         if event.type == SAVING_TIMER_EVENT:
             movie.frames[movie.pos].save()
             return
-        
+
         x, y = pygame.mouse.get_pos()
         for elem in self.elems:
             left, bottom, width, height = elem.rect
             if x>=left and x<left+width and y>=bottom and y<bottom+height:
-                self.focus_elem = elem
                 if not self.is_playing or isinstance(elem, TogglePlaybackButton):
-                # mouse position is within this element
                     self._dispatch_event(elem, event, x, y)
 
     def _dispatch_event(self, elem, event, x, y):
         if event.type == pygame.MOUSEBUTTONDOWN:
             self.is_pressed = True
-            elem.on_mouse_down(x,y)
+            self.focus_elem = elem
+            self.focus_elem.on_mouse_down(x,y)
         elif event.type == pygame.MOUSEBUTTONUP:
             self.is_pressed = False
-            elem.on_mouse_up(x,y)
+            if self.focus_elem:
+                self.focus_elem.on_mouse_up(x,y)
+            self.focus_elem = None
         elif event.type == pygame.MOUSEMOTION and self.is_pressed:
-            elem.on_mouse_move(x,y)
+            if self.focus_elem:
+                self.focus_elem.on_mouse_move(x,y)
 
     def drawing_area(self):
         assert isinstance(self.elems[0], DrawingArea)
