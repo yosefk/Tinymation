@@ -393,7 +393,7 @@ class TimelineArea:
         self.combined_movie_pos = None
         self.combined_movie_len = None
 
-        self.loop = False
+        self.loop_mode = False
 
     def light_table_positions(self):
         # TODO: order 
@@ -408,7 +408,7 @@ class TimelineArea:
             if not self.on_light_table[pos_dist]:
                 continue
             abs_pos = movie.pos + pos_dist
-            if not self.loop and (abs_pos < 0 or abs_pos >= len(movie.frames)):
+            if not self.loop_mode and (abs_pos < 0 or abs_pos >= len(movie.frames)):
                 continue
             pos = abs_pos % len(movie.frames)
             if pos in covered_positions:
@@ -475,16 +475,15 @@ class TimelineArea:
         self.frame_boundaries = []
         self.eye_boundaries = []
 
-        def draw_frame(pos, x, thumb_width):
+        def draw_frame(pos, pos_dist, x, thumb_width):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
             screen.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             border = 1 + 2*(pos==movie.pos)
             pygame.draw.rect(screen, PEN, (x, bottom, thumb_width, height), border)
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
-                pos_dist = pos - movie.pos
                 eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
-                eye_x = x + 2 if pos > movie.pos else x+thumb_width-eye.get_width() - 2
+                eye_x = x + 2 if pos_dist > 0 else x+thumb_width-eye.get_width() - 2
                 screen.blit(eye, (eye_x, bottom), eye.get_rect())
                 self.eye_boundaries.append((eye_x, bottom, eye_x+eye.get_width(), bottom+eye.get_height(), pos_dist))
 
@@ -494,25 +493,45 @@ class TimelineArea:
         # current frame
         curr_frame_width = thumb_width(1)
         centerx = (left+width)/2
-        draw_frame(movie.pos, centerx - curr_frame_width/2, curr_frame_width)
+        draw_frame(movie.pos, 0, centerx - curr_frame_width/2, curr_frame_width)
 
         # next frames
         x = centerx + curr_frame_width/2
-        for i,pos in enumerate(range(movie.pos+1,len(movie.frames))):
+        i = 0
+        pos = movie.pos + 1
+        while True:
             if i >= len(factors):
                 break
+            if not self.loop_mode and pos >= len(movie.frames):
+                break
+            if pos >= len(movie.frames): # went past the last frame
+                pos = 0
+            if pos == movie.pos: # gone all the way back to the current frame
+                break
             ith_frame_width = thumb_width(factors[i])
-            draw_frame(pos, x, ith_frame_width)
+            draw_frame(pos, i+1, x, ith_frame_width)
             x += ith_frame_width
+            pos += 1
+            i += 1
 
         # previous frames
         x = centerx - curr_frame_width/2
-        for i,pos in enumerate(reversed(list(range(0,movie.pos)))):
+        i = 0
+        pos = movie.pos - 1
+        while True:
             if i >= len(factors):
+                break
+            if not self.loop_mode and pos < 0:
+                break
+            if pos < 0: # went past the first frame
+                pos = len(movie.frames) - 1
+            if pos == movie.pos: # gone all the way back to the current frame
                 break
             ith_frame_width = thumb_width(factors[i])
             x -= ith_frame_width
-            draw_frame(pos, x, ith_frame_width)
+            draw_frame(pos, -i-1, x, ith_frame_width)
+            pos -= 1
+            i += 1
 
     def update_on_light_table(self,x,y):
         for left, bottom, right, top, pos_dist in self.eye_boundaries:
@@ -546,7 +565,11 @@ class TimelineArea:
         self.prevx = x
         if pos_dist != 0:
             append_seek_frame_history_item_if_frame_is_dirty()
-            movie.seek_frame(min(max(0, movie.pos + pos_dist), len(movie.frames)-1))
+            if self.loop_mode:
+                new_pos = (movie.pos + pos_dist) % len(movie.frames)
+            else:
+                new_pos = min(max(0, movie.pos + pos_dist), len(movie.frames)-1)
+            movie.seek_frame(new_pos)
 
 def get_last_modified(filenames):
     f2mtime = {}
@@ -927,6 +950,10 @@ def remove_clip():
 
 def toggle_playing(): layout.toggle_playing()
 
+def toggle_loop_mode():
+    timeline_area = layout.timeline_area()
+    timeline_area.loop_mode = not timeline_area.loop_mode
+
 TOOLS = {
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
@@ -945,12 +972,12 @@ TOOLS = {
 }
 
 FUNCTIONS = {
-    # FIXME
     'insert-frame': (insert_frame, '=+', pg.image.load('sheets.png')),
     'remove-frame': (remove_frame, '-_', pg.image.load('garbage.png')),
     'next-frame': (next_frame, '.<', None),
     'prev-frame': (prev_frame, ',>', None),
     'toggle-playing': (toggle_playing, '\r', None),
+    'toggle-loop-mode': (toggle_loop_mode, 'l', None),
 }
 
 prev_tool = None
