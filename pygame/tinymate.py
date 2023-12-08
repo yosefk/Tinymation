@@ -362,13 +362,15 @@ class TimelineArea:
         # stuff for drawing the timeline
         self.frame_boundaries = []
         self.eye_boundaries = []
-        self.prevx = 0
+        self.prevx = None
         self.factors = [x*(0.75/0.6) for x in[0.7,0.6,0.5,0.4,0.3,0.2,0.15]]
 
-        self.eye_open = pg.image.load('eye_open.png')
-        self.eye_open = scale_image(self.eye_open, int(screen.get_width() * 0.15*0.14))
-        self.eye_shut = pg.image.load('eye_shut.png')
-        self.eye_shut = scale_image(self.eye_shut, int(screen.get_width() * 0.15*0.14))
+        eye_icon_size = int(screen.get_width() * 0.15*0.14)
+        self.eye_open = scale_image(pg.image.load('eye_open.png'), eye_icon_size)
+        self.eye_shut = scale_image(pg.image.load('eye_shut.png'), eye_icon_size)
+
+        self.loop_icon = scale_image(pg.image.load('loop.png'), int(screen.get_width()*0.15*0.14))
+        self.arrow_icon = scale_image(pg.image.load('arrow.png'), int(screen.get_width()*0.15*0.2))
 
         # stuff for light table [what positions are enabled and what the resulting
         # mask to be rendered together with the current frame is]
@@ -486,6 +488,11 @@ class TimelineArea:
                 eye_x = x + 2 if pos_dist > 0 else x+thumb_width-eye.get_width() - 2
                 screen.blit(eye, (eye_x, bottom), eye.get_rect())
                 self.eye_boundaries.append((eye_x, bottom, eye_x+eye.get_width(), bottom+eye.get_height(), pos_dist))
+            else:
+                mode_x = x + 2
+                mode = self.arrow_icon if self.loop_mode else self.loop_icon
+                screen.blit(mode, (mode_x, bottom), mode.get_rect())
+                self.loop_boundaries = (mode_x, bottom, mode_x+mode.get_width(), bottom+mode.get_height())
 
         def thumb_width(factor):
             return int((frame_width * height // frame_height) * factor)
@@ -537,20 +544,33 @@ class TimelineArea:
         for left, bottom, right, top, pos_dist in self.eye_boundaries:
             if y >= bottom and y <= top and x >= left and x <= right:
                 self.on_light_table[pos_dist] = not self.on_light_table[pos_dist]
+                return True
+
+    def update_loop_mode(self,x,y):
+        left, bottom, right, top = self.loop_boundaries
+        if y >= bottom and y <= top and x >= left and x <= right:
+            self.loop_mode = not self.loop_mode
+            return True
 
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
 
     def on_mouse_down(self,x,y):
+        self.prevx = None
         if self.new_delete_tool():
             if self.x2frame(x) == movie.pos:
                 layout.tool.frame_func()
                 restore_tool() # we don't want multiple clicks in a row to delete lots of frames etc
             return
-        self.update_on_light_table(x,y)
+        if self.update_on_light_table(x,y):
+            return
+        if self.update_loop_mode(x,y):
+            return
         self.prevx = x
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
     def on_mouse_move(self,x,y):
+        if self.prevx is None:
+            return
         if self.new_delete_tool():
             return
         prev_pos = self.x2frame(self.prevx)
