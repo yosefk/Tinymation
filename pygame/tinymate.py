@@ -26,6 +26,7 @@ UNDRAWABLE = (220, 215, 190)
 WIDTH = 5 
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 SCALE = 1
+MAX_HISTORY_BYTE_SIZE = 2*1024**3
 
 MY_DOCUMENTS = winpath.get_my_documents()
 WD = os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymate')
@@ -137,6 +138,11 @@ class HistoryItem:
     def __str__(self):
         return f'HistoryItem(pos={self.pos}, rect=({self.minx}, {self.miny}, {self.maxx}, {self.maxy}))'
 
+    def byte_size(self):
+        width = self.surface.get_width()
+        height = self.surface.get_height()
+        return width*height*4 # assuming 8b RGBA
+
 class PenTool:
     def __init__(self, color=PEN, width=WIDTH):
         self.prev_drawn = None
@@ -164,7 +170,7 @@ class PenTool:
         drawCircle(frame, x, y, self.color, self.circle_width)
         if self.history_item:
             self.history_item.optimize()
-            history.append(self.history_item)
+            history_append(self.history_item)
             self.history_item = None
 
     def on_mouse_move(self, x, y):
@@ -198,11 +204,15 @@ class PaintBucketTool:
         pygame.gfxdraw.aaellipse(screen, x, y, rx, ry, PEN)
         pygame.gfxdraw.aaellipse(screen, x, y, rx-1, ry-1, PEN)
     def on_mouse_down(self, x, y):
-        history.append(HistoryItem())
         # TODO: would be better to optimize the history item
         surface = movie.edit_curr_frame()
-        if surface.get_at((x,y)) == PEN:
-            return # never flood pen lines or the light table won't work properly
+        xy_color = surface.get_at((x,y))
+        if xy_color == PEN or xy_color == self.color:
+            return # never flood pen lines or the light table won't work properly (meaning,
+            # don't create an illusion that flooding pen lines is a nice way to get colored lines.
+            # of course nothing prevents someone from figuring out that the eraser can be used as a pencil
+            # and then you can flood those lines...)
+        history_append(HistoryItem())
         fill_color = surface.map_rgb(self.color)
         surf_array = pygame.surfarray.pixels2d(surface)  # Create an array from the surface.
         flood_fill(surf_array, (x,y), fill_color, in_place=True)
@@ -714,10 +724,6 @@ class Frame:
         fname = self.filename()
         if os.path.exists(fname):
             os.unlink(fname)
-    #def make_curr(self):
-    #    self.hist_state = history[-1] if history else None
-    #def dirty(self):
-    #    return self.hist_state is (history[-1] if history else None)
 
 def clip_frame_filenames(clipdir):
     with open(os.path.join(clipdir, 'frame_order.txt'), 'r') as frame_order:
@@ -878,16 +884,16 @@ class RemoveFrameHistoryItem:
 
 def append_seek_frame_history_item_if_frame_is_dirty():
     if history and not isinstance(history[-1], SeekFrameHistoryItem):
-        history.append(SeekFrameHistoryItem(movie.pos))
+        history_append(SeekFrameHistoryItem(movie.pos))
 
 def insert_frame():
     movie.insert_frame()
-    history.append(InsertFrameHistoryItem(movie.pos))
+    history_append(InsertFrameHistoryItem(movie.pos))
 
 def remove_frame():
     pos = movie.pos
     removed = movie.remove_frame()
-    history.append(RemoveFrameHistoryItem(pos, removed))
+    history_append(RemoveFrameHistoryItem(pos, removed))
 
 def next_frame():
     if movie.pos >= len(movie.frames)-1:
@@ -1103,6 +1109,32 @@ init_layout()
 # what you've done on some frame when you visit it and press undo one time
 # too many
 history = []
+history_byte_size = 0
+
+def byte_size(history_item):
+    return getattr(history_item, 'byte_size', lambda: 128)()
+
+def history_append(item):
+    global history_byte_size
+    history_byte_size += byte_size(item)
+    print('total history size',history_byte_size)
+    history.append(item)
+    while history and history_byte_size > MAX_HISTORY_BYTE_SIZE:
+        print('trimming!')
+        history_byte_size -= byte_size(history[0])
+        del history[0]
+
+def history_pop():
+    global history_byte_size
+    if history:
+        # TODO: we might want a loop here since some undo ops
+        # turn out to be "no-ops" (specifically seek frame where we're already there.)
+        # as it is right now, you might press undo and nothing will happen which might be confusing
+        last_op = history[-1]
+        last_op.undo()
+        history_byte_size -= byte_size(last_op)
+        history.pop()
+
 escape = False
 
 PLAYBACK_TIMER_EVENT = pygame.USEREVENT + 1
@@ -1138,12 +1170,7 @@ while not escape:
             continue # ignore keystrokes (except ESC) when a mouse tool is being used
         
         if event.key == ord(' '): # undo
-            if history:
-                # TODO: we might want a loop here since some undo ops
-                # turn out to be "no-ops" (specifically seek frame where we're already there.)
-                # as it is right now, you might press undo and nothing will happen which might be confusing
-                history[-1].undo()
-                history.pop()
+            history_pop()
 
         if keyboard_shortcuts_enabled:
           for tool in TOOLS.values():
