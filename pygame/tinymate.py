@@ -357,7 +357,7 @@ class TimelineArea:
         self.frame_boundaries = []
         self.eye_boundaries = []
         self.prevx = 0
-        self.factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.14]
+        self.factors = [x*(0.75/0.6) for x in[0.7,0.6,0.5,0.4,0.3,0.2,0.15]]
 
         self.eye_open = pg.image.load('eye_open.png')
         self.eye_open = scale_image(self.eye_open, int(screen.get_width() * 0.15*0.14))
@@ -389,8 +389,7 @@ class TimelineArea:
 
         self.loop = False
 
-    def light_table_masks(self):
-        masks = []
+    def light_table_positions(self):
         # TODO: order 
         covered_positions = {movie.pos} # the current position is definitely covered,
         # don't paint over it...
@@ -421,6 +420,11 @@ class TimelineArea:
             brightness = int((200 * (num - curr - 1) / (num - 1)) + 55 if num > 1 else 255)
             color = (0,0,brightness) if pos_dist < 0 else (0,brightness,0)
             transparency = 0.3
+            yield (pos, color, transparency)
+
+    def light_table_masks(self):
+        masks = []
+        for pos, color, transparency in self.light_table_positions():
             masks.append(movie.get_mask(pos, color, transparency))
         return masks
 
@@ -964,6 +968,16 @@ def set_tool(tool):
 def restore_tool():
     set_tool(prev_tool)
 
+def color_image(s, color):
+    dr, dg, db = color
+    sc = s.copy()
+    for y in range(s.get_height()):
+        for x in range(s.get_width()):
+            r,g,b,a = s.get_at((x,y))
+            new = (int(r*dr/255), int(g*dg/255), int(b*db/255))
+            sc.set_at((x,y), new+(a,))
+    return sc
+
 class Palette:
     def __init__(self, filename, rows=12, columns=3):
         s = pg.image.load(filename)
@@ -1006,14 +1020,7 @@ class Palette:
         self.cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
         for row in range(self.rows):
             for col in range(self.columns):
-                dr,dg,db = self.colors[row][col]
-                sc = s.copy()
-                for y in range(s.get_height()):
-                    for x in range(s.get_width()):
-                        r,g,b,a = s.get_at((x,y))
-                        new = (int(r*dr/255), int(g*dg/255), int(b*db/255))
-                        sc.set_at((x,y), new+(a,))
-        
+                sc = color_image(s, self.colors[row][col])
                 self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), sc)
 
 
