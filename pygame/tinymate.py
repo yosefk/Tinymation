@@ -1128,6 +1128,9 @@ interesting_events = [
     SAVING_TIMER_EVENT,
 ]
 
+keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
+# upon random banging on the keyboard
+
 while not escape: 
  try:
   for event in pygame.event.get():
@@ -1135,7 +1138,7 @@ while not escape:
        continue
    try:
       if event.type == pygame.KEYDOWN:
-        if event.key == 27: # ESC pressed
+        if event.key == pygame.K_ESCAPE: # ESC pressed
             escape = True
             break
 
@@ -1150,14 +1153,18 @@ while not escape:
                 history[-1].undo()
                 history.pop()
 
-        for tool in TOOLS.values():
+        if keyboard_shortcuts_enabled:
+          for tool in TOOLS.values():
             if event.key in [ord(c) for c in tool.chars]:
                 set_tool(tool)
 
-        for func, chars, _ in FUNCTIONS.values():
+          for func, chars, _ in FUNCTIONS.values():
             if event.key in [ord(c) for c in chars]:
                 func()
                 
+        if event.key == pygame.K_a and pygame.key.get_mods() & pygame.KMOD_CTRL:
+            keyboard_shortcuts_enabled = not keyboard_shortcuts_enabled
+            print('Ctrl-A pressed -','enabling' if keyboard_shortcuts_enabled else 'disabling','keyboard shortcuts')
       else:
           layout.on_event(event)
 
