@@ -545,6 +545,7 @@ class TimelineArea:
             pos_dist = -1 if x > self.prevx else 1
         self.prevx = x
         if pos_dist != 0:
+            append_seek_frame_history_item_if_frame_is_dirty()
             movie.seek_frame(min(max(0, movie.pos + pos_dist), len(movie.frames)-1))
 
 def get_last_modified(filenames):
