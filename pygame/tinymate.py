@@ -321,12 +321,8 @@ class DrawingArea:
     def __init__(self):
         pass
     def draw(self):
-        try:
-            m = movie
-        except:
-            return
         left, bottom, width, height = self.rect
-        frame = to_scale(m.frames[layout.playing_index].surface if layout.is_playing else m.curr_frame())
+        frame = to_scale(movie.frames[layout.playing_index].surface if layout.is_playing else movie.curr_frame())
         screen.blit(frame, (left, bottom), (0, 0, width, height))
 
         if not layout.is_playing:
@@ -458,10 +454,6 @@ class TimelineArea:
             if x >= left and x <= right:
                 return pos
     def draw(self):
-        try:
-            m = movie
-        except:
-            return
         left, bottom, width, height = self.rect
         frame_width = movie.curr_frame().get_width()
         frame_height = movie.curr_frame().get_height()
@@ -1087,8 +1079,6 @@ def init_layout():
 
     layout.draw()
 
-init_layout()
-
 def new_movie_clip_dir():
     now = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     return os.path.join(WD, now)
@@ -1103,6 +1093,8 @@ def default_clip_dir():
         return os.path.join(WD, clip_dirs[0])
 
 movie = Movie(default_clip_dir())
+
+init_layout()
 
 # The history is "global" for all operations. In some (rare) animation programs
 # there's a history per frame. One problem with this is how to undo timeline
