@@ -1117,10 +1117,8 @@ def byte_size(history_item):
 def history_append(item):
     global history_byte_size
     history_byte_size += byte_size(item)
-    print('total history size',history_byte_size)
     history.append(item)
     while history and history_byte_size > MAX_HISTORY_BYTE_SIZE:
-        print('trimming!')
         history_byte_size -= byte_size(history[0])
         del history[0]
 
