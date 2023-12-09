@@ -814,10 +814,13 @@ class Movie:
         self.frames[pos].hold = not self.frames[pos].hold
         self.clear_cache()
 
-    def frame(self, pos): # return the closest frame in the past where hold is false
+    def _surface_pos(self, pos):
         while self.frames[pos].hold:
             pos -= 1
-        return self.frames[pos]
+        return pos
+
+    def frame(self, pos): # return the closest frame in the past where hold is false
+        return self.frames[self._surface_pos(pos)]
 
     def save_meta(self):
         frames = [{'id':frame.id,'hold':frame.hold} for frame in self.frames]
@@ -827,11 +830,12 @@ class Movie:
 
     def get_mask(self, pos, color, transparency):
         assert pos != self.pos
+        pos = self._surface_pos(pos)
         mask = self.mask_cache.setdefault(pos, LightTableMask())
-        if mask.color == color and mask.transparency == transparency \
+        if pos != self.pos and mask.color == color and mask.transparency == transparency \
             and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
             return mask.surface
-        mask.surface = to_scale(pen2mask(self.frame(pos).surface, color, transparency))
+        mask.surface = to_scale(pen2mask(self.frames[pos].surface, color, transparency))
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
@@ -839,6 +843,7 @@ class Movie:
         return mask.surface
 
     def get_thumbnail(self, pos, width, height):
+        pos = self._surface_pos(pos)
         thumbnail = self.thumbnail_cache.setdefault(pos, Thumbnail())
         # self.pos is "volatile" (being edited right now) - don't cache 
         if pos != self.pos and thumbnail.width == width and thumbnail.height == height and \
@@ -848,7 +853,7 @@ class Movie:
         thumbnail.movie_len = len(self.frames)
         thumbnail.width = width
         thumbnail.height = height
-        thumbnail.surface = scale_image(self.frame(pos).surface, width, height)
+        thumbnail.surface = scale_image(self.frames[pos].surface, width, height)
         return thumbnail.surface
 
     def clear_cache(self):
@@ -961,6 +966,7 @@ class ToggleHoldHistoryItem:
             print('WARNING: wrong pos for a toggle-hold history item - expected {self.pos}, got {movie.pos}')
             movie.seek_frame(self.pos)
         movie.toggle_hold()
+        layout.timeline_area().combined_mask = None
 
 def append_seek_frame_history_item_if_frame_is_dirty():
     if history and not isinstance(history[-1], SeekFrameHistoryItem):
@@ -1013,6 +1019,7 @@ def toggle_loop_mode():
 def toggle_frame_hold():
     if movie.pos != 0:
         movie.toggle_hold()
+        layout.timeline_area().combined_mask = None
         history_append(ToggleHoldHistoryItem(movie.pos))
 
 TOOLS = {
