@@ -953,6 +953,15 @@ class RemoveFrameHistoryItem:
         s = self.frame.surface
         return s.get_width()*s.get_height()*4
 
+class ToggleHoldHistoryItem:
+    def __init__(self, pos):
+        self.pos = pos
+    def undo(self):
+        if movie.pos != self.pos:
+            print('WARNING: wrong pos for a toggle-hold history item - expected {self.pos}, got {movie.pos}')
+            movie.seek_frame(self.pos)
+        movie.toggle_hold()
+
 def append_seek_frame_history_item_if_frame_is_dirty():
     if history and not isinstance(history[-1], SeekFrameHistoryItem):
         history_append(SeekFrameHistoryItem(movie.pos))
@@ -1004,6 +1013,7 @@ def toggle_loop_mode():
 def toggle_frame_hold():
     if movie.pos != 0:
         movie.toggle_hold()
+        history_append(ToggleHoldHistoryItem(movie.pos))
 
 TOOLS = {
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
