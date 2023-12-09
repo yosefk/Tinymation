@@ -10,6 +10,7 @@ import datetime
 import numpy as np
 import sys
 import os
+import json
 
 # this requires numpy to be installed in addition to scikit-image
 from skimage.morphology import flood_fill
@@ -27,6 +28,7 @@ WIDTH = 5
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 SCALE = 1
 MAX_HISTORY_BYTE_SIZE = 2*1024**3
+FRAME_ORDER_FILE = 'frame_order.json'
 
 MY_DOCUMENTS = winpath.get_my_documents()
 WD = os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymate')
@@ -609,7 +611,7 @@ class MovieListArea:
         for clipdir in get_clip_dirs():
             clip = os.path.join(WD, clipdir)
             try:
-                last_modified = get_last_modified([f for frameid, f in clip_frame_filenames(clip)])
+                last_modified = get_last_modified([f for frameid, f, h in clip_frame_filenames(clip)])
             except:
                 continue
             self.clips.append(clip)
@@ -753,6 +755,7 @@ class Frame:
         self.surface = surface
         self.dir = dir
         self.id = str(uuid.uuid1())
+        self.hold = False
         # we don't aim to maintain a "perfect" dirty flag such as "doing 5 things and undoing
         # them should result in dirty==False." The goal is to avoid gratuitous saving when
         # scrolling thru the timeline, which slows things down and prevents reopening
@@ -770,9 +773,9 @@ class Frame:
             os.unlink(fname)
 
 def clip_frame_filenames(clipdir):
-    with open(os.path.join(clipdir, 'frame_order.txt'), 'r') as frame_order:
-        ids = frame_order.read().strip().split()
-        return [(frameid, os.path.join(clipdir, f'{frameid}.bmp')) for frameid in ids]
+    with open(os.path.join(clipdir, FRAME_ORDER_FILE), 'r') as frame_order:
+        frames = json.loads(frame_order.read())
+        return [(frame['id'], os.path.join(clipdir, frame['id']+'.bmp'), frame['hold']) for frame in frames]
 
 class Movie:
     def __init__(self, dir):
@@ -782,13 +785,15 @@ class Movie:
             self.frames = [Frame(layout.drawing_area().new_frame(), self.dir)]
             self.frames[0].save()
             self.pos = 0
+            self.save_meta()
         else:
             self.frames = []
             fname2id = {}
-            for frameid, fname in clip_frame_filenames(self.dir):
+            for frameid, fname, hold in clip_frame_filenames(self.dir):
                 fname2id[fname] = frameid
                 frame = Frame(pg.image.load(fname).convert(), self.dir)
                 frame.id = frameid
+                frame.hold = hold
                 frame.dirty = False
                 self.frames.append(frame)
             last_modified_id = fname2id[get_last_modified(fname2id.keys())]
@@ -796,12 +801,12 @@ class Movie:
             self.pos = [frame.id for frame in self.frames].index(last_modified_id)
         self.mask_cache = {}
         self.thumbnail_cache = {}
-        self.save_meta()
 
     def save_meta(self):
-        with open(os.path.join(self.dir, 'frame_order.txt'), 'w') as frame_order:
-            for frame in self.frames:
-                frame_order.write(f'{frame.id}\n')
+        frames = [{'id':frame.id,'hold':frame.hold} for frame in self.frames]
+        text = json.dumps(frames,indent=2)
+        with open(os.path.join(self.dir, FRAME_ORDER_FILE), 'w') as frame_order:
+            frame_order.write(text)
 
     def get_mask(self, pos, color, transparency):
         assert pos != self.pos
@@ -940,13 +945,13 @@ def remove_frame():
     history_append(RemoveFrameHistoryItem(pos, removed))
 
 def next_frame():
-    if movie.pos >= len(movie.frames)-1:
+    if movie.pos >= len(movie.frames)-1 and not layout.timeline_area().loop_mode:
         return
     append_seek_frame_history_item_if_frame_is_dirty()
     movie.next_frame()
 
 def prev_frame():
-    if movie.pos <= 0:
+    if movie.pos <= 0 and not layout.timeline_area().loop_mode:
         return
     append_seek_frame_history_item_if_frame_is_dirty()
     movie.prev_frame()
@@ -1080,7 +1085,7 @@ def get_clip_dirs():
         try:
             if d.endswith('-deleted'):
                 continue
-            frame_order_file = os.path.join(os.path.join(WD, d), 'frame_order.txt')
+            frame_order_file = os.path.join(os.path.join(WD, d), FRAME_ORDER_FILE)
             s = os.stat(frame_order_file)
             clipdirs[d] = s.st_mtime
         except:
