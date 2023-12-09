@@ -278,7 +278,7 @@ class Layout:
                 return
 
         if event.type == SAVING_TIMER_EVENT:
-            movie.frames[movie.pos].save()
+            movie.frame(movie.pos).save()
             return
 
         x, y = pygame.mouse.get_pos()
@@ -334,7 +334,7 @@ class DrawingArea:
         pass
     def draw(self):
         left, bottom, width, height = self.rect
-        frame = to_scale(movie.frames[layout.playing_index].surface if layout.is_playing else movie.curr_frame())
+        frame = to_scale(movie.frame(layout.playing_index).surface if layout.is_playing else movie.curr_frame())
         screen.blit(frame, (left, bottom), (0, 0, width, height))
 
         if not layout.is_playing:
@@ -802,6 +802,23 @@ class Movie:
         self.mask_cache = {}
         self.thumbnail_cache = {}
 
+    def toggle_hold(self):
+        pos = self.pos
+        assert pos != 0 # in loop mode one might expect to be able to hold the last frame and have it shown
+        # at the next frame, but that would create another surprise edge case - what happens when they're all held?..
+        # better this milder surprise...
+        if self.frames[pos].hold: # this frame's surface wasn't displayed - save the one that was
+            self.frame(pos).save()
+        else: # this frame was displayed and now won't be - save it before displaying the held one
+            self.frames[pos].save()
+        self.frames[pos].hold = not self.frames[pos].hold
+        self.clear_cache()
+
+    def frame(self, pos): # return the closest frame in the past where hold is false
+        while self.frames[pos].hold:
+            pos -= 1
+        return self.frames[pos]
+
     def save_meta(self):
         frames = [{'id':frame.id,'hold':frame.hold} for frame in self.frames]
         text = json.dumps(frames,indent=2)
@@ -814,7 +831,7 @@ class Movie:
         if mask.color == color and mask.transparency == transparency \
             and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
             return mask.surface
-        mask.surface = to_scale(pen2mask(self.frames[pos].surface, color, transparency))
+        mask.surface = to_scale(pen2mask(self.frame(pos).surface, color, transparency))
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
@@ -831,7 +848,7 @@ class Movie:
         thumbnail.movie_len = len(self.frames)
         thumbnail.width = width
         thumbnail.height = height
-        thumbnail.surface = scale_image(self.frames[pos].surface, width, height)
+        thumbnail.surface = scale_image(self.frame(pos).surface, width, height)
         return thumbnail.surface
 
     def clear_cache(self):
@@ -840,7 +857,7 @@ class Movie:
 
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
-        self.frames[self.pos].save()
+        self.frame(self.pos).save()
         self.pos = pos
         self.clear_cache()
         self.save_meta()
@@ -854,7 +871,7 @@ class Movie:
 
     def insert_frame_at_pos(self, pos, frame):
         assert pos >= 0 and pos <= len(self.frames)
-        self.frames[self.pos].save()
+        self.frame(self.pos).save()
         self.pos = pos
         self.frames.insert(self.pos, frame)
         self.clear_cache()
@@ -871,7 +888,7 @@ class Movie:
         if at_pos == -1:
             at_pos = self.pos
         else:
-            self.frames[self.pos].save()
+            self.frame(self.pos).save()
         self.pos = at_pos
 
         removed = self.frames[self.pos]
@@ -890,20 +907,22 @@ class Movie:
         return removed
 
     def curr_frame(self):
-        return self.frames[self.pos].surface
+        return self.frame(self.pos).surface
 
     def edit_curr_frame(self):
-        self.frames[self.pos].dirty = True
-        return self.curr_frame()
+        f = self.frame(self.pos)
+        f.dirty = True
+        return f.surface
 
     def save_gif(self):
         with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, mode='I') as writer:
-            for frame in self.frames:
+            for i in range(len(self.frames)):
+                frame = self.frame(i)
                 writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface), [1,0,2]))
 
     def save_before_closing(self):
-        self.frames[self.pos].dirty = True # updates the image timestamp so we open at that image next time...
-        self.frames[self.pos].save()
+        self.frame(self.pos).dirty = True # updates the image timestamp so we open at that image next time...
+        self.frame(self.pos).save()
         self.save_gif()
 
 class SeekFrameHistoryItem:
@@ -930,6 +949,9 @@ class RemoveFrameHistoryItem:
         movie.insert_frame_at_pos(self.pos, self.frame)
     def __str__(self):
         return f'RemoveFrameHistoryItem(inserting at pos {self.pos})'
+    def byte_size(self):
+        s = self.frame.surface
+        return s.get_width()*s.get_height()*4
 
 def append_seek_frame_history_item_if_frame_is_dirty():
     if history and not isinstance(history[-1], SeekFrameHistoryItem):
@@ -979,6 +1001,10 @@ def toggle_loop_mode():
     timeline_area = layout.timeline_area()
     timeline_area.loop_mode = not timeline_area.loop_mode
 
+def toggle_frame_hold():
+    if movie.pos != 0:
+        movie.toggle_hold()
+
 TOOLS = {
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
@@ -1003,6 +1029,7 @@ FUNCTIONS = {
     'prev-frame': (prev_frame, ',>', None),
     'toggle-playing': (toggle_playing, '\r', None),
     'toggle-loop-mode': (toggle_loop_mode, 'l', None),
+    'toggle-frame-hold': (toggle_frame_hold, 'h', None),
 }
 
 prev_tool = None
