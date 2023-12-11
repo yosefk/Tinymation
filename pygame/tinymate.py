@@ -1189,12 +1189,14 @@ def get_clip_dirs():
 
     return list(reversed(sorted(clipdirs.keys(), key=lambda d: clipdirs[d])))
 
-def init_layout():
+def init_layout_basic():
     screen.fill(UNDRAWABLE)
 
     global layout
     layout = Layout()
     layout.add((0.15,0.15,0.7,0.85), DrawingArea())
+
+def init_layout_rest():
     layout.add((0, 0, 1, 0.15), TimelineArea())
     layout.add((0.85, 0.15, 0.15, 0.85), MovieListArea())
 
@@ -1247,9 +1249,9 @@ def default_clip_dir():
         # TODO: pick the clip with the last-modified clip
         return os.path.join(WD, clip_dirs[0])
 
+init_layout_basic()
 movie = Movie(default_clip_dir())
-
-init_layout()
+init_layout_rest()
 
 # The history is "global" for all operations. In some (rare) animation programs
 # there's a history per frame. One problem with this is how to undo timeline
