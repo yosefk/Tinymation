@@ -374,6 +374,10 @@ class TimelineArea:
         self.loop_icon = scale_image(pg.image.load('loop.png'), int(screen.get_width()*0.15*0.14))
         self.arrow_icon = scale_image(pg.image.load('arrow.png'), int(screen.get_width()*0.15*0.2))
 
+        self.no_hold = scale_image(pg.image.load('no_hold.png'), int(screen.get_width()*0.15*0.25))
+        self.hold_active = scale_image(pg.image.load('hold_yellow.png'), int(screen.get_width()*0.15*0.25))
+        self.hold_inactive = scale_image(pg.image.load('hold_grey.png'), int(screen.get_width()*0.15*0.25))
+
         # stuff for light table [what positions are enabled and what the resulting
         # mask to be rendered together with the current frame is]
         self.on_light_table = {}
@@ -398,6 +402,9 @@ class TimelineArea:
         self.combined_movie_len = None
 
         self.loop_mode = False
+
+        self.toggle_hold_boundaries = (0,0,0,0)
+        self.loop_boundaries = (0,0,0,0)
 
     def light_table_positions(self):
         # TODO: order 
@@ -490,9 +497,9 @@ class TimelineArea:
                 eye_x = x + 2 if pos_dist > 0 else x+thumb_width-eye.get_width() - 2
                 screen.blit(eye, (eye_x, bottom), eye.get_rect())
                 self.eye_boundaries.append((eye_x, bottom, eye_x+eye.get_width(), bottom+eye.get_height(), pos_dist))
-            else:
+            elif len(movie.frames)>1:
                 mode_x = x + 2
-                mode = self.arrow_icon if self.loop_mode else self.loop_icon
+                mode = self.loop_icon if self.loop_mode else self.arrow_icon
                 screen.blit(mode, (mode_x, bottom), mode.get_rect())
                 self.loop_boundaries = (mode_x, bottom, mode_x+mode.get_width(), bottom+mode.get_height())
 
@@ -542,6 +549,26 @@ class TimelineArea:
             pos -= 1
             i += 1
 
+        self.draw_hold()
+
+    def draw_hold(self):
+        left, bottom, width, height = self.rect
+        # sort by position for nicer looking occlusion between adjacent icons
+        for left, right, pos in sorted(self.frame_boundaries, key=lambda x: x[2]):
+            if pos == 0:
+                continue # can't toggle hold at frame 0
+            if movie.frames[pos].hold:
+                hold = self.hold_active if pos == movie.pos else self.hold_inactive
+            elif pos == movie.pos:
+                hold = self.no_hold
+            else:
+                continue
+            hold_left = left-hold.get_width()/2
+            hold_bottom = bottom+height-hold.get_height()
+            screen.blit(hold, (hold_left, hold_bottom), hold.get_rect())
+            if pos == movie.pos:
+                self.toggle_hold_boundaries = (hold_left, hold_bottom, hold_left+hold.get_width(), hold_bottom+hold.get_height())
+
     def update_on_light_table(self,x,y):
         for left, bottom, right, top, pos_dist in self.eye_boundaries:
             if y >= bottom and y <= top and x >= left and x <= right:
@@ -552,6 +579,14 @@ class TimelineArea:
         left, bottom, right, top = self.loop_boundaries
         if y >= bottom and y <= top and x >= left and x <= right:
             self.loop_mode = not self.loop_mode
+            return True
+
+    def update_hold(self,x,y):
+        if len(movie.frames) <= 1:
+            return
+        left, bottom, right, top = self.toggle_hold_boundaries
+        if y >= bottom and y <= top and x >= left and x <= right:
+            toggle_frame_hold()
             return True
 
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
@@ -566,6 +601,8 @@ class TimelineArea:
         if self.update_on_light_table(x,y):
             return
         if self.update_loop_mode(x,y):
+            return
+        if self.update_hold(x,y):
             return
         self.prevx = x
     def on_mouse_up(self,x,y):
@@ -901,6 +938,9 @@ class Movie:
         del self.frames[self.pos]
         removed.delete()
 
+        self.frames[0].hold = False # could have been made true if we deleted frame 0
+        # and frame 1 had hold==True - now this wouldn't make sense
+
         if self.pos >= len(self.frames):
             self.pos = len(self.frames)-1
 
@@ -929,6 +969,7 @@ class Movie:
         self.frame(self.pos).dirty = True # updates the image timestamp so we open at that image next time...
         self.frame(self.pos).save()
         self.save_gif()
+        self.save_meta()
 
 class SeekFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
@@ -947,11 +988,19 @@ class InsertFrameHistoryItem:
         return f'InsertFrameHistoryItem(removing at pos {self.pos}, then seeking to pos {(self.pos-1)%len(movie.frames)})'
 
 class RemoveFrameHistoryItem:
-    def __init__(self, pos, frame):
+    def __init__(self, pos, frame, next_hold):
         self.pos = pos
         self.frame = frame
+        frame.dirty = True # otherwise undo() will not save the frame to disk... which is bad
+        # because remove_frame() deleted it from the disk!
+        self.next_hold = next_hold
     def undo(self):
         movie.insert_frame_at_pos(self.pos, self.frame)
+        # there's a special case when removing frame 0 while frames[1].hold was True -
+        # remove_frame will force it to False, in that case we need to restore it
+        if self.next_hold and self.pos==0:
+            movie.frames[1].hold = True
+            movie.save_meta()
     def __str__(self):
         return f'RemoveFrameHistoryItem(inserting at pos {self.pos})'
     def byte_size(self):
@@ -977,9 +1026,12 @@ def insert_frame():
     history_append(InsertFrameHistoryItem(movie.pos))
 
 def remove_frame():
+    if len(movie.frames) == 1:
+        return
     pos = movie.pos
+    next_hold = False if movie.pos+1 == len(movie.frames) else movie.frames[movie.pos+1].hold
     removed = movie.remove_frame()
-    history_append(RemoveFrameHistoryItem(pos, removed))
+    history_append(RemoveFrameHistoryItem(pos, removed, next_hold))
 
 def next_frame():
     if movie.pos >= len(movie.frames)-1 and not layout.timeline_area().loop_mode:
