@@ -8,9 +8,14 @@ import uuid
 import math
 import datetime
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('agg')  # turn off interactive backend
+import io
 import sys
 import os
 import json
+from scipy.interpolate import splprep, splev
 
 # this requires numpy to be installed in addition to scikit-image
 from skimage.morphology import flood_fill
@@ -36,6 +41,63 @@ if not os.path.exists(WD):
     os.makedirs(WD)
 print('clips read from, and saved to',WD)
 
+import time
+def image_from_fig(fig):
+    start = time.time_ns()
+    with io.BytesIO() as buff:
+        fig.savefig(buff, format='raw')
+        buff.seek(0)
+        data = np.frombuffer(buff.getvalue(), dtype=np.uint8)
+    w, h = fig.canvas.get_width_height()
+    im = data.reshape((int(h), int(w), -1))
+    return im
+
+fig = None
+ax = None
+
+# TODO: exception handling
+def bspline_interp(points):
+    x = np.array([1.*p[0] for p in points])
+    y = np.array([1.*p[1] for p in points])
+
+    okay = np.where(np.abs(np.diff(x)) + np.abs(np.diff(y)) > 0)
+    x = np.r_[x[okay], x[-1], x[0]]
+    y = np.r_[y[okay], y[-1], y[0]]
+    tck, u = splprep([x, y], s=len(x)/5)
+
+    ufirst = u[0]
+    ulast = u[-2]
+    step=(ulast-ufirst)/1000
+
+    new_points = splev(np.arange(ufirst, ulast+step, step), tck)
+    return new_points
+
+def plotLines(points, ax, width):
+
+    path = np.array(bspline_interp(points))
+    px, py = path[0], path[1]
+    ax.plot(py,px, linestyle='solid', linewidth=width, color='k')
+
+
+# FIXME: handle a single point case
+# FIXME: remove black boundary
+def drawLines(image_arr, points, width=3):
+    global fig
+    global ax
+    if not fig:
+        fig, ax = plt.subplots()
+        ax.axis('off')
+        # FIXME: need a reliable way to set the dimensions correctly
+        fig.set_size_inches((image_arr.shape[1])/fig.get_dpi()+0.01, image_arr.shape[0]/fig.get_dpi())
+        #fig.set_dpi(10)
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    plt.cla()
+    ax.imshow(image_arr)
+
+    plotLines(points, ax, width)
+
+    return image_from_fig(fig)[:,:,0:3]
 
 def drawCircle( screen, x, y, color, width):
   pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -152,6 +214,7 @@ class PenTool:
         self.width = width*SCALE
         self.circle_width = (width//2)*2*SCALE
         self.history_item = None
+        self.points = []
 
     def draw(self, rect, cursor_surface):
         left, bottom, width, height = rect
@@ -161,28 +224,45 @@ class PenTool:
         screen.blit(surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
 
     def on_mouse_down(self, x, y):
+        left, bottom, width, height = layout.drawing_area().rect
         self.history_item = HistoryItem()
         frame = movie.edit_curr_frame()
-        drawCircle(frame, x, y, self.color, self.circle_width)
+        drawCircle(screen, x+left, y+bottom, self.color, self.circle_width)
+        self.points = []
         self.on_mouse_move(x,y)
 
     def on_mouse_up(self, x, y):
+        start = time.time_ns()
+        self.points.append((x,y))
+        #print(self.points)
         self.prev_drawn = None
         frame = movie.edit_curr_frame()
-        drawCircle(frame, x, y, self.color, self.circle_width)
+        arr = pygame.surfarray.array3d(self.history_item.surface)
+        if False:
+            with_lines = drawLines(arr, self.points)
+            pygame.surfarray.blit_array(frame, with_lines)
+        else:
+            prev = None
+            for x,y in self.points:
+                if prev:
+                    drawLine(frame, prev, (x,y), self.color, self.width)
+                drawCircle(frame, x,y, self.color, self.circle_width)
+                prev = (x,y)
         if self.history_item:
             self.history_item.optimize()
             history_append(self.history_item)
             self.history_item = None
 
     def on_mouse_move(self, x, y):
+       left, bottom, width, height = layout.drawing_area().rect
+       self.points.append((x,y))
        if self.history_item:
             self.history_item.affected(x-self.width,y-self.width,x+self.width,y+self.width)
        frame = movie.edit_curr_frame()
        if self.prev_drawn:
-            drawLine(frame, self.prev_drawn, (x,y), self.color, self.width)
-       drawCircle(frame, x, y, self.color, self.circle_width)
-       self.prev_drawn = (x,y)
+            drawLine(screen, self.prev_drawn, (x+left,y+bottom), self.color, self.width)
+       drawCircle(screen, x+left, y+bottom, self.color, self.circle_width)
+       self.prev_drawn = (x+left,y+bottom)
 
 class NewDeleteTool(PenTool):
     def __init__(self, frame_func, clip_func):
@@ -260,7 +340,7 @@ class Layout:
 
     def draw(self):
         if self.is_pressed and self.focus_elem is self.drawing_area():
-            self.drawing_area().draw()
+            #self.drawing_area().draw()
             return
         screen.fill(UNDRAWABLE)
         for elem in self.elems:
