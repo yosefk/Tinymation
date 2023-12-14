@@ -31,7 +31,6 @@ BACKGROUND = (240, 235, 220)
 UNDRAWABLE = (220, 215, 190)
 WIDTH = 5 
 CURSOR_SIZE = int(screen.get_width() * 0.07)
-SCALE = 1
 MAX_HISTORY_BYTE_SIZE = 2*1024**3
 FRAME_ORDER_FILE = 'frame_order.json'
 
@@ -211,8 +210,8 @@ class PenTool:
     def __init__(self, color=PEN, width=WIDTH):
         self.prev_drawn = None
         self.color = color
-        self.width = width*SCALE
-        self.circle_width = (width//2)*2*SCALE
+        self.width = width
+        self.circle_width = (width//2)*2
         self.history_item = None
         self.points = []
 
@@ -414,7 +413,7 @@ class DrawingArea:
         pass
     def draw(self):
         left, bottom, width, height = self.rect
-        frame = to_scale(movie.frame(layout.playing_index).surface if layout.is_playing else movie.curr_frame())
+        frame = movie.frame(layout.playing_index).surface if layout.is_playing else movie.curr_frame()
         screen.blit(frame, (left, bottom), (0, 0, width, height))
 
         if not layout.is_playing:
@@ -424,7 +423,7 @@ class DrawingArea:
 
     def fix_xy(self,x,y):
         left, bottom, _, _ = self.rect
-        return (x-left)*SCALE, (y-bottom)*SCALE
+        return (x-left), (y-bottom)
     def on_mouse_down(self,x,y):
         layout.tool.on_mouse_down(*self.fix_xy(x,y))
     def on_mouse_up(self,x,y):
@@ -435,7 +434,7 @@ class DrawingArea:
         layout.tool.on_mouse_move(*self.fix_xy(x,y))
     def new_frame(self):
         _, _, width, height = self.rect
-        frame = make_surface(width*SCALE, height*SCALE)
+        frame = make_surface(width, height)
         frame.fill(BACKGROUND)
         return frame
 
@@ -861,12 +860,6 @@ class Thumbnail:
         self.movie_pos = None
         self.movie_len = None
 
-def to_scale(frame):
-    if SCALE==1:
-        return frame
-    _,_,w,h = frame.get_rect()
-    return scale_image(frame,w/SCALE,h/SCALE)
-
 class Frame:
     def __init__(self, surface, dir):
         self.surface = surface
@@ -952,7 +945,7 @@ class Movie:
         if pos != self.pos and mask.color == color and mask.transparency == transparency \
             and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
             return mask.surface
-        mask.surface = to_scale(pen2mask(self.frames[pos].surface, color, transparency))
+        mask.surface = pen2mask(self.frames[pos].surface, color, transparency)
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
