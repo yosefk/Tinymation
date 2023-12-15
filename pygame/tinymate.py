@@ -29,7 +29,8 @@ FRAME_RATE = 12
 PEN = (20, 20, 20)
 BACKGROUND = (240, 235, 220)
 UNDRAWABLE = (220, 215, 190)
-WIDTH = 5 
+WIDTH = 3 # the smallest width where you always have a pure pen color rendered along
+# the line path, making our naive flood fill work well...
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 MAX_HISTORY_BYTE_SIZE = 2*1024**3
 FRAME_ORDER_FILE = 'frame_order.json'
@@ -54,7 +55,6 @@ def image_from_fig(fig):
 fig = None
 ax = None
 
-# TODO: exception handling
 def bspline_interp(points):
     x = np.array([1.*p[0] for p in points])
     y = np.array([1.*p[1] for p in points])
@@ -66,23 +66,27 @@ def bspline_interp(points):
 
     ufirst = u[0]
     ulast = u[-2]
-    # TODO: more reasonable number of samples
-    step=(ulast-ufirst)/1000
+
+    total_dist = sum([math.sqrt((y1-y2)**2 + (x1-x2)**2) for (x1,y1),(x2,y2) in zip(points[1:], points[:-1])],0)
+    step=(ulast-ufirst)/total_dist
 
     new_points = splev(np.arange(ufirst, ulast+step, step), tck)
     return new_points
 
 def plotLines(points, ax, width):
+    if len(set(points)) == 1:
+        x,y = points[0]
+        eps = 0.001
+        points = [(x+eps, y+eps)] + points
+    try:
+        path = np.array(bspline_interp(points))
+        px, py = path[0], path[1]
+    except:
+        px = np.array([x for x,y in points])
+        py = np.array([y for x,y in points])
+    ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False, solid_capstyle='round')
 
-    path = np.array(bspline_interp(points))
-    px, py = path[0], path[1]
-    ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False)
 
-
-# FIXME: handle a single point case
-# FIXME: remove black boundary
-# FIXME: figure out the width
-# FIXME: make round endpoints
 def drawLines(image_height, image_width, points, width=3):
     global fig
     global ax
@@ -94,38 +98,24 @@ def drawLines(image_height, image_width, points, width=3):
         #fig.set_dpi(10)
         fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
+    width *= 72 / fig.get_dpi()
+
     plt.cla()
     plt.xlim(0, image_width)
     plt.ylim(0, image_height)
     ax.invert_yaxis()
-    #ax.imshow(image_arr)
+    ax.spines[['left', 'right', 'bottom', 'top']].set_visible(False)
+    ax.tick_params(left=False, right=False, bottom=False, top=False)
 
     plotLines(points, ax, width)
 
     return image_from_fig(fig)[:,:,0:3]
 
 def drawCircle( screen, x, y, color, width):
-  pygame.draw.circle( screen, color, ( x, y ), width/2 )
+    pygame.draw.circle( screen, color, ( x, y ), width/2 )
 
 def drawLine(screen, pos1, pos2, color, width):
-    if True or width != 5:
-        pygame.draw.line(screen, color, pos1, pos2, width)
-        return
-    def oft(p,x,y):
-        return p[0]+x, p[1]+y
-    pygame.draw.aaline(screen, color, pos1, pos2)
-    pygame.draw.aaline(screen, color, oft(pos1,-1,-1), oft(pos2,-1,-1))
-    pygame.draw.aaline(screen, color, oft(pos1,-1,1), oft(pos2,-1,1))
-    pygame.draw.aaline(screen, color, oft(pos1,1,1), oft(pos2,1,1))
-    pygame.draw.aaline(screen, color, oft(pos1,1,-1), oft(pos2,1,-1))
-    pygame.draw.aaline(screen, color, oft(pos1,1,0), oft(pos2,1,0))
-    pygame.draw.aaline(screen, color, oft(pos1,-1,0), oft(pos2,-1,0))
-    pygame.draw.aaline(screen, color, oft(pos1,0,1), oft(pos2,0,1))
-    pygame.draw.aaline(screen, color, oft(pos1,0,-1), oft(pos2,0,-1))
-    pygame.draw.aaline(screen, color, oft(pos1,2,0), oft(pos2,2,0))
-    pygame.draw.aaline(screen, color, oft(pos1,-2,0), oft(pos2,-2,0))
-    pygame.draw.aaline(screen, color, oft(pos1,0,2), oft(pos2,0,2))
-    pygame.draw.aaline(screen, color, oft(pos1,0,-2), oft(pos2,0,-2))
+    pygame.draw.line(screen, color, pos1, pos2, width)
 
 def make_surface(width, height):
     return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
@@ -261,7 +251,7 @@ class PenTool:
         self.prev_drawn = None
         frame = movie.edit_curr_frame().surf_by_id('lines')
 
-        new_lines = drawLines(frame.get_width(), frame.get_height(), self.points, self.width//2+1)
+        new_lines = drawLines(frame.get_width(), frame.get_height(), self.points, self.width)
         lines = pygame.surfarray.pixels_alpha(frame)
         if self.eraser:
             lines[:,:] = np.minimum(new_lines[:,:,0], lines[:,:])
