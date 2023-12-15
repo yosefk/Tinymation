@@ -66,6 +66,7 @@ def bspline_interp(points):
 
     ufirst = u[0]
     ulast = u[-2]
+    # TODO: more reasonable number of samples
     step=(ulast-ufirst)/1000
 
     new_points = splev(np.arange(ufirst, ulast+step, step), tck)
@@ -75,24 +76,29 @@ def plotLines(points, ax, width):
 
     path = np.array(bspline_interp(points))
     px, py = path[0], path[1]
-    ax.plot(py,px, linestyle='solid', linewidth=width, color='k')
+    ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False)
 
 
 # FIXME: handle a single point case
 # FIXME: remove black boundary
-def drawLines(image_arr, points, width=3):
+# FIXME: figure out the width
+# FIXME: make round endpoints
+def drawLines(image_height, image_width, points, width=3):
     global fig
     global ax
     if not fig:
         fig, ax = plt.subplots()
         ax.axis('off')
         # FIXME: need a reliable way to set the dimensions correctly
-        fig.set_size_inches((image_arr.shape[1])/fig.get_dpi()+0.01, image_arr.shape[0]/fig.get_dpi())
+        fig.set_size_inches(image_width/fig.get_dpi()+0.01, image_height/fig.get_dpi())
         #fig.set_dpi(10)
         fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
     plt.cla()
-    ax.imshow(image_arr)
+    plt.xlim(0, image_width)
+    plt.ylim(0, image_height)
+    ax.invert_yaxis()
+    #ax.imshow(image_arr)
 
     plotLines(points, ax, width)
 
@@ -160,29 +166,37 @@ garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 pg.mouse.set_cursor(pencil_cursor[0])
 
 class HistoryItem:
-    def __init__(self):
-        self.surface = movie.edit_curr_frame().copy()
+    def __init__(self, surface_id):
+        self.surface_id = surface_id
+        surface = movie.edit_curr_frame().surf_by_id(surface_id)
+        self.saved_array = self.array(surface.copy())
         self.pos = movie.pos
         self.minx = 10**9
         self.miny = 10**9
         self.maxx = -10**9
         self.maxy = -10**9
         self.optimized = False
+    def alpha(self):
+        return self.surface_id == 'lines'
+    def array(self,surface):
+        return pg.surfarray.pixels_alpha(surface) if self.alpha() else pg.surfarray.pixels3d(surface)
     def undo(self):
         if self.pos != movie.pos:
             print(f'WARNING: HistoryItem at the wrong position! should be {self.pos}, but is {movie.pos}')
         movie.seek_frame(self.pos) # we should already be here, but just in case
-        frame = movie.edit_curr_frame()
+        frame = self.array(movie.edit_curr_frame().surf_by_id(self.surface_id))
         if self.optimized:
             frame.blit(self.surface, (self.minx, self.miny), (0, 0, self.maxx-self.minx+1, self.maxy-self.miny+1))
         else:
-            frame.blit(self.surface, frame.get_rect())
+            #frame.blit(self.surface, frame.get_rect())
+            frame[:] = self.saved_array
     def affected(self,minx,miny,maxx,maxy):
         self.minx = min(minx,self.minx)
         self.maxx = max(maxx,self.maxx)
         self.miny = min(miny,self.miny)
         self.maxy = max(maxy,self.maxy)
     def optimize(self):
+        return # FIXME
         if self.minx == 10**9:
             return
         left, bottom, width,height = movie.edit_curr_frame().get_rect()
@@ -202,14 +216,27 @@ class HistoryItem:
         return f'HistoryItem(pos={self.pos}, rect=({self.minx}, {self.miny}, {self.maxx}, {self.maxy}))'
 
     def byte_size(self):
-        width = self.surface.get_width()
-        height = self.surface.get_height()
-        return width*height*4 # assuming 8b RGBA
+        width = self.saved_array.shape[0]
+        height = self.saved_array.shape[1]
+        return width*height*(1 if self.alpha() else 3)
+
+class HistoryItemSet:
+    def __init__(self, items):
+        self.items = items
+    def undo(self):
+        for item in self.items:
+            item.undo()
+    def optimize(self):
+        for item in self.items:
+            item.optimize()
+    def byte_size(self):
+        return sum([item.byte_size() for item in self.items])
 
 class PenTool:
-    def __init__(self, color=PEN, width=WIDTH):
+    def __init__(self, eraser=False, width=WIDTH):
         self.prev_drawn = None
-        self.color = color
+        self.color = BACKGROUND if eraser else PEN
+        self.eraser = eraser
         self.width = width
         self.circle_width = (width//2)*2
         self.history_item = None
@@ -223,45 +250,47 @@ class PenTool:
         screen.blit(surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
 
     def on_mouse_down(self, x, y):
-        left, bottom, width, height = layout.drawing_area().rect
-        self.history_item = HistoryItem()
-        frame = movie.edit_curr_frame()
-        drawCircle(screen, x+left, y+bottom, self.color, self.circle_width)
+        self.history_item = HistoryItem('lines')
         self.points = []
+        self.bucket_color = None
         self.on_mouse_move(x,y)
 
     def on_mouse_up(self, x, y):
         start = time.time_ns()
         self.points.append((x,y))
-        #print(self.points)
         self.prev_drawn = None
-        frame = movie.edit_curr_frame()
-        arr = pygame.surfarray.array3d(self.history_item.surface)
-        if False:
-            with_lines = drawLines(arr, self.points)
-            pygame.surfarray.blit_array(frame, with_lines)
+        frame = movie.edit_curr_frame().surf_by_id('lines')
+
+        new_lines = drawLines(frame.get_width(), frame.get_height(), self.points, self.width//2+1)
+        lines = pygame.surfarray.pixels_alpha(frame)
+        if self.eraser:
+            lines[:,:] = np.minimum(new_lines[:,:,0], lines[:,:])
         else:
-            prev = None
-            for x,y in self.points:
-                if prev:
-                    drawLine(frame, prev, (x,y), self.color, self.width)
-                drawCircle(frame, x,y, self.color, self.circle_width)
-                prev = (x,y)
+            lines[:,:] = np.maximum(255-new_lines[:,:,0], lines[:,:])
+
+        if self.eraser:
+            color_history_item = HistoryItem('color')
+            color = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+            flood_fill_color_based_on_lines(color, lines, x, y, self.bucket_color if self.bucket_color else BACKGROUND)
+            self.history_item = HistoryItemSet([self.history_item, color_history_item])
+
         if self.history_item:
             self.history_item.optimize()
             history_append(self.history_item)
             self.history_item = None
 
     def on_mouse_move(self, x, y):
-       left, bottom, width, height = layout.drawing_area().rect
+       if self.eraser and self.bucket_color is None and self.history_item.saved_array[x,y] != 255:
+           self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((x,y))
+       draw_into = screen.subsurface(layout.drawing_area().rect)
        self.points.append((x,y))
        if self.history_item:
             self.history_item.affected(x-self.width,y-self.width,x+self.width,y+self.width)
-       frame = movie.edit_curr_frame()
+       color = self.color if not self.eraser else (self.bucket_color if self.bucket_color else BACKGROUND)
        if self.prev_drawn:
-            drawLine(screen, self.prev_drawn, (x+left,y+bottom), self.color, self.width)
-       drawCircle(screen, x+left, y+bottom, self.color, self.circle_width)
-       self.prev_drawn = (x+left,y+bottom)
+            drawLine(draw_into, self.prev_drawn, (x,y), color, self.width)
+       drawCircle(draw_into, x, y, color, self.circle_width)
+       self.prev_drawn = (x,y) 
 
 class NewDeleteTool(PenTool):
     def __init__(self, frame_func, clip_func):
@@ -271,6 +300,13 @@ class NewDeleteTool(PenTool):
     def on_mouse_down(self, x, y): pass
     def on_mouse_up(self, x, y): pass
     def on_mouse_move(self, x, y): pass
+
+def flood_fill_color_based_on_lines(color, lines, x, y, bucket_color):
+    pen_mask = lines == 255
+    flood_code = 2
+    flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
+    for ch in range(3):
+         color[:,:,ch] = color[:,:,ch]*(1-flood_mask) + bucket_color[ch]*flood_mask
 
 class PaintBucketTool:
     def __init__(self,color):
@@ -285,19 +321,17 @@ class PaintBucketTool:
         pygame.gfxdraw.aaellipse(screen, x, y, rx, ry, PEN)
         pygame.gfxdraw.aaellipse(screen, x, y, rx-1, ry-1, PEN)
     def on_mouse_down(self, x, y):
+        color = pygame.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+        lines = pygame.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
+        
+        if np.array_equal(color[x,y,:], np.array(self.color)) or lines[x,y] == 255:
+            return # we never flood the lines themselves - they keep the PEN color in a separate layer;
+            # and there's no point in flooding with the color the pixel already has
+
         # TODO: would be better to optimize the history item
-        surface = movie.edit_curr_frame()
-        xy_color = surface.get_at((x,y))
-        if xy_color == PEN or xy_color == self.color:
-            return # never flood pen lines or the light table won't work properly (meaning,
-            # don't create an illusion that flooding pen lines is a nice way to get colored lines.
-            # of course nothing prevents someone from figuring out that the eraser can be used as a pencil
-            # and then you can flood those lines...)
-        history_append(HistoryItem())
-        fill_color = surface.map_rgb(self.color)
-        surf_array = pygame.surfarray.pixels2d(surface)  # Create an array from the surface.
-        flood_fill(surf_array, (x,y), fill_color, in_place=True)
-        pygame.surfarray.blit_array(surface, surf_array)
+        history_append(HistoryItem('color'))
+
+        flood_fill_color_based_on_lines(color, lines, x, y, self.color)
         
     def on_mouse_up(self, x, y):
         pass
@@ -413,7 +447,7 @@ class DrawingArea:
         pass
     def draw(self):
         left, bottom, width, height = self.rect
-        frame = movie.frame(layout.playing_index).surface if layout.is_playing else movie.curr_frame()
+        frame = movie.frame(layout.playing_index).surface() if layout.is_playing else movie.curr_frame().surface()
         screen.blit(frame, (left, bottom), (0, 0, width, height))
 
         if not layout.is_playing:
@@ -741,7 +775,7 @@ class MovieListArea:
             border = 1 + first*2
             if first and pos == self.clip_pos:
                 try:
-                    image = scale_image(movie.curr_frame(), image.get_width()) 
+                    image = scale_image(movie.curr_frame().surface(), image.get_width()) 
                     self.images[pos] = image # this keeps the image correct when scrolled out of clip_pos
                     # (we don't self.reload() upon scrolling so self.images can go stale when the current
                     # clip is modified)
@@ -862,7 +896,11 @@ class Thumbnail:
 
 class Frame:
     def __init__(self, surface, dir):
-        self.surface = surface
+        self.color = surface # FIXME
+        blank = make_surface(surface.get_width(), surface.get_height())
+        self.lines = pygame.Surface((blank.get_width(), blank.get_height()), pygame.SRCALPHA, blank.copy())
+        self.lines.fill(PEN)
+        pygame.surfarray.pixels_alpha(self.lines)[:,:] = 0
         self.dir = dir
         self.id = str(uuid.uuid1())
         self.hold = False
@@ -872,10 +910,22 @@ class Frame:
         # clips at the last actually-edited frame after exiting the program
         self.dirty = True
 
+    def get_width(self): return self.lines.get_width()
+    def get_height(self): return self.lines.get_height()
+    def get_rect(self): return self.lines.get_rect()
+
+    def surf_by_id(self, surface_id): return getattr(self, surface_id)
+
+    def surface(self):
+        s = self.color.copy()
+        s.blit(self.lines, (0, 0), (0, 0, s.get_width(), s.get_height()))
+        return s
+
     def filename(self): return os.path.join(self.dir, f'{self.id}.bmp')
     def save(self):
         if self.dirty:
-            pygame.image.save(self.surface, self.filename())
+            #pygame.image.save(self.surface, self.filename())
+            print('WARNING: not saving!')
             self.dirty = False
     def delete(self):
         fname = self.filename()
@@ -963,7 +1013,7 @@ class Movie:
         thumbnail.movie_len = len(self.frames)
         thumbnail.width = width
         thumbnail.height = height
-        thumbnail.surface = scale_image(self.frames[pos].surface, width, height)
+        thumbnail.surface = scale_image(self.frames[pos].surface(), width, height)
         return thumbnail.surface
 
     def clear_cache(self):
@@ -1025,18 +1075,18 @@ class Movie:
         return removed
 
     def curr_frame(self):
-        return self.frame(self.pos).surface
+        return self.frame(self.pos)
 
     def edit_curr_frame(self):
         f = self.frame(self.pos)
         f.dirty = True
-        return f.surface
+        return f
 
     def save_gif(self):
         with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, mode='I') as writer:
             for i in range(len(self.frames)):
                 frame = self.frame(i)
-                writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface), [1,0,2]))
+                writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface()), [1,0,2]))
 
     def save_before_closing(self):
         self.frame(self.pos).dirty = True # updates the image timestamp so we open at that image next time...
@@ -1077,8 +1127,8 @@ class RemoveFrameHistoryItem:
     def __str__(self):
         return f'RemoveFrameHistoryItem(inserting at pos {self.pos})'
     def byte_size(self):
-        s = self.frame.surface
-        return s.get_width()*s.get_height()*4
+        f = self.frame
+        return f.get_width()*f.get_height()*4
 
 class ToggleHoldHistoryItem:
     def __init__(self, pos):
