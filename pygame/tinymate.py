@@ -431,16 +431,15 @@ class Layout:
         self.is_playing = not self.is_playing
         self.playing_index = 0
             
-def pen2mask(image, rgb, transparency):
-    image_alpha = pygame.Surface((image.get_width(), image.get_height()), pygame.SRCALPHA, image.copy())
-    arr = pygame.surfarray.array2d(image)
-    pen = image.map_rgb(PEN)
-    color = image_alpha.map_rgb(rgb)
-    bitmask = (arr==pen)
-    arr = bitmask*color
-    pygame.surfarray.blit_array(image_alpha, arr)
-    image_alpha.set_alpha(int(transparency*255))
-    return image_alpha
+def pen2mask(lines, rgb, transparency):
+    mask_surface = pygame.Surface((lines.get_width(), lines.get_height()), pygame.SRCALPHA)
+    mask = pygame.surfarray.pixels3d(mask_surface)
+    pen = pygame.surfarray.pixels_alpha(lines)
+    for ch in range(3):
+        mask[:,:,ch] = rgb[ch]
+    pygame.surfarray.pixels_alpha(mask_surface)[:] = pen
+    mask_surface.set_alpha(int(transparency*255))
+    return mask_surface
 
 class DrawingArea:
     def __init__(self):
@@ -995,7 +994,7 @@ class Movie:
         if pos != self.pos and mask.color == color and mask.transparency == transparency \
             and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
             return mask.surface
-        mask.surface = pen2mask(self.frames[pos].surface, color, transparency)
+        mask.surface = pen2mask(self.frames[pos].surf_by_id('lines'), color, transparency)
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
