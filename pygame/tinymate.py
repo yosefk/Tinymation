@@ -894,21 +894,29 @@ class Thumbnail:
         self.movie_len = None
 
 class Frame:
-    def __init__(self, surface, dir):
-        self.color = surface # FIXME
-        blank = make_surface(surface.get_width(), surface.get_height())
-        self.lines = pygame.Surface((blank.get_width(), blank.get_height()), pygame.SRCALPHA, blank.copy())
-        self.lines.fill(PEN)
-        pygame.surfarray.pixels_alpha(self.lines)[:,:] = 0
+    def __init__(self, color_surface_or_id, dir):
         self.dir = dir
-        self.id = str(uuid.uuid1())
+        if type(color_surface_or_id) == str: # id - load the surfaces from the directory
+            self.id = color_surface_or_id
+            for surf_id in self.surf_ids():
+                setattr(self,surf_id,pygame.image.load(self.filename(surf_id)))
+            self.dirty = False
+        else:
+            self.color = color_surface_or_id
+            blank = make_surface(color_surface_or_id.get_width(), color_surface_or_id.get_height())
+            self.lines = pygame.Surface((blank.get_width(), blank.get_height()), pygame.SRCALPHA, blank.copy())
+            self.lines.fill(PEN)
+            pygame.surfarray.pixels_alpha(self.lines)[:,:] = 0
+            self.id = str(uuid.uuid1())
+            self.dirty = True
+
         self.hold = False
         # we don't aim to maintain a "perfect" dirty flag such as "doing 5 things and undoing
         # them should result in dirty==False." The goal is to avoid gratuitous saving when
         # scrolling thru the timeline, which slows things down and prevents reopening
         # clips at the last actually-edited frame after exiting the program
-        self.dirty = True
 
+    def surf_ids(self): return ['lines','color']
     def get_width(self): return self.lines.get_width()
     def get_height(self): return self.lines.get_height()
     def get_rect(self): return self.lines.get_rect()
@@ -920,21 +928,24 @@ class Frame:
         s.blit(self.lines, (0, 0), (0, 0, s.get_width(), s.get_height()))
         return s
 
-    def filename(self): return os.path.join(self.dir, f'{self.id}.bmp')
+    def filename(self,surface_id): return os.path.join(self.dir, f'{self.id}-{surface_id}.bmp')
     def save(self):
         if self.dirty:
-            #pygame.image.save(self.surface, self.filename())
-            print('WARNING: not saving!')
+            for surf_id in self.surf_ids():
+                pygame.image.save(self.surf_by_id(surf_id), self.filename(surf_id))
             self.dirty = False
     def delete(self):
-        fname = self.filename()
-        if os.path.exists(fname):
-            os.unlink(fname)
+        for surf_id in self.surf_ids():
+            fname = self.filename(surf_id)
+            if os.path.exists(fname):
+                os.unlink(fname)
 
 def clip_frame_filenames(clipdir):
     with open(os.path.join(clipdir, FRAME_ORDER_FILE), 'r') as frame_order:
         frames = json.loads(frame_order.read())
-        return [(frame['id'], os.path.join(clipdir, frame['id']+'.bmp'), frame['hold']) for frame in frames]
+        # we only return the lines layer filename per frame - since we always write out both lines and color,
+        # this is good enough for checking timestamps
+        return [(frame['id'], os.path.join(clipdir, frame['id']+'-lines.bmp'), frame['hold']) for frame in frames]
 
 class Movie:
     def __init__(self, dir):
@@ -950,10 +961,8 @@ class Movie:
             fname2id = {}
             for frameid, fname, hold in clip_frame_filenames(self.dir):
                 fname2id[fname] = frameid
-                frame = Frame(pg.image.load(fname).convert(), self.dir)
-                frame.id = frameid
+                frame = Frame(frameid, self.dir)
                 frame.hold = hold
-                frame.dirty = False
                 self.frames.append(frame)
             last_modified_id = fname2id[get_last_modified(fname2id.keys())]
             # reopen at the last modified frame
