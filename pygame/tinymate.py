@@ -363,7 +363,6 @@ class Layout:
 
     def draw(self):
         if self.is_pressed and self.focus_elem is self.drawing_area():
-            #self.drawing_area().draw()
             return
         screen.fill(UNDRAWABLE)
         for elem in self.elems:
@@ -385,11 +384,18 @@ class Layout:
             return
 
         x, y = pygame.mouse.get_pos()
+        dispatched = False
         for elem in self.elems:
             left, bottom, width, height = elem.rect
             if x>=left and x<left+width and y>=bottom and y<bottom+height:
                 if not self.is_playing or isinstance(elem, TogglePlaybackButton):
                     self._dispatch_event(elem, event, x, y)
+                    dispatched = True
+                    break
+
+        # events happening outside any element should go to the focus element, if there is one
+        if not dispatched and self.focus_elem:
+            self._dispatch_event(None, event, x, y)
 
     def _dispatch_event(self, elem, event, x, y):
         if event.type == pygame.MOUSEBUTTONDOWN:
