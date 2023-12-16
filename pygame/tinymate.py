@@ -756,11 +756,14 @@ class MovieListArea:
         for clipdir in get_clip_dirs():
             clip = os.path.join(WD, clipdir)
             try:
-                last_modified = get_last_modified([f for frameid, f, h in clip_frame_filenames(clip)])
+                ids_and_names = clip_frame_filenames(clip)
+                file2id = dict([(f, frameid) for frameid, f, h in ids_and_names])
+                last_modified = get_last_modified([f for frameid, f, h in ids_and_names])
+                last_modified_id = file2id[last_modified]
             except:
                 continue
             self.clips.append(clip)
-            self.images.append(scale_image(pg.image.load(last_modified), int(screen.get_width() * 0.15)))
+            self.images.append(scale_image(Frame(last_modified_id, clip).surface(), int(screen.get_width() * 0.15)))
         self.clip_pos = 0 
     def draw(self):
         left, bottom, width, height = self.rect
