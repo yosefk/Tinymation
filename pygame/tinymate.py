@@ -292,7 +292,7 @@ class NewDeleteTool(PenTool):
     def on_mouse_move(self, x, y): pass
 
 def flood_fill_color_based_on_lines(color, lines, x, y, bucket_color):
-    pen_mask = lines == 255
+    pen_mask = lines > int(255*0.5)
     flood_code = 2
     flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
     for ch in range(3):
@@ -1087,6 +1087,7 @@ class Movie:
                 writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface()), [1,0,2]))
 
     def save_before_closing(self):
+        history_clear()
         self.frame(self.pos).dirty = True # updates the image timestamp so we open at that image next time...
         self.frame(self.pos).save()
         self.save_gif()
@@ -1168,6 +1169,7 @@ def prev_frame():
 
 def insert_clip():
     global movie
+    movie.save_before_closing()
     movie = Movie(new_movie_clip_dir())
     layout.movie_list_area().reload()
 
@@ -1404,6 +1406,12 @@ def history_pop():
         last_op.undo()
         history_byte_size -= byte_size(last_op)
         history.pop()
+
+def history_clear():
+    global history
+    global history_byte_size
+    history = []
+    history_byte_size = 0
 
 escape = False
 
