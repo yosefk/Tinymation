@@ -62,7 +62,7 @@ def should_make_closed(curve_length, bbox_length, endpoints_dist):
     else: # "long and curvy" - only make closed when the endpoints are close relatively to the bbox length
         return endpoints_dist / bbox_length < 0.1
 
-def bspline_interp(points, suggest_options=True):
+def bspline_interp(points, suggest_options, existing_lines):
     x = np.array([1.*p[0] for p in points])
     y = np.array([1.*p[1] for p in points])
 
@@ -86,8 +86,28 @@ def bspline_interp(points, suggest_options=True):
     add_result(tck, u[0], u[-1])
 
     if not suggest_options:
-        return
+        return results
+
+    # check for intersections, throw out short segments between the endpoints and first/last intersection
+    ix = np.round(results[0][0]).astype(int)
+    iy = np.round(results[0][1]).astype(int)
+    line_alphas = existing_lines[ix, iy]
+    intersections = np.where(line_alphas == 255)[0]
+    if len(intersections) > 0:
+        len_first = intersections[0]
+        len_last = len(ix) - intersections[-1]
+        two_or_more_intersections = (intersections[-1] - intersections[0]) > 2
+
+        first_short = two_or_more_intersections or len_first < len_last
+        last_short = two_or_more_intersections or len_last <= len_first
+
+        step=(u[-1]-u[0])/curve_length
+
+        new_points = splev(np.arange(step*(intersections[0]+1) if first_short else u[0], step*(intersections[-1]) if last_short else u[-1], step), tck)
+        results.append(new_points)
+        return results
     
+    # check if we'd like to attempt to close the line
     bbox_length = (np.max(x)-np.min(x))*2 + (np.max(y)-np.min(y))*2
     endpoints_dist = dist(0, -1)
 
@@ -106,7 +126,7 @@ def bspline_interp(points, suggest_options=True):
 
     return results
 
-def plotLines(points, ax, width, suggest_options, plot_reset):
+def plotLines(points, ax, width, suggest_options, plot_reset, existing_lines):
     results = []
     def add_results(px, py):
         plot_reset()
@@ -118,7 +138,7 @@ def plotLines(points, ax, width, suggest_options, plot_reset):
         eps = 0.001
         points = [(x+eps, y+eps)] + points
     try:
-        for path in bspline_interp(points, suggest_options):
+        for path in bspline_interp(points, suggest_options, existing_lines):
             px, py = path[0], path[1]
             add_results(px, py)
     except:
@@ -128,7 +148,7 @@ def plotLines(points, ax, width, suggest_options, plot_reset):
 
     return results
 
-def drawLines(image_height, image_width, points, width=3, suggest_options=True):
+def drawLines(image_height, image_width, points, width, suggest_options, existing_lines):
     global fig
     global ax
     if not fig:
@@ -149,7 +169,7 @@ def drawLines(image_height, image_width, points, width=3, suggest_options=True):
         ax.spines[['left', 'right', 'bottom', 'top']].set_visible(False)
         ax.tick_params(left=False, right=False, bottom=False, top=False)
 
-    return plotLines(points, ax, width, suggest_options, plot_reset)
+    return plotLines(points, ax, width, suggest_options, plot_reset, existing_lines)
 
 def drawCircle( screen, x, y, color, width):
     pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -290,11 +310,11 @@ class PenTool:
         self.points.append((x,y))
         self.prev_drawn = None
         frame = movie.edit_curr_frame().surf_by_id('lines')
+        lines = pygame.surfarray.pixels_alpha(frame)
 
         prev_history_item = None
-        for new_lines in drawLines(frame.get_width(), frame.get_height(), self.points, self.width, suggest_options=not self.eraser):
+        for new_lines in drawLines(frame.get_width(), frame.get_height(), self.points, self.width, suggest_options=not self.eraser, existing_lines=lines):
             history_item = HistoryItem('lines')
-            lines = pygame.surfarray.pixels_alpha(frame)
             if prev_history_item:
                 prev_history_item.undo()
             if self.eraser:
@@ -1303,11 +1323,10 @@ def restore_tool():
     set_tool(prev_tool)
 
 def color_image(s, color):
-    dr, dg, db = color
     sc = s.copy()
     pixels = pg.surfarray.pixels3d(sc)
     for ch in range(3):
-        pixels[:,:,ch] = pixels[:,:,ch]*color[ch]//255
+        pixels[:,:,ch] = (pixels[:,:,ch].astype(int)*color[ch])//255
     return sc
 
 class Palette:
