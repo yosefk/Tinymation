@@ -96,7 +96,8 @@ def bspline_interp(points, suggest_options, existing_lines):
     if len(intersections) > 0:
         len_first = intersections[0]
         len_last = len(ix) - intersections[-1]
-        two_or_more_intersections = (intersections[-1] - intersections[0]) > 2
+        # look for clear alpha pixels along the path before the first and the last intersection - if we find some, we have >= 2 intersections
+        two_or_more_intersections = len(np.where(line_alphas[intersections[0]:intersections[-1]] == 0)[0]) > 1
 
         first_short = two_or_more_intersections or len_first < len_last
         last_short = two_or_more_intersections or len_last <= len_first
