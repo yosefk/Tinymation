@@ -62,7 +62,7 @@ def should_make_closed(curve_length, bbox_length, endpoints_dist):
     else: # "long and curvy" - only make closed when the endpoints are close relatively to the bbox length
         return endpoints_dist / bbox_length < 0.1
 
-def bspline_interp(points):
+def bspline_interp(points, suggest_options=True):
     x = np.array([1.*p[0] for p in points])
     y = np.array([1.*p[1] for p in points])
 
@@ -73,11 +73,26 @@ def bspline_interp(points):
     def dist(i1, i2):
         return math.sqrt((x[i1]-x[i2])**2 + (y[i1]-y[i2])**2)
     curve_length = sum([dist(i, i+1) for i in range(len(x)-1)])
+
+    results = []
+
+    def add_result(tck, ufirst, ulast):
+        step=(ulast-ufirst)/curve_length
+
+        new_points = splev(np.arange(ufirst, ulast+step, step), tck)
+        results.append(new_points)
+
+    tck, u = splprep([x, y], s=len(x)/5)
+    add_result(tck, u[0], u[-1])
+
+    if not suggest_options:
+        return
+    
     bbox_length = (np.max(x)-np.min(x))*2 + (np.max(y)-np.min(y))*2
     endpoints_dist = dist(0, -1)
 
     make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
-    
+
     if make_closed:
         orig_len = len(x)
         def half(ls):
@@ -87,36 +102,33 @@ def bspline_interp(points):
         y = np.array(list(y)+half([yi+0.001 for yi in y]))
 
         tck, u = splprep([x, y], s=len(x)/5)
+        add_result(tck, u[orig_len//2-1], u[-1])
 
-        ufirst = u[orig_len//2-1]
-        ulast = u[-1]
+    return results
 
-    else: 
-        tck, u = splprep([x, y], s=len(x)/5)
+def plotLines(points, ax, width, suggest_options, plot_reset):
+    results = []
+    def add_results(px, py):
+        plot_reset()
+        ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False, solid_capstyle='round')
+        results.append(image_from_fig(fig)[:,:,0:3])
 
-        ufirst = u[0]
-        ulast = u[-1]
-
-    step=(ulast-ufirst)/curve_length
-
-    new_points = splev(np.arange(ufirst-step, ulast+step, step), tck)
-    return new_points
-
-def plotLines(points, ax, width):
     if len(set(points)) == 1:
         x,y = points[0]
         eps = 0.001
         points = [(x+eps, y+eps)] + points
     try:
-        path = np.array(bspline_interp(points))
-        px, py = path[0], path[1]
+        for path in bspline_interp(points, suggest_options):
+            px, py = path[0], path[1]
+            add_results(px, py)
     except:
         px = np.array([x for x,y in points])
         py = np.array([y for x,y in points])
-    ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False, solid_capstyle='round')
+        add_results(px, py)
 
+    return results
 
-def drawLines(image_height, image_width, points, width=3):
+def drawLines(image_height, image_width, points, width=3, suggest_options=True):
     global fig
     global ax
     if not fig:
@@ -129,16 +141,15 @@ def drawLines(image_height, image_width, points, width=3):
 
     width *= 72 / fig.get_dpi()
 
-    plt.cla()
-    plt.xlim(0, image_width)
-    plt.ylim(0, image_height)
-    ax.invert_yaxis()
-    ax.spines[['left', 'right', 'bottom', 'top']].set_visible(False)
-    ax.tick_params(left=False, right=False, bottom=False, top=False)
+    def plot_reset():
+        plt.cla()
+        plt.xlim(0, image_width)
+        plt.ylim(0, image_height)
+        ax.invert_yaxis()
+        ax.spines[['left', 'right', 'bottom', 'top']].set_visible(False)
+        ax.tick_params(left=False, right=False, bottom=False, top=False)
 
-    plotLines(points, ax, width)
-
-    return image_from_fig(fig)[:,:,0:3]
+    return plotLines(points, ax, width, suggest_options, plot_reset)
 
 def drawCircle( screen, x, y, color, width):
     pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -258,7 +269,6 @@ class PenTool:
         self.eraser = eraser
         self.width = width
         self.circle_width = (width//2)*2
-        self.history_item = None
         self.points = []
         self.lines_array = None
 
@@ -277,37 +287,38 @@ class PenTool:
 
     def on_mouse_up(self, x, y):
         self.lines_array = None
-        self.history_item = HistoryItem('lines')
-        start = time.time_ns()
         self.points.append((x,y))
         self.prev_drawn = None
         frame = movie.edit_curr_frame().surf_by_id('lines')
 
-        new_lines = drawLines(frame.get_width(), frame.get_height(), self.points, self.width)
-        lines = pygame.surfarray.pixels_alpha(frame)
-        if self.eraser:
-            lines[:,:] = np.minimum(new_lines[:,:,0], lines[:,:])
-        else:
-            lines[:,:] = np.maximum(255-new_lines[:,:,0], lines[:,:])
+        prev_history_item = None
+        for new_lines in drawLines(frame.get_width(), frame.get_height(), self.points, self.width, suggest_options=not self.eraser):
+            history_item = HistoryItem('lines')
+            lines = pygame.surfarray.pixels_alpha(frame)
+            if prev_history_item:
+                prev_history_item.undo()
+            if self.eraser:
+                lines[:,:] = np.minimum(new_lines[:,:,0], lines[:,:])
+            else:
+                lines[:,:] = np.maximum(255-new_lines[:,:,0], lines[:,:])
 
-        if self.eraser:
-            color_history_item = HistoryItem('color')
-            color = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
-            flood_fill_color_based_on_lines(color, lines, x, y, self.bucket_color if self.bucket_color else BACKGROUND)
-            self.history_item = HistoryItemSet([self.history_item, color_history_item])
+            if self.eraser:
+                color_history_item = HistoryItem('color')
+                color = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+                flood_fill_color_based_on_lines(color, lines, x, y, self.bucket_color if self.bucket_color else BACKGROUND)
+                history_item = HistoryItemSet([history_item, color_history_item])
 
-        if self.history_item:
-            self.history_item.optimize()
-            history_append(self.history_item)
-            self.history_item = None
+            history_item.optimize()
+            history_append(history_item)
+            prev_history_item = history_item
 
     def on_mouse_move(self, x, y):
        if self.eraser and self.bucket_color is None and self.lines_array[x,y] != 255:
            self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((x,y))
        draw_into = screen.subsurface(layout.drawing_area().rect)
        self.points.append((x,y))
-       if self.history_item:
-            self.history_item.affected(x-self.width,y-self.width,x+self.width,y+self.width)
+       #FIXME: bring back optimize!!  if self.history_item:
+       #self.history_item.affected(x-self.width,y-self.width,x+self.width,y+self.width)
        color = self.color if not self.eraser else (self.bucket_color if self.bucket_color else BACKGROUND)
        if self.prev_drawn:
             drawLine(draw_into, self.prev_drawn, (x,y), color, self.width)
@@ -1071,6 +1082,8 @@ class Movie:
 
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
+        if pos == self.pos:
+            return
         self.frame(self.pos).save()
         self.pos = pos
         self.clear_cache()
@@ -1292,11 +1305,9 @@ def restore_tool():
 def color_image(s, color):
     dr, dg, db = color
     sc = s.copy()
-    for y in range(s.get_height()):
-        for x in range(s.get_width()):
-            r,g,b,a = s.get_at((x,y))
-            new = (int(r*dr/255), int(g*dg/255), int(b*db/255))
-            sc.set_at((x,y), new+(a,))
+    pixels = pg.surfarray.pixels3d(sc)
+    for ch in range(3):
+        pixels[:,:,ch] = pixels[:,:,ch]*color[ch]//255
     return sc
 
 class Palette:
