@@ -18,7 +18,7 @@ import json
 from scipy.interpolate import splprep, splev
 
 # this requires numpy to be installed in addition to scikit-image
-from skimage.morphology import flood_fill
+from skimage.morphology import flood_fill, binary_dilation, skeletonize
 pg = pygame
 
 screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
@@ -55,22 +55,51 @@ def image_from_fig(fig):
 fig = None
 ax = None
 
+def should_make_closed(curve_length, bbox_length, endpoints_dist):
+    if curve_length < bbox_length*0.85:
+        # if the distance between the endpoints is <30% of the length of the curve, close it
+        return endpoints_dist / curve_length < 0.3
+    else: # "long and curvy" - only make closed when the endpoints are close relatively to the bbox length
+        return endpoints_dist / bbox_length < 0.1
+
 def bspline_interp(points):
     x = np.array([1.*p[0] for p in points])
     y = np.array([1.*p[1] for p in points])
 
     okay = np.where(np.abs(np.diff(x)) + np.abs(np.diff(y)) > 0)
-    x = np.r_[x[okay], x[-1], x[0]]
-    y = np.r_[y[okay], y[-1], y[0]]
-    tck, u = splprep([x, y], s=len(x)/5)
+    x = np.r_[x[okay], x[-1]]#, x[0]]
+    y = np.r_[y[okay], y[-1]]#, y[0]]
 
-    ufirst = u[0]
-    ulast = u[-2]
+    def dist(i1, i2):
+        return math.sqrt((x[i1]-x[i2])**2 + (y[i1]-y[i2])**2)
+    curve_length = sum([dist(i, i+1) for i in range(len(x)-1)])
+    bbox_length = (np.max(x)-np.min(x))*2 + (np.max(y)-np.min(y))*2
+    endpoints_dist = dist(0, -1)
 
-    total_dist = sum([math.sqrt((y1-y2)**2 + (x1-x2)**2) for (x1,y1),(x2,y2) in zip(points[1:], points[:-1])],0)
-    step=(ulast-ufirst)/total_dist
+    make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
+    
+    if make_closed:
+        orig_len = len(x)
+        def half(ls):
+            ls = list(ls)
+            return ls[:-len(ls)//2]
+        x = np.array(list(x)+half([xi+0.001 for xi in x]))
+        y = np.array(list(y)+half([yi+0.001 for yi in y]))
 
-    new_points = splev(np.arange(ufirst, ulast+step, step), tck)
+        tck, u = splprep([x, y], s=len(x)/5)
+
+        ufirst = u[orig_len//2-1]
+        ulast = u[-1]
+
+    else: 
+        tck, u = splprep([x, y], s=len(x)/5)
+
+        ufirst = u[0]
+        ulast = u[-1]
+
+    step=(ulast-ufirst)/curve_length
+
+    new_points = splev(np.arange(ufirst-step, ulast+step, step), tck)
     return new_points
 
 def plotLines(points, ax, width):
@@ -231,6 +260,7 @@ class PenTool:
         self.circle_width = (width//2)*2
         self.history_item = None
         self.points = []
+        self.lines_array = None
 
     def draw(self, rect, cursor_surface):
         left, bottom, width, height = rect
@@ -240,12 +270,14 @@ class PenTool:
         screen.blit(surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
 
     def on_mouse_down(self, x, y):
-        self.history_item = HistoryItem('lines')
         self.points = []
         self.bucket_color = None
+        self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
         self.on_mouse_move(x,y)
 
     def on_mouse_up(self, x, y):
+        self.lines_array = None
+        self.history_item = HistoryItem('lines')
         start = time.time_ns()
         self.points.append((x,y))
         self.prev_drawn = None
@@ -270,7 +302,7 @@ class PenTool:
             self.history_item = None
 
     def on_mouse_move(self, x, y):
-       if self.eraser and self.bucket_color is None and self.history_item.saved_array[x,y] != 255:
+       if self.eraser and self.bucket_color is None and self.lines_array[x,y] != 255:
            self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((x,y))
        draw_into = screen.subsurface(layout.drawing_area().rect)
        self.points.append((x,y))
@@ -292,9 +324,14 @@ class NewDeleteTool(PenTool):
     def on_mouse_move(self, x, y): pass
 
 def flood_fill_color_based_on_lines(color, lines, x, y, bucket_color):
-    pen_mask = lines > int(255*0.5)
+    pen_mask = lines == 255
     flood_code = 2
+    t1=time.time_ns()
     flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
+    t2=time.time_ns()
+    #flood_mask = binary_dilation(skeletonize(flood_mask,method='lee'))
+    #t3=time.time_ns()
+    #print('flood',(t2-t1)/10**6,'skeleton',(t3-t2)/10**6)
     for ch in range(3):
          color[:,:,ch] = color[:,:,ch]*(1-flood_mask) + bucket_color[ch]*flood_mask
 
@@ -383,7 +420,11 @@ class Layout:
             movie.frame(movie.pos).save()
             return
 
+        if event.type not in [pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION]:
+            return
+
         x, y = pygame.mouse.get_pos()
+
         dispatched = False
         for elem in self.elems:
             left, bottom, width, height = elem.rect
@@ -393,9 +434,10 @@ class Layout:
                     dispatched = True
                     break
 
-        # events happening outside any element should go to the focus element, if there is one
         if not dispatched and self.focus_elem:
             self._dispatch_event(None, event, x, y)
+            return
+
 
     def _dispatch_event(self, elem, event, x, y):
         if event.type == pygame.MOUSEBUTTONDOWN:
@@ -1442,6 +1484,15 @@ interesting_events = [
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard
 
+# add tdiff() to printouts to see how many ms passed since the last call to tdiff()
+prevts=time.time_ns()
+def tdiff():
+    global prevts
+    now=time.time_ns()
+    diff=(now-prevts)//10**6
+    prevts = now
+    return diff
+
 while not escape: 
  try:
   for event in pygame.event.get():
@@ -1477,7 +1528,12 @@ while not escape:
       # TODO: might be good to optimize repainting beyond "just repaint everything
       # upon every event"
       if layout.is_playing or event.type not in [PLAYBACK_TIMER_EVENT, SAVING_TIMER_EVENT]:
-        layout.draw()
+        # don't repaint upon depressed mouse movement. this is important to avoid the pen
+        # lagging upon "first contact" when a mouse motion event is sent before a mouse down
+        # event at the same coordinate; repainting upon that mouse motion event loses time
+        # when we should have been receiving the next x,y coordinates
+        if event.type != pygame.MOUSEMOTION or layout.is_pressed:
+            layout.draw()
         pygame.display.flip()
    except KeyboardInterrupt:
     print('Ctrl-C - exiting')
