@@ -19,6 +19,7 @@ from scipy.interpolate import splprep, splev
 
 # this requires numpy to be installed in addition to scikit-image
 from skimage.morphology import flood_fill, binary_dilation, skeletonize
+from scipy.ndimage import grey_dilation
 pg = pygame
 
 screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
@@ -359,12 +360,7 @@ class NewDeleteTool(PenTool):
 def flood_fill_color_based_on_lines(color, lines, x, y, bucket_color):
     pen_mask = lines == 255
     flood_code = 2
-    t1=time.time_ns()
     flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
-    t2=time.time_ns()
-    #flood_mask = binary_dilation(skeletonize(flood_mask,method='lee'))
-    #t3=time.time_ns()
-    #print('flood',(t2-t1)/10**6,'skeleton',(t3-t2)/10**6)
     for ch in range(3):
          color[:,:,ch] = color[:,:,ch]*(1-flood_mask) + bucket_color[ch]*flood_mask
 
@@ -397,6 +393,41 @@ class PaintBucketTool:
         pass
     def on_mouse_move(self, x, y):
         pass
+
+def skeletonize_color_based_on_lines(color, lines, x, y):
+    pen_mask = lines == 255
+    flood_code = 2
+    flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
+    skeleton = skeletonize(flood_mask)
+    fmb = binary_dilation(skeleton, np.array([[False, True, True, True, False], *[[True]*5]*3, [False, True, True, True, False]]))
+    fading_mask = pg.Surface((flood_mask.shape[0], flood_mask.shape[1]), pg.SRCALPHA)
+    fm = pg.surfarray.pixels3d(fading_mask)
+    yg, xg = np.meshgrid(np.arange(flood_mask.shape[1]), np.arange(flood_mask.shape[0]))
+
+    # Compute distance from each point to the specified center
+    dist = np.sqrt((xg - x)**2 + (yg - y)**2)
+    green = (255,255,255)
+    cyan = (0,192,192)
+    for ch in range(3):
+         fm[:,:,ch] = cyan[ch]*(1-skeleton) + green[ch]*skeleton#(1-fmb)*255 #color[:,:,ch]*(1-flood_mask) + bucket_color[ch]*flood_mask
+    pg.surfarray.pixels_alpha(fading_mask)[:] = fmb*255*np.maximum(0,(1- 3*dist/np.max(dist)))
+
+    return fading_mask
+
+class FlashlightTool:
+    def __init__(self):
+        pass
+    def draw(self, rect, cursor_surface):
+        pass
+    def on_mouse_down(self, x, y):
+        color = pygame.surfarray.pixels3d(movie.curr_frame().surf_by_id('color'))
+        lines = pygame.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
+        fading_mask = skeletonize_color_based_on_lines(color, lines, x, y)
+        fading_mask.set_alpha(255)
+        layout.drawing_area().fading_mask = fading_mask
+        layout.drawing_area().fade_per_frame = 255/(FRAME_RATE*15)
+    def on_mouse_up(self, x, y): pass
+    def on_mouse_move(self, x, y): pass
 
 # layout:
 #
@@ -446,12 +477,10 @@ class Layout:
         if event.type == PLAYBACK_TIMER_EVENT:
             if self.is_playing:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
-            else:
-                return
+            self.drawing_area().update_fading_mask()
 
         if event.type == SAVING_TIMER_EVENT:
             movie.frame(movie.pos).save()
-            return
 
         if event.type not in [pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION]:
             return
@@ -514,7 +543,9 @@ def pen2mask(lines, rgb, transparency):
 
 class DrawingArea:
     def __init__(self):
-        pass
+        self.fading_mask = None
+        self.fade_per_frame = 0
+        self.last_update_time = 0
     def draw(self):
         left, bottom, width, height = self.rect
         frame = movie.frame(layout.playing_index).surface() if layout.is_playing else movie.curr_frame().surface()
@@ -524,6 +555,26 @@ class DrawingArea:
             mask = layout.timeline_area().combined_light_table_mask()
             if mask:
                 screen.blit(mask, (left, bottom), (0, 0, width, height))
+            if self.fading_mask:
+                screen.blit(self.fading_mask, (left, bottom), (0, 0, width, height))
+
+    def update_fading_mask(self):
+        if not self.fading_mask:
+            return
+        now = time.time_ns()
+        ignore_event = (now - self.last_update_time) // 10**6 < (1000 / (FRAME_RATE*2))
+        self.last_update_time = now
+
+        if ignore_event:
+            return
+
+        alpha = self.fading_mask.get_alpha()
+        if alpha == 0:
+            self.fading_mask = None
+            return
+
+        alpha -= self.fade_per_frame
+        self.fading_mask.set_alpha(max(0,alpha))
 
     def fix_xy(self,x,y):
         left, bottom, _, _ = self.rect
@@ -1101,6 +1152,7 @@ class Movie:
     def clear_cache(self):
         self.mask_cache = {}
         self.thumbnail_cache = {}
+        layout.drawing_area().fading_mask = None
 
     def seek_frame(self,pos):
         assert pos >= 0 and pos < len(self.frames)
@@ -1288,6 +1340,7 @@ TOOLS = {
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
     'eraser-medium': Tool(PenTool(BACKGROUND, WIDTH*5), eraser_medium_cursor, 'rR'),
     'eraser-big': Tool(PenTool(BACKGROUND, WIDTH*20), eraser_big_cursor, 'tT'),
+    'flashlight': Tool(FlashlightTool(), pencil_cursor, 'fF'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
     # without any more ceremony. but when it's used thru a button, the user needs to
@@ -1479,6 +1532,8 @@ def history_append(item):
         history_byte_size -= byte_size(history[0])
         del history[0]
 
+    layout.drawing_area().fading_mask = None # new operations invalidate old skeletons
+
 def history_pop():
     global history_byte_size
     if history:
@@ -1490,11 +1545,15 @@ def history_pop():
         history_byte_size -= byte_size(last_op)
         history.pop()
 
+    layout.drawing_area().fading_mask = None # changing canvas state invalidates old skeletons
+
 def history_clear():
     global history
     global history_byte_size
     history = []
     history_byte_size = 0
+
+    layout.drawing_area().fading_mask = None
 
 escape = False
 
@@ -1559,7 +1618,7 @@ while not escape:
 
       # TODO: might be good to optimize repainting beyond "just repaint everything
       # upon every event"
-      if layout.is_playing or event.type not in [PLAYBACK_TIMER_EVENT, SAVING_TIMER_EVENT]:
+      if layout.is_playing or layout.drawing_area().fading_mask or event.type not in [PLAYBACK_TIMER_EVENT, SAVING_TIMER_EVENT]:
         # don't repaint upon depressed mouse movement. this is important to avoid the pen
         # lagging upon "first contact" when a mouse motion event is sent before a mouse down
         # event at the same coordinate; repainting upon that mouse motion event loses time
