@@ -91,7 +91,8 @@ def bspline_interp(points, suggest_options, existing_lines):
     # check for intersections, throw out short segments between the endpoints and first/last intersection
     ix = np.round(results[0][0]).astype(int)
     iy = np.round(results[0][1]).astype(int)
-    line_alphas = existing_lines[ix, iy]
+    within_bounds = (ix >= 0) & (iy >= 0) & (ix < existing_lines.shape[0]) & (iy < existing_lines.shape[1])
+    line_alphas = existing_lines[ix[within_bounds], iy[within_bounds]]
     intersections = np.where(line_alphas == 255)[0]
     if len(intersections) > 0:
         len_first = intersections[0]
