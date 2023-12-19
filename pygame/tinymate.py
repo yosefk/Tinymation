@@ -213,6 +213,8 @@ eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5))
 eraser_medium_cursor = (eraser_medium_cursor[0], eraser_cursor[1])
 eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2))
 eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
+flashlight_cursor = load_cursor('flashlight.png')
+flashlight_cursor = (flashlight_cursor[0], pg.image.load('flashlight-tool.png')) 
 paint_bucket_cursor = load_cursor('paint_bucket.png', min_alpha=255)
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
@@ -405,6 +407,8 @@ def skeleton_to_distances(skeleton, x, y):
     dist = np.sqrt((xg - x)**2 + (yg - y)**2)
 
     skx, sky = np.where(skeleton & (dist < 200))
+    if len(skx) == 0:
+        return np.ones((width, height), int) * NO_PATH_DIST, NO_PATH_DIST
     closest = np.argmin((skx-x)**2 + (sky-y)**2)
 
     ixy = list(enumerate(zip(skx,sky)))
@@ -488,7 +492,11 @@ class FlashlightTool:
     def __init__(self):
         pass
     def draw(self, rect, cursor_surface):
-        pass
+        left, bottom, width, height = rect
+        _, _, w, h = cursor_surface.get_rect()
+        scaled_width = w*height/h
+        surface = scale_image(cursor_surface, scaled_width, height)
+        screen.blit(surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
     def on_mouse_down(self, x, y):
         color = pygame.surfarray.pixels3d(movie.curr_frame().surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
@@ -1412,7 +1420,7 @@ TOOLS = {
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
     'eraser-medium': Tool(PenTool(BACKGROUND, WIDTH*5), eraser_medium_cursor, 'rR'),
     'eraser-big': Tool(PenTool(BACKGROUND, WIDTH*20), eraser_big_cursor, 'tT'),
-    'flashlight': Tool(FlashlightTool(), pencil_cursor, 'fF'),
+    'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'fF'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
     # without any more ceremony. but when it's used thru a button, the user needs to
@@ -1472,7 +1480,7 @@ class Palette:
                     color_hist[color] = color_hist.get(color,0) + 1
 
         colors = [[None for col in range(columns)] for row in range(rows)]
-        colors[0] = [BACKGROUND, (192, 192, 192), white]
+        colors[0] = [BACKGROUND, white, white]
         color2popularity = dict(list(reversed(sorted(list(color_hist.items()), key=lambda x: x[1])))[:(rows-1)*columns])
         hit2color = [(first_hit, color) for color, first_hit in sorted(list(first_color_hit.items()), key=lambda x: x[1])]
 
@@ -1543,9 +1551,13 @@ def init_layout_rest():
         offset += width
     color_w = 0.025*2
     i = 0
+
+    layout.add((color_w*2, 0.85-color_w, color_w, color_w*1.5), ToolSelectionButton(TOOLS['flashlight']))
     
     for row,y in enumerate(np.arange(0.25,0.85-0.001,color_w)):
         for col,x in enumerate(np.arange(0,0.15-0.001,color_w)):            
+            if row == len(palette.colors)-1 and col == 2:
+                continue
             #rgb = pygame.Color(0)
             #rgb.hsla = (i*10 % 360, 50, 50, 100)
             tool = Tool(PaintBucketTool(palette.colors[len(palette.colors)-row-1][col]), palette.cursors[len(palette.colors)-row-1][col], '')
