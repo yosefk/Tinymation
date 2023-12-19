@@ -394,23 +394,93 @@ class PaintBucketTool:
     def on_mouse_move(self, x, y):
         pass
 
+NO_PATH_DIST = 10**6
+
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
+
+def skeleton_to_distances(skeleton, x, y):
+    width, height = skeleton.shape
+    yg, xg = np.meshgrid(np.arange(height), np.arange(width))
+    dist = np.sqrt((xg - x)**2 + (yg - y)**2)
+
+    skx, sky = np.where(skeleton & (dist < 200))
+    closest = np.argmin((skx-x)**2 + (sky-y)**2)
+
+    ixy = list(enumerate(zip(skx,sky)))
+    xy2i = dict([((x,y),i) for i,(x,y) in ixy])
+
+    data = [] 
+    row_ind = []
+    col_ind = []
+
+    width, height = skeleton.shape
+    neighbors = [(ox, oy) for ox in range(-1,2) for oy in range(-1,2) if ox or oy]
+    for i,(x,y) in ixy:
+        for ox, oy in neighbors:
+            nx = ox+x
+            ny = oy+y
+            if nx >= 0 and ny >= 0 and nx < width and ny < height:
+                j = xy2i.get((nx,ny), None)
+                if j is not None:
+                    data.append(1)
+                    row_ind.append(i)
+                    col_ind.append(xy2i[(nx,ny)])
+    
+    graph = csr_matrix((data, (row_ind, col_ind)), (len(ixy), len(ixy)))
+    distance_matrix = dijkstra(graph, directed=False)
+
+    distances = np.ones((width, height), int) * NO_PATH_DIST
+    maxdist = 0
+    for i,(x,y) in ixy:
+        d = distance_matrix[closest,i]
+        if not math.isinf(d):
+            distances[x,y] = d
+            maxdist = max(maxdist, d)
+
+    return distances, maxdist
+
+last_flood_mask = None
+last_skeleton = None
+
+import colorsys
+
 def skeletonize_color_based_on_lines(color, lines, x, y):
+    global last_flood_mask
+    global last_skeleton
+
     pen_mask = lines == 255
+    if pen_mask[x,y]:
+        return
+
     flood_code = 2
     flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
-    skeleton = skeletonize(flood_mask)
-    fmb = binary_dilation(skeleton, np.array([[False, True, True, True, False], *[[True]*5]*3, [False, True, True, True, False]]))
+    if last_flood_mask is not None and np.array_equal(flood_mask, last_flood_mask):
+        skeleton = last_skeleton
+    else: 
+        skeleton = skeletonize(flood_mask)
+        last_flood_mask = flood_mask
+        last_skeleton = skeleton
+
+    fmb = binary_dilation(binary_dilation(skeleton))
     fading_mask = pg.Surface((flood_mask.shape[0], flood_mask.shape[1]), pg.SRCALPHA)
     fm = pg.surfarray.pixels3d(fading_mask)
     yg, xg = np.meshgrid(np.arange(flood_mask.shape[1]), np.arange(flood_mask.shape[0]))
 
     # Compute distance from each point to the specified center
     dist = np.sqrt((xg - x)**2 + (yg - y)**2)
-    green = (255,255,255)
-    cyan = (0,192,192)
+    d, maxdist = skeleton_to_distances(skeleton, x, y)
+    d = (d == NO_PATH_DIST)*maxdist + (d != NO_PATH_DIST)*d # replace NO_PATH_DIST with maxdist
+    outer_d = -grey_dilation(-d, 3)
+    inner = (255,255,255)
+    outer = [255-ch for ch in color[x,y]]
+    h,s,v = colorsys.rgb_to_hsv(*[o/255. for o in outer])
+    s = 1
+    v = 1
+    outer = [255*o for o in colorsys.hsv_to_rgb(h,s,v)]
     for ch in range(3):
-         fm[:,:,ch] = cyan[ch]*(1-skeleton) + green[ch]*skeleton#(1-fmb)*255 #color[:,:,ch]*(1-flood_mask) + bucket_color[ch]*flood_mask
-    pg.surfarray.pixels_alpha(fading_mask)[:] = fmb*255*np.maximum(0,(1- 3*dist/np.max(dist)))
+         fm[:,:,ch] = outer[ch]*(1-skeleton) + inner[ch]*skeleton
+    pg.surfarray.pixels_alpha(fading_mask)[:] = fmb*255*np.maximum(0,(1- .90*outer_d/maxdist))
 
     return fading_mask
 
@@ -423,6 +493,8 @@ class FlashlightTool:
         color = pygame.surfarray.pixels3d(movie.curr_frame().surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
         fading_mask = skeletonize_color_based_on_lines(color, lines, x, y)
+        if not fading_mask:
+            return
         fading_mask.set_alpha(255)
         layout.drawing_area().fading_mask = fading_mask
         layout.drawing_area().fade_per_frame = 255/(FRAME_RATE*15)
