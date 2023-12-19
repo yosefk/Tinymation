@@ -215,7 +215,7 @@ eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2))
 eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
 flashlight_cursor = load_cursor('flashlight.png')
 flashlight_cursor = (flashlight_cursor[0], pg.image.load('flashlight-tool.png')) 
-paint_bucket_cursor = load_cursor('paint_bucket.png', min_alpha=255)
+paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], pg.image.load('bucket-tool.png'))
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 pg.mouse.set_cursor(pencil_cursor[0])
@@ -371,13 +371,10 @@ class PaintBucketTool:
         self.color = color
     def draw(self, rect, cursor_surface):
         left, bottom, width, height = rect
-        x = left + width//2
-        y = bottom + height//2
-        rx = int(0.85*width)//2
-        ry = int(0.9*height)//2
-        pygame.gfxdraw.filled_ellipse(screen, x, y, rx, ry, self.color)
-        pygame.gfxdraw.aaellipse(screen, x, y, rx, ry, PEN)
-        pygame.gfxdraw.aaellipse(screen, x, y, rx-1, ry-1, PEN)
+        _, _, w, h = cursor_surface.get_rect()
+        scaled_width = w*height/h
+        surface = scale_image(cursor_surface, scaled_width, height)
+        screen.blit(surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
     def on_mouse_down(self, x, y):
         color = pygame.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
@@ -1501,13 +1498,12 @@ class Palette:
         self.init_cursors()
 
     def init_cursors(self):
-        global paint_bucket_cursor
-        s = paint_bucket_cursor[1]
+        s = paint_bucket_cursor[0]
         self.cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
         for row in range(self.rows):
             for col in range(self.columns):
                 sc = color_image(s, self.colors[row][col])
-                self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), sc)
+                self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), color_image(paint_bucket_cursor[1], self.colors[row][col]))
 
 
 palette = Palette('palette.png')
