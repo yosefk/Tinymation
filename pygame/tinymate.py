@@ -27,6 +27,7 @@ pygame.display.set_caption("Tinymate")
 #screen = pygame.display.set_mode((500, 500))
 
 FRAME_RATE = 12
+FADING_RATE = 3
 PEN = (20, 20, 20)
 BACKGROUND = (240, 235, 220)
 UNDRAWABLE = (220, 215, 190)
@@ -89,6 +90,23 @@ def bspline_interp(points, suggest_options, existing_lines):
     if not suggest_options:
         return results
 
+    # check if we'd like to attempt to close the line
+    bbox_length = (np.max(x)-np.min(x))*2 + (np.max(y)-np.min(y))*2
+    endpoints_dist = dist(0, -1)
+
+    make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
+
+    if make_closed:
+        orig_len = len(x)
+        def half(ls):
+            ls = list(ls)
+            return ls[:-len(ls)//2]
+        cx = np.array(list(x)+half([xi+0.001 for xi in x]))
+        cy = np.array(list(y)+half([yi+0.001 for yi in y]))
+
+        ctck, cu = splprep([cx, cy], s=len(cx)/5)
+        add_result(ctck, cu[orig_len//2-1], cu[-1])
+
     # check for intersections, throw out short segments between the endpoints and first/last intersection
     ix = np.round(results[0][0]).astype(int)
     iy = np.round(results[0][1]).astype(int)
@@ -108,25 +126,7 @@ def bspline_interp(points, suggest_options, existing_lines):
 
         new_points = splev(np.arange(step*(intersections[0]+1) if first_short else u[0], step*(intersections[-1]) if last_short else u[-1], step), tck)
         results.append(new_points)
-        return results
     
-    # check if we'd like to attempt to close the line
-    bbox_length = (np.max(x)-np.min(x))*2 + (np.max(y)-np.min(y))*2
-    endpoints_dist = dist(0, -1)
-
-    make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
-
-    if make_closed:
-        orig_len = len(x)
-        def half(ls):
-            ls = list(ls)
-            return ls[:-len(ls)//2]
-        x = np.array(list(x)+half([xi+0.001 for xi in x]))
-        y = np.array(list(y)+half([yi+0.001 for yi in y]))
-
-        tck, u = splprep([x, y], s=len(x)/5)
-        add_result(tck, u[orig_len//2-1], u[-1])
-
     return results
 
 def plotLines(points, ax, width, suggest_options, plot_reset, existing_lines):
@@ -287,8 +287,21 @@ class HistoryItemSet:
     def byte_size(self):
         return sum([item.byte_size() for item in self.items])
 
-class PenTool:
+class Button:
+    def __init__(self):
+        self.button_surface = None
+    def draw(self, rect, cursor_surface):
+        left, bottom, width, height = rect
+        _, _, w, h = cursor_surface.get_rect()
+        scaled_width = w*height/h
+        if not self.button_surface:
+            surface = scale_image(cursor_surface, scaled_width, height)
+            self.button_surface = surface
+        screen.blit(self.button_surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
+
+class PenTool(Button):
     def __init__(self, eraser=False, width=WIDTH):
+        Button.__init__(self)
         self.prev_drawn = None
         self.color = BACKGROUND if eraser else PEN
         self.eraser = eraser
@@ -296,13 +309,6 @@ class PenTool:
         self.circle_width = (width//2)*2
         self.points = []
         self.lines_array = None
-
-    def draw(self, rect, cursor_surface):
-        left, bottom, width, height = rect
-        _, _, w, h = cursor_surface.get_rect()
-        scaled_width = w*height/h
-        surface = scale_image(cursor_surface, scaled_width, height)
-        screen.blit(surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
 
     def on_mouse_down(self, x, y):
         self.points = []
@@ -335,7 +341,8 @@ class PenTool:
 
             history_item.optimize()
             history_append(history_item)
-            prev_history_item = history_item
+            if not prev_history_item:
+                prev_history_item = history_item
 
     def on_mouse_move(self, x, y):
        if self.eraser and self.bucket_color is None and self.lines_array[x,y] != 255:
@@ -352,6 +359,7 @@ class PenTool:
 
 class NewDeleteTool(PenTool):
     def __init__(self, frame_func, clip_func):
+        PenTool.__init__(self)
         self.frame_func = frame_func
         self.clip_func = clip_func
 
@@ -366,15 +374,10 @@ def flood_fill_color_based_on_lines(color, lines, x, y, bucket_color):
     for ch in range(3):
          color[:,:,ch] = color[:,:,ch]*(1-flood_mask) + bucket_color[ch]*flood_mask
 
-class PaintBucketTool:
+class PaintBucketTool(Button):
     def __init__(self,color):
+        Button.__init__(self)
         self.color = color
-    def draw(self, rect, cursor_surface):
-        left, bottom, width, height = rect
-        _, _, w, h = cursor_surface.get_rect()
-        scaled_width = w*height/h
-        surface = scale_image(cursor_surface, scaled_width, height)
-        screen.blit(surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
     def on_mouse_down(self, x, y):
         color = pygame.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
@@ -485,15 +488,9 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
 
     return fading_mask
 
-class FlashlightTool:
+class FlashlightTool(Button):
     def __init__(self):
-        pass
-    def draw(self, rect, cursor_surface):
-        left, bottom, width, height = rect
-        _, _, w, h = cursor_surface.get_rect()
-        scaled_width = w*height/h
-        surface = scale_image(cursor_surface, scaled_width, height)
-        screen.blit(surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
+        Button.__init__(self)
     def on_mouse_down(self, x, y):
         color = pygame.surfarray.pixels3d(movie.curr_frame().surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
@@ -502,7 +499,7 @@ class FlashlightTool:
             return
         fading_mask.set_alpha(255)
         layout.drawing_area().fading_mask = fading_mask
-        layout.drawing_area().fade_per_frame = 255/(FRAME_RATE*15)
+        layout.drawing_area().fade_per_frame = 255/(FADING_RATE*15)
     def on_mouse_up(self, x, y): pass
     def on_mouse_move(self, x, y): pass
 
@@ -554,6 +551,8 @@ class Layout:
         if event.type == PLAYBACK_TIMER_EVENT:
             if self.is_playing:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
+
+        if event.type == FADING_TIMER_EVENT:
             self.drawing_area().update_fading_mask()
 
         if event.type == SAVING_TIMER_EVENT:
@@ -1639,9 +1638,11 @@ escape = False
 
 PLAYBACK_TIMER_EVENT = pygame.USEREVENT + 1
 SAVING_TIMER_EVENT = pygame.USEREVENT + 2
+FADING_TIMER_EVENT = pygame.USEREVENT + 3
 
 pygame.time.set_timer(PLAYBACK_TIMER_EVENT, 1000//FRAME_RATE) # we play back at 12 fps
 pygame.time.set_timer(SAVING_TIMER_EVENT, 15*1000) # we save a copy of the current clip every 15 seconds
+pygame.time.set_timer(FADING_TIMER_EVENT, 1000//FADING_RATE) # we save a copy of the current clip every 15 seconds
 
 interesting_events = [
     pygame.KEYDOWN,
@@ -1650,6 +1651,7 @@ interesting_events = [
     pygame.MOUSEBUTTONUP,
     PLAYBACK_TIMER_EVENT,
     SAVING_TIMER_EVENT,
+    FADING_TIMER_EVENT,
 ]
 
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
@@ -1667,6 +1669,7 @@ def tdiff():
 while not escape: 
  try:
   for event in pygame.event.get():
+   #print(pg.event.event_name(event.type),tdiff(),event.type)
    if event.type not in interesting_events:
        continue
    try:
@@ -1698,7 +1701,7 @@ while not escape:
 
       # TODO: might be good to optimize repainting beyond "just repaint everything
       # upon every event"
-      if layout.is_playing or layout.drawing_area().fading_mask or event.type not in [PLAYBACK_TIMER_EVENT, SAVING_TIMER_EVENT]:
+      if layout.is_playing or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in [PLAYBACK_TIMER_EVENT, SAVING_TIMER_EVENT]:
         # don't repaint upon depressed mouse movement. this is important to avoid the pen
         # lagging upon "first contact" when a mouse motion event is sent before a mouse down
         # event at the same coordinate; repainting upon that mouse motion event loses time
