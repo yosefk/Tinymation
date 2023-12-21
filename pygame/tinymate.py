@@ -129,6 +129,8 @@ def bspline_interp(points, suggest_options, existing_lines):
         add_result(ctck, cu[orig_len//2-1], cu[-1])
         return reversed(results)
 
+    return results
+
 def plotLines(points, ax, width, suggest_options, plot_reset, existing_lines):
     results = []
     def add_results(px, py):
@@ -157,8 +159,19 @@ def drawLines(image_height, image_width, points, width, suggest_options, existin
     if not fig:
         fig, ax = plt.subplots()
         ax.axis('off')
-        fig.set_dpi(1)
-        fig.set_size_inches(image_width, image_height)
+        fig.set_size_inches(image_width/fig.get_dpi(), image_height/fig.get_dpi())
+        ok = False
+        # not sure why it's needed, but for some w x h it is
+        for epsx in np.arange(-0.01,0.02,0.01):
+            for epsy in np.arange(-0.01,0.02,0.01):
+                iff = image_from_fig(fig)
+                if iff.shape == (image_height, image_width, 4):
+                    ok = True
+                    break
+                fig.set_size_inches(image_width/fig.get_dpi()+epsx, image_height/fig.get_dpi()+epsy)
+            if ok:
+                break
+        assert ok
         fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
     width *= 72 / fig.get_dpi()
