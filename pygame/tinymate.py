@@ -157,9 +157,8 @@ def drawLines(image_height, image_width, points, width, suggest_options, existin
     if not fig:
         fig, ax = plt.subplots()
         ax.axis('off')
-        # FIXME: need a reliable way to set the dimensions correctly
-        fig.set_size_inches(image_width/fig.get_dpi()+0.01, image_height/fig.get_dpi())
-        #fig.set_dpi(10)
+        fig.set_dpi(1)
+        fig.set_size_inches(image_width, image_height)
         fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
     width *= 72 / fig.get_dpi()
