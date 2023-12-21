@@ -31,6 +31,7 @@ FADING_RATE = 3
 PEN = (20, 20, 20)
 BACKGROUND = (240, 235, 220)
 UNDRAWABLE = (220, 215, 190)
+SELECTED = (220-80, 215-80, 190-80)
 WIDTH = 3 # the smallest width where you always have a pure pen color rendered along
 # the line path, making our naive flood fill work well...
 CURSOR_SIZE = int(screen.get_width() * 0.07)
@@ -218,7 +219,12 @@ flashlight_cursor = (flashlight_cursor[0], pg.image.load('flashlight-tool.png'))
 paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], pg.image.load('bucket-tool.png'))
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
-pg.mouse.set_cursor(pencil_cursor[0])
+def try_set_cursor(c):
+    try:
+        pg.mouse.set_cursor(c)
+    except:
+        pass
+try_set_cursor(pencil_cursor[0])
 
 class HistoryItem:
     def __init__(self, surface_id):
@@ -1035,26 +1041,10 @@ class ToolSelectionButton:
     def __init__(self, tool):
         self.tool = tool
     def draw(self):
+        pg.draw.rect(screen, SELECTED if self.tool is layout.full_tool else UNDRAWABLE, self.rect)
         self.tool.tool.draw(self.rect,self.tool.cursor[1])
     def on_mouse_down(self,x,y):
         set_tool(self.tool)
-    def on_mouse_up(self,x,y): pass
-    def on_mouse_move(self,x,y): pass
-
-class FunctionButton:
-    def __init__(self, function, icon=None):
-        self.function = function
-        self.icon = icon
-        self.scaled = None
-    def draw(self):
-        # TODO: show it was pressed (tool selection button shows it by changing the cursor, maybe still should show it was pressed)
-        if self.icon:
-            left, bottom, width, height = self.rect
-            if not self.scaled:
-                self.scaled = scale_image(self.icon, width, height)
-            screen.blit(self.scaled, (left, bottom), (0, 0, width, height))
-    def on_mouse_down(self,x,y):
-        self.function()
     def on_mouse_up(self,x,y): pass
     def on_mouse_move(self,x,y): pass
 
@@ -1448,7 +1438,7 @@ def set_tool(tool):
     if not isinstance(prev.tool, NewDeleteTool):
         prev_tool = prev
     if tool.cursor:
-        pg.mouse.set_cursor(tool.cursor[0])
+        try_set_cursor(tool.cursor[0])
 
 def restore_tool():
     set_tool(prev_tool)
@@ -1566,7 +1556,7 @@ def init_layout_rest():
     offset = 0
     for func, width in funcs_width:
         #f, _, icon = FUNCTIONS[func]
-        layout.add((offset*0.15,0.15,width*0.15, 0.1), ToolSelectionButton(TOOLS[func]))#FunctionButton(f, icon))
+        layout.add((offset*0.15,0.15,width*0.15, 0.1), ToolSelectionButton(TOOLS[func]))
         offset += width
 
     width = 0.05
