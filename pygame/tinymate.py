@@ -19,7 +19,7 @@ from scipy.interpolate import splprep, splev
 
 # this requires numpy to be installed in addition to scikit-image
 from skimage.morphology import flood_fill, binary_dilation, skeletonize
-from scipy.ndimage import grey_dilation
+from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closing
 pg = pygame
 
 screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
@@ -91,23 +91,6 @@ def bspline_interp(points, suggest_options, existing_lines):
     if not suggest_options:
         return results
 
-    # check if we'd like to attempt to close the line
-    bbox_length = (np.max(x)-np.min(x))*2 + (np.max(y)-np.min(y))*2
-    endpoints_dist = dist(0, -1)
-
-    make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
-
-    if make_closed:
-        orig_len = len(x)
-        def half(ls):
-            ls = list(ls)
-            return ls[:-len(ls)//2]
-        cx = np.array(list(x)+half([xi+0.001 for xi in x]))
-        cy = np.array(list(y)+half([yi+0.001 for yi in y]))
-
-        ctck, cu = splprep([cx, cy], s=len(cx)/5)
-        add_result(ctck, cu[orig_len//2-1], cu[-1])
-
     # check for intersections, throw out short segments between the endpoints and first/last intersection
     ix = np.round(results[0][0]).astype(int)
     iy = np.round(results[0][1]).astype(int)
@@ -126,16 +109,32 @@ def bspline_interp(points, suggest_options, existing_lines):
         step=(u[-1]-u[0])/curve_length
 
         new_points = splev(np.arange(step*(intersections[0]+1) if first_short else u[0], step*(intersections[-1]) if last_short else u[-1], step), tck)
-        results.append(new_points)
-    
-    return results
+        return [new_points] + results
+
+    # check if we'd like to attempt to close the line
+    bbox_length = (np.max(x)-np.min(x))*2 + (np.max(y)-np.min(y))*2
+    endpoints_dist = dist(0, -1)
+
+    make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
+
+    if make_closed:
+        orig_len = len(x)
+        def half(ls):
+            ls = list(ls)
+            return ls[:-len(ls)//2]
+        cx = np.array(list(x)+half([xi+0.001 for xi in x]))
+        cy = np.array(list(y)+half([yi+0.001 for yi in y]))
+
+        ctck, cu = splprep([cx, cy], s=len(cx)/5)
+        add_result(ctck, cu[orig_len//2-1], cu[-1])
+        return reversed(results)
 
 def plotLines(points, ax, width, suggest_options, plot_reset, existing_lines):
     results = []
     def add_results(px, py):
         plot_reset()
         ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False, solid_capstyle='round')
-        results.append(image_from_fig(fig)[:,:,0:3])
+        results.append(image_from_fig(fig)[:,:,0])
 
     if len(set(points)) == 1:
         x,y = points[0]
@@ -315,6 +314,7 @@ class PenTool(Button):
         self.circle_width = (width//2)*2
         self.points = []
         self.lines_array = None
+        self.suggestion_mask = None
 
     def on_mouse_down(self, x, y):
         self.points = []
@@ -330,14 +330,15 @@ class PenTool(Button):
         lines = pygame.surfarray.pixels_alpha(frame)
 
         prev_history_item = None
-        for new_lines in drawLines(frame.get_width(), frame.get_height(), self.points, self.width, suggest_options=not self.eraser, existing_lines=lines):
+        line_options = drawLines(frame.get_width(), frame.get_height(), self.points, self.width, suggest_options=not self.eraser, existing_lines=lines)
+        for new_lines in line_options:
             history_item = HistoryItem('lines')
             if prev_history_item:
                 prev_history_item.undo()
             if self.eraser:
-                lines[:,:] = np.minimum(new_lines[:,:,0], lines[:,:])
+                lines[:] = np.minimum(new_lines, lines)
             else:
-                lines[:,:] = np.maximum(255-new_lines[:,:,0], lines[:,:])
+                lines[:] = np.maximum(255-new_lines, lines)
 
             if self.eraser:
                 color_history_item = HistoryItem('color')
@@ -349,6 +350,28 @@ class PenTool(Button):
             history_append(history_item)
             if not prev_history_item:
                 prev_history_item = history_item
+        
+        if len(line_options)>1:
+            if self.suggestion_mask is None:
+                left, bottom, width, height = layout.drawing_area().rect
+                self.suggestion_mask = pg.Surface((width, height), pg.SRCALPHA)
+                self.suggestion_mask.fill((0,255,0))
+            alt_option = line_options[-2]
+            pg.surfarray.pixels_alpha(self.suggestion_mask)[:] = 255-alt_option
+            self.suggestion_mask.set_alpha(10)
+            layout.drawing_area().fading_mask = self.suggestion_mask
+            class Fading:
+                def __init__(self):
+                    self.i = 0
+                def fade(self, alpha, _):
+                    self.i += 1
+                    if self.i == 1:
+                        return 10
+                    if self.i == 2:
+                        return 130
+                    else:
+                        return 110-self.i*10
+            layout.drawing_area().fading_func = Fading().fade
 
     def on_mouse_move(self, x, y):
        if self.eraser and self.bucket_color is None and self.lines_array[x,y] != 255:
@@ -626,6 +649,7 @@ def pen2mask(lines, rgb, transparency):
 class DrawingArea:
     def __init__(self):
         self.fading_mask = None
+        self.fading_func = None
         self.fade_per_frame = 0
         self.last_update_time = 0
     def draw(self):
@@ -653,9 +677,13 @@ class DrawingArea:
         alpha = self.fading_mask.get_alpha()
         if alpha == 0:
             self.fading_mask = None
+            self.fading_func = None
             return
 
-        alpha -= self.fade_per_frame
+        if not self.fading_func:
+            alpha -= self.fade_per_frame
+        else:
+            alpha = self.fading_func(alpha, self.fade_per_frame)
         self.fading_mask.set_alpha(max(0,alpha))
 
     def fix_xy(self,x,y):
