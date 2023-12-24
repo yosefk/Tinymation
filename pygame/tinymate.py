@@ -230,6 +230,11 @@ flashlight_cursor = (flashlight_cursor[0], pg.image.load('flashlight-tool.png'))
 paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], pg.image.load('bucket-tool.png'))
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
+# set_cursor can fail on some machines so we don't count on it to work.
+# we set it early on to "give a sign of life" while the window is black;
+# we reset it again before entering the event loop.
+# if the cursors cannot be set the selected tool can still be inferred by
+# the darker background of the tool selection button.
 def try_set_cursor(c):
     try:
         pg.mouse.set_cursor(c)
@@ -998,6 +1003,7 @@ class MovieListArea:
         self.show_pos = None
         self.prevy = None
         self.reload()
+        self.histories = {}
     def reload(self):
         self.clips = []
         self.images = []
@@ -1076,6 +1082,12 @@ class MovieListArea:
         movie.save_before_closing()
         movie = Movie(self.clips[clip_pos])
         self.clip_pos = clip_pos
+        self.open_history(clip_pos)
+    def open_history(self, clip_pos):
+        global history
+        history = self.histories.get(self.clips[clip_pos], [])
+    def save_history(self):
+        self.histories[self.clips[self.clip_pos]] = history
 
 class ToolSelectionButton:
     def __init__(self, tool):
@@ -1331,6 +1343,7 @@ class Movie:
                 writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface()), [1,0,2]))
 
     def save_before_closing(self):
+        layout.movie_list_area().save_history()
         history_clear()
         self.frame(self.pos).dirty = True # updates the image timestamp so we open at that image next time...
         self.frame(self.pos).save()
@@ -1427,7 +1440,9 @@ def remove_clip():
     os.rename(movie.dir, movie.dir + '-deleted')
     movie_list_area.reload()
 
-    movie = Movie(movie_list_area.clips[0])
+    new_clip_pos = 0
+    movie = Movie(movie_list_area.clips[new_clip_pos])
+    movie_list_area.open_history(new_clip_pos)
 
 def toggle_playing(): layout.toggle_playing()
 
@@ -1695,6 +1710,8 @@ def tdiff():
     diff=(now-prevts)//10**6
     prevts = now
     return diff
+
+set_tool(TOOLS['pencil'])
 
 while not escape: 
  try:
