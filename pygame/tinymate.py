@@ -242,11 +242,23 @@ def try_set_cursor(c):
         pass
 try_set_cursor(pencil_cursor[0])
 
+
+def bounding_rectangle_of_a_boolean_mask(mask):
+    # Sum along the vertical and horizontal axes
+    vertical_sum = np.sum(mask, axis=1)
+    if not np.any(vertical_sum):
+        return None
+    horizontal_sum = np.sum(mask, axis=0)
+
+    minx, maxx = np.where(vertical_sum)[0][[0, -1]]
+    miny, maxy = np.where(horizontal_sum)[0][[0, -1]]
+
+    return minx, maxx, miny, maxy
+
 class HistoryItem:
     def __init__(self, surface_id):
         self.surface_id = surface_id
-        surface = movie.edit_curr_frame().surf_by_id(surface_id)
-        self.saved_array = self.array(surface.copy())
+        self.saved_array = self.array(self.curr_surface().copy())
         self.pos = movie.pos
         self.minx = 10**9
         self.miny = 10**9
@@ -257,49 +269,54 @@ class HistoryItem:
         return self.surface_id == 'lines'
     def array(self,surface):
         return pg.surfarray.pixels_alpha(surface) if self.alpha() else pg.surfarray.pixels3d(surface)
+    def curr_surface(self):
+        return movie.edit_curr_frame().surf_by_id(self.surface_id)
+    def nop(self):
+        return self.saved_array is None
     def undo(self):
+        if self.nop():
+            return
+
         if self.pos != movie.pos:
             print(f'WARNING: HistoryItem at the wrong position! should be {self.pos}, but is {movie.pos}')
         movie.seek_frame(self.pos) # we should already be here, but just in case
-        frame = self.array(movie.edit_curr_frame().surf_by_id(self.surface_id))
+
+        frame = self.array(self.curr_surface())
         if self.optimized:
-            frame.blit(self.surface, (self.minx, self.miny), (0, 0, self.maxx-self.minx+1, self.maxy-self.miny+1))
+            frame[self.minx:self.maxx+1, self.miny:self.maxy+1] = self.saved_array
         else:
-            #frame.blit(self.surface, frame.get_rect())
             frame[:] = self.saved_array
-    def affected(self,minx,miny,maxx,maxy):
-        self.minx = min(minx,self.minx)
-        self.maxx = max(maxx,self.maxx)
-        self.miny = min(miny,self.miny)
-        self.maxy = max(maxy,self.maxy)
     def optimize(self):
-        return # FIXME
-        if self.minx == 10**9:
+        if self.alpha():
+            mask = self.saved_array != self.array(self.curr_surface())
+        else:
+            mask = np.any(self.saved_array != self.array(self.curr_surface()), axis=2)
+        brect = bounding_rectangle_of_a_boolean_mask(mask)
+
+        if brect is None: # this can happen eg when drawing lines on an already-filled-with-lines area
+            self.saved_array = None
             return
-        left, bottom, width,height = movie.edit_curr_frame().get_rect()
-        right = left+width
-        top = bottom+height
-        self.minx = max(self.minx, left)
-        self.maxx = min(self.maxx, right-1)
-        self.miny = max(self.miny, bottom)
-        self.maxy = min(self.maxy, top-1)
         
-        affected = make_surface(self.maxx-self.minx+1, self.maxy-self.miny+1)
-        affected.blit(self.surface, (0,0), (self.minx, self.miny, self.maxx+1, self.maxy+1))
-        self.surface = affected
+        self.minx, self.maxx, self.miny, self.maxy = brect
+        self.saved_array = self.saved_array[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
         self.optimized = True
 
     def __str__(self):
         return f'HistoryItem(pos={self.pos}, rect=({self.minx}, {self.miny}, {self.maxx}, {self.maxy}))'
 
     def byte_size(self):
-        width = self.saved_array.shape[0]
-        height = self.saved_array.shape[1]
-        return width*height*(1 if self.alpha() else 3)
+        if self.nop():
+            return 0
+        return self.saved_array.nbytes
 
 class HistoryItemSet:
     def __init__(self, items):
         self.items = items
+    def nop(self):
+        for item in self.items:
+            if not item.nop():
+                return False
+        return True
     def undo(self):
         for item in self.items:
             item.undo()
@@ -395,8 +412,6 @@ class PenTool(Button):
            self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((x,y))
        draw_into = screen.subsurface(layout.drawing_area().rect)
        self.points.append((x,y))
-       #FIXME: bring back optimize!!  if self.history_item:
-       #self.history_item.affected(x-self.width,y-self.width,x+self.width,y+self.width)
        color = self.color if not self.eraser else (self.bucket_color if self.bucket_color else BACKGROUND)
        if self.prev_drawn:
             drawLine(draw_into, self.prev_drawn, (x,y), color, self.width)
@@ -432,10 +447,12 @@ class PaintBucketTool(Button):
             return # we never flood the lines themselves - they keep the PEN color in a separate layer;
             # and there's no point in flooding with the color the pixel already has
 
-        # TODO: would be better to optimize the history item
-        history.append_item(HistoryItem('color'))
+        history_item = HistoryItem('color')
 
         flood_fill_color_based_on_lines(color, lines, x, y, self.color)
+
+        history_item.optimize()
+        history.append_item(history_item)
         
     def on_mouse_up(self, x, y):
         pass
@@ -1650,6 +1667,9 @@ init_layout_rest()
 def byte_size(history_item):
     return getattr(history_item, 'byte_size', lambda: 128)()
 
+def nop(history_item):
+    return getattr(history_item, 'nop', lambda: False)()
+
 class History:
     # a history is kept per movie. the size of the history is global - we don't
     # want to exceed a certain memory threshold for the history
@@ -1664,6 +1684,9 @@ class History:
             History.byte_size -= byte_size(op)
 
     def append_item(self, item):
+        if nop(item):
+            return
+
         History.byte_size += byte_size(item)
         self.undo.append(item)
         while self.undo and History.byte_size > MAX_HISTORY_BYTE_SIZE:
