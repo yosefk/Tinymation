@@ -364,7 +364,7 @@ class PenTool(Button):
                 history_item = HistoryItemSet([history_item, color_history_item])
 
             history_item.optimize()
-            history_append(history_item)
+            history.append_item(history_item)
             if not prev_history_item:
                 prev_history_item = history_item
         
@@ -433,7 +433,7 @@ class PaintBucketTool(Button):
             # and there's no point in flooding with the color the pixel already has
 
         # TODO: would be better to optimize the history item
-        history_append(HistoryItem('color'))
+        history.append_item(HistoryItem('color'))
 
         flood_fill_color_based_on_lines(color, lines, x, y, self.color)
         
@@ -1004,6 +1004,8 @@ class MovieListArea:
         self.prevy = None
         self.reload()
         self.histories = {}
+    def delete_current_history(self):
+        del self.histories[self.clips[self.clip_pos]]
     def reload(self):
         self.clips = []
         self.images = []
@@ -1344,7 +1346,8 @@ class Movie:
 
     def save_before_closing(self):
         layout.movie_list_area().save_history()
-        history_clear()
+        global history
+        history = History()
         self.frame(self.pos).dirty = True # updates the image timestamp so we open at that image next time...
         self.frame(self.pos).save()
         self.save_gif()
@@ -1397,12 +1400,12 @@ class ToggleHoldHistoryItem:
         layout.timeline_area().combined_mask = None
 
 def append_seek_frame_history_item_if_frame_is_dirty():
-    if history and not isinstance(history[-1], SeekFrameHistoryItem):
-        history_append(SeekFrameHistoryItem(movie.pos))
+    if history.undo and not isinstance(history.undo[-1], SeekFrameHistoryItem):
+        history.append_item(SeekFrameHistoryItem(movie.pos))
 
 def insert_frame():
     movie.insert_frame()
-    history_append(InsertFrameHistoryItem(movie.pos))
+    history.append_item(InsertFrameHistoryItem(movie.pos))
 
 def remove_frame():
     if len(movie.frames) == 1:
@@ -1410,7 +1413,7 @@ def remove_frame():
     pos = movie.pos
     next_hold = False if movie.pos+1 == len(movie.frames) else movie.frames[movie.pos+1].hold
     removed = movie.remove_frame()
-    history_append(RemoveFrameHistoryItem(pos, removed, next_hold))
+    history.append_item(RemoveFrameHistoryItem(pos, removed, next_hold))
 
 def next_frame():
     if movie.pos >= len(movie.frames)-1 and not layout.timeline_area().loop_mode:
@@ -1438,6 +1441,7 @@ def remove_clip():
     global movie
     movie.save_before_closing()
     os.rename(movie.dir, movie.dir + '-deleted')
+    movie_list_area.delete_current_history()
     movie_list_area.reload()
 
     new_clip_pos = 0
@@ -1454,7 +1458,7 @@ def toggle_frame_hold():
     if movie.pos != 0:
         movie.toggle_hold()
         layout.timeline_area().combined_mask = None
-        history_append(ToggleHoldHistoryItem(movie.pos))
+        history.append_item(ToggleHoldHistoryItem(movie.pos))
 
 TOOLS = {
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
@@ -1636,48 +1640,51 @@ init_layout_basic()
 movie = Movie(default_clip_dir())
 init_layout_rest()
 
-# The history is "global" for all operations. In some (rare) animation programs
+# The history is "global" for all operations within a movie. In some (rare) animation programs
 # there's a history per frame. One problem with this is how to undo timeline
 # operations like frame deletions (do you have a separate undo function for this?)
 # It's also somewhat less intuitive in that you might have long forgotten
 # what you've done on some frame when you visit it and press undo one time
 # too many
-history = []
-history_byte_size = 0
-
+#
 def byte_size(history_item):
     return getattr(history_item, 'byte_size', lambda: 128)()
 
-def history_append(item):
-    global history_byte_size
-    history_byte_size += byte_size(item)
-    history.append(item)
-    while history and history_byte_size > MAX_HISTORY_BYTE_SIZE:
-        history_byte_size -= byte_size(history[0])
-        del history[0]
+class History:
+    # a history is kept per movie. the size of the history is global - we don't
+    # want to exceed a certain memory threshold for the history
+    byte_size = 0
+    
+    def __init__(self):
+        self.undo = []
+        layout.drawing_area().fading_mask = None
 
-    layout.drawing_area().fading_mask = None # new operations invalidate old skeletons
+    def __del__(self):
+        for op in self.undo:
+            History.byte_size -= byte_size(op)
 
-def history_pop():
-    global history_byte_size
-    if history:
-        # TODO: we might want a loop here since some undo ops
-        # turn out to be "no-ops" (specifically seek frame where we're already there.)
-        # as it is right now, you might press undo and nothing will happen which might be confusing
-        last_op = history[-1]
-        last_op.undo()
-        history_byte_size -= byte_size(last_op)
-        history.pop()
+    def append_item(self, item):
+        History.byte_size += byte_size(item)
+        self.undo.append(item)
+        while self.undo and History.byte_size > MAX_HISTORY_BYTE_SIZE:
+            History.byte_size -= byte_size(self.undo[0])
+            del self.undo[0]
 
-    layout.drawing_area().fading_mask = None # changing canvas state invalidates old skeletons
+        layout.drawing_area().fading_mask = None # new operations invalidate old skeletons
 
-def history_clear():
-    global history
-    global history_byte_size
-    history = []
-    history_byte_size = 0
+    def pop_item(self):
+        if self.undo:
+            # TODO: we might want a loop here since some undo ops
+            # turn out to be "no-ops" (specifically seek frame where we're already there.)
+            # though we try to avoid having spurious seek-frame ops in the history
+            last_op = self.undo[-1]
+            last_op.undo()
+            History.byte_size -= byte_size(last_op)
+            self.undo.pop()
 
-    layout.drawing_area().fading_mask = None
+        layout.drawing_area().fading_mask = None # changing canvas state invalidates old skeletons
+
+history = History()
 
 escape = False
 
@@ -1716,11 +1723,15 @@ set_tool(TOOLS['pencil'])
 while not escape: 
  try:
   for event in pygame.event.get():
-   #print(pg.event.event_name(event.type),tdiff(),event.type)
+   #print(pg.event.event_name(event.type),tdiff(),event.type,pygame.key.get_mods())
+
    if event.type not in interesting_events:
        continue
    try:
       if event.type == pygame.KEYDOWN:
+        if pg.key.get_mods() & pg.KMOD_LCTRL:
+            print('LCTRL')
+
         if event.key == pygame.K_ESCAPE: # ESC pressed
             escape = True
             break
@@ -1729,7 +1740,7 @@ while not escape:
             continue # ignore keystrokes (except ESC) when a mouse tool is being used
         
         if event.key == ord(' '): # undo
-            history_pop()
+            history.pop_item()
 
         if keyboard_shortcuts_enabled:
           for tool in TOOLS.values():
