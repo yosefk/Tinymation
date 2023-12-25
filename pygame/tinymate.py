@@ -281,11 +281,17 @@ class HistoryItem:
             print(f'WARNING: HistoryItem at the wrong position! should be {self.pos}, but is {movie.pos}')
         movie.seek_frame(self.pos) # we should already be here, but just in case
 
+        # we could have created this item a bit more quickly with a bit more code but doesn't seem worth it
+        redo = HistoryItem(self.surface_id)
+
         frame = self.array(self.curr_surface())
         if self.optimized:
             frame[self.minx:self.maxx+1, self.miny:self.maxy+1] = self.saved_array
         else:
             frame[:] = self.saved_array
+
+        redo.optimize()
+        return redo
     def optimize(self):
         if self.alpha():
             mask = self.saved_array != self.array(self.curr_surface())
@@ -318,11 +324,11 @@ class HistoryItemSet:
                 return False
         return True
     def undo(self):
-        for item in self.items:
-            item.undo()
+        return HistoryItemSet([item.undo() for item in self.items])
     def optimize(self):
         for item in self.items:
             item.optimize()
+        self.items = [item for item in self.items if not item.nop()]
     def byte_size(self):
         return sum([item.byte_size() for item in self.items])
 
@@ -1372,7 +1378,10 @@ class Movie:
 
 class SeekFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
-    def undo(self): movie.seek_frame(self.pos) 
+    def undo(self):
+        redo = SeekFrameHistoryItem(movie.pos)
+        movie.seek_frame(self.pos)
+        return redo
     def __str__(self): return f'SeekFrameHistoryItem(restoring pos to {self.pos})'
 
 class InsertFrameHistoryItem:
@@ -1382,7 +1391,9 @@ class InsertFrameHistoryItem:
         # but when undoing insert_frame, we bring you to the previous frame after the one
         # you removed - it's the one where you inserted the frame we're now removing to undo
         # the insert, so this is where we should go to bring you back in time.
-        movie.remove_frame(at_pos=self.pos, new_pos=max(0, self.pos-1))
+        next_hold = False if self.pos+1 == len(movie.frames) else movie.frames[self.pos+1].hold
+        removed = movie.remove_frame(at_pos=self.pos, new_pos=max(0, self.pos-1))
+        return RemoveFrameHistoryItem(self.pos, removed, next_hold)
     def __str__(self):
         return f'InsertFrameHistoryItem(removing at pos {self.pos}, then seeking to pos {(self.pos-1)%len(movie.frames)})'
 
@@ -1400,6 +1411,7 @@ class RemoveFrameHistoryItem:
         if self.next_hold and self.pos==0:
             movie.frames[1].hold = True
             movie.save_meta()
+        return InsertFrameHistoryItem(self.pos)
     def __str__(self):
         return f'RemoveFrameHistoryItem(inserting at pos {self.pos})'
     def byte_size(self):
@@ -1415,6 +1427,7 @@ class ToggleHoldHistoryItem:
             movie.seek_frame(self.pos)
         movie.toggle_hold()
         layout.timeline_area().combined_mask = None
+        return self
 
 def append_seek_frame_history_item_if_frame_is_dirty():
     if history.undo and not isinstance(history.undo[-1], SeekFrameHistoryItem):
@@ -1677,35 +1690,46 @@ class History:
     
     def __init__(self):
         self.undo = []
+        self.redo = []
         layout.drawing_area().fading_mask = None
 
     def __del__(self):
-        for op in self.undo:
+        for op in self.undo + self.redo:
             History.byte_size -= byte_size(op)
 
     def append_item(self, item):
         if nop(item):
             return
 
-        History.byte_size += byte_size(item)
         self.undo.append(item)
+        History.byte_size += byte_size(item) - sum([byte_size(op) for op in self.redo])
+        self.redo = [] # forget the redo stack
         while self.undo and History.byte_size > MAX_HISTORY_BYTE_SIZE:
             History.byte_size -= byte_size(self.undo[0])
             del self.undo[0]
 
         layout.drawing_area().fading_mask = None # new operations invalidate old skeletons
 
-    def pop_item(self):
+    def undo_item(self):
         if self.undo:
             # TODO: we might want a loop here since some undo ops
             # turn out to be "no-ops" (specifically seek frame where we're already there.)
             # though we try to avoid having spurious seek-frame ops in the history
             last_op = self.undo[-1]
-            last_op.undo()
-            History.byte_size -= byte_size(last_op)
+            redo = last_op.undo()
+            History.byte_size += byte_size(redo) - byte_size(last_op)
+            self.redo.append(redo)
             self.undo.pop()
 
         layout.drawing_area().fading_mask = None # changing canvas state invalidates old skeletons
+
+    def redo_item(self):
+        if self.redo:
+            last_op = self.redo[-1]
+            undo = last_op.undo()
+            History.byte_size += byte_size(undo) - byte_size(last_op)
+            self.undo.append(undo)
+            self.redo.pop()
 
 history = History()
 
@@ -1752,8 +1776,6 @@ while not escape:
        continue
    try:
       if event.type == pygame.KEYDOWN:
-        if pg.key.get_mods() & pg.KMOD_LCTRL:
-            print('LCTRL')
 
         if event.key == pygame.K_ESCAPE: # ESC pressed
             escape = True
@@ -1762,8 +1784,11 @@ while not escape:
         if layout.is_pressed:
             continue # ignore keystrokes (except ESC) when a mouse tool is being used
         
-        if event.key == ord(' '): # undo
-            history.pop_item()
+        if event.key == ord(' '):
+            history.undo_item()
+
+        if pg.key.get_mods() & pg.KMOD_LALT:
+            history.redo_item()
 
         if keyboard_shortcuts_enabled:
           for tool in TOOLS.values():
