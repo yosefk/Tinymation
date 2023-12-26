@@ -1110,9 +1110,10 @@ class MovieListArea:
         self.open_history(clip_pos)
     def open_history(self, clip_pos):
         global history
-        history = self.histories.get(self.clips[clip_pos], [])
+        history = self.histories.get(self.clips[clip_pos], History())
     def save_history(self):
-        self.histories[self.clips[self.clip_pos]] = history
+        if self.clips:
+            self.histories[self.clips[self.clip_pos]] = history
 
 class ToolSelectionButton:
     def __init__(self, tool):
