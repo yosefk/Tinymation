@@ -36,6 +36,7 @@ WIDTH = 3 # the smallest width where you always have a pure pen color rendered a
 # the line path, making our naive flood fill work well...
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 MAX_HISTORY_BYTE_SIZE = 2*1024**3
+CLIP_FILE = 'clip.json'
 FRAME_ORDER_FILE = 'frame_order.json'
 
 MY_DOCUMENTS = winpath.get_my_documents()
@@ -258,21 +259,19 @@ def bounding_rectangle_of_a_boolean_mask(mask):
 class HistoryItem:
     def __init__(self, surface_id):
         self.surface_id = surface_id
-        self.saved_array = self.array(self.curr_surface().copy())
+        surface = self.curr_surface().copy()
+        self.saved_alpha = pg.surfarray.pixels_alpha(surface)
+        self.saved_rgb = pg.surfarray.pixels3d(surface) if surface_id == 'color' else None
         self.pos = movie.pos
         self.minx = 10**9
         self.miny = 10**9
         self.maxx = -10**9
         self.maxy = -10**9
         self.optimized = False
-    def alpha(self):
-        return self.surface_id == 'lines'
-    def array(self,surface):
-        return pg.surfarray.pixels_alpha(surface) if self.alpha() else pg.surfarray.pixels3d(surface)
     def curr_surface(self):
         return movie.edit_curr_frame().surf_by_id(self.surface_id)
     def nop(self):
-        return self.saved_array is None
+        return self.saved_alpha is None
     def undo(self):
         if self.nop():
             return
@@ -284,27 +283,33 @@ class HistoryItem:
         # we could have created this item a bit more quickly with a bit more code but doesn't seem worth it
         redo = HistoryItem(self.surface_id)
 
-        frame = self.array(self.curr_surface())
+        frame = self.curr_surface()
         if self.optimized:
-            frame[self.minx:self.maxx+1, self.miny:self.maxy+1] = self.saved_array
+            pg.surfarray.pixels_alpha(frame)[self.minx:self.maxx+1, self.miny:self.maxy+1] = self.saved_alpha
+            if self.saved_rgb is not None:
+                pg.surfarray.pixels3d(frame)[self.minx:self.maxx+1, self.miny:self.maxy+1] = self.saved_rgb
         else:
-            frame[:] = self.saved_array
+            pg.surfarray.pixels_alpha(frame)[:] = self.saved_alpha
+            if self.saved_rgb is not None:
+                pg.surfarray.pixels3d(frame)[:] = self.saved_rgb
 
         redo.optimize()
         return redo
     def optimize(self):
-        if self.alpha():
-            mask = self.saved_array != self.array(self.curr_surface())
-        else:
-            mask = np.any(self.saved_array != self.array(self.curr_surface()), axis=2)
+        mask = self.saved_alpha != pg.surfarray.pixels_alpha(self.curr_surface())
+        if self.saved_rgb is not None:
+            mask |= np.any(self.saved_rgb != pg.surfarray.pixels3d(self.curr_surface()), axis=2)
         brect = bounding_rectangle_of_a_boolean_mask(mask)
 
         if brect is None: # this can happen eg when drawing lines on an already-filled-with-lines area
-            self.saved_array = None
+            self.saved_alpha = None
+            self.saved_rgb = None
             return
         
         self.minx, self.maxx, self.miny, self.maxy = brect
-        self.saved_array = self.saved_array[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
+        self.saved_alpha = self.saved_alpha[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
+        if self.saved_rgb is not None:
+            self.saved_rgb = self.saved_rgb[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
         self.optimized = True
 
     def __str__(self):
@@ -313,7 +318,7 @@ class HistoryItem:
     def byte_size(self):
         if self.nop():
             return 0
-        return self.saved_array.nbytes
+        return self.saved_alpha.nbytes + (self.saved_rgb.nbytes if self.saved_rgb is not None else 0)
 
 class HistoryItemSet:
     def __init__(self, items):
@@ -382,8 +387,10 @@ class PenTool(Button):
 
             if self.eraser:
                 color_history_item = HistoryItem('color')
-                color = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
-                flood_fill_color_based_on_lines(color, lines, x, y, self.bucket_color if self.bucket_color else BACKGROUND)
+                color = movie.edit_curr_frame().surf_by_id('color')
+                color_rgb = pg.surfarray.pixels3d(color)
+                color_alpha = pg.surfarray.pixels_alpha(color)
+                flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, self.bucket_color if self.bucket_color else BACKGROUND+(255,))
                 history_item = HistoryItemSet([history_item, color_history_item])
 
             history_item.optimize()
@@ -434,28 +441,31 @@ class NewDeleteTool(PenTool):
     def on_mouse_up(self, x, y): pass
     def on_mouse_move(self, x, y): pass
 
-def flood_fill_color_based_on_lines(color, lines, x, y, bucket_color):
+def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_color):
     pen_mask = lines == 255
     flood_code = 2
     flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
     for ch in range(3):
-         color[:,:,ch] = color[:,:,ch]*(1-flood_mask) + bucket_color[ch]*flood_mask
+         color_rgb[:,:,ch] = color_rgb[:,:,ch]*(1-flood_mask) + bucket_color[ch]*flood_mask
+    color_alpha[:] = color_alpha*(1-flood_mask) + bucket_color[3]*flood_mask
 
 class PaintBucketTool(Button):
     def __init__(self,color):
         Button.__init__(self)
         self.color = color
     def on_mouse_down(self, x, y):
-        color = pygame.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+        color_surface = movie.edit_curr_frame().surf_by_id('color')
+        color_rgb = pg.surfarray.pixels3d(color_surface)
+        color_alpha = pg.surfarray.pixels_alpha(color_surface)
         lines = pygame.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
         
-        if np.array_equal(color[x,y,:], np.array(self.color)) or lines[x,y] == 255:
+        if (np.array_equal(color_rgb[x,y,:], np.array(self.color[0:3])) and color_alpha[x,y] == self.color[3]) or lines[x,y] == 255:
             return # we never flood the lines themselves - they keep the PEN color in a separate layer;
             # and there's no point in flooding with the color the pixel already has
 
         history_item = HistoryItem('color')
 
-        flood_fill_color_based_on_lines(color, lines, x, y, self.color)
+        flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, self.color)
 
         history_item.optimize()
         history.append_item(history_item)
@@ -695,7 +705,9 @@ class DrawingArea:
     def draw(self):
         left, bottom, width, height = self.rect
         frame = movie.frame(layout.playing_index).surface() if layout.is_playing else movie.curr_frame().surface()
+        screen.blit(movie.curr_bottom_layers_surface(), (left, bottom), (0, 0, width, height))
         screen.blit(frame, (left, bottom), (0, 0, width, height))
+        # FIXME: add curr_top_layers_surface
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
@@ -739,8 +751,10 @@ class DrawingArea:
         layout.tool.on_mouse_move(*self.fix_xy(x,y))
     def new_frame(self):
         _, _, width, height = self.rect
-        frame = make_surface(width, height)
+        frame = pygame.Surface((width, height), pygame.SRCALPHA)
         frame.fill(BACKGROUND)
+        pg.surfarray.pixels_alpha(frame)[:] = 0
+        pg.surfarray.pixels_alpha(frame)[:] = 0
         return frame
 
 class TimelineArea:
@@ -1163,8 +1177,9 @@ class Thumbnail:
         self.movie_len = None
 
 class Frame:
-    def __init__(self, color_surface_or_id, dir):
+    def __init__(self, color_surface_or_id, dir, layer_id=None):
         self.dir = dir
+        self.layer_id = layer_id
         if type(color_surface_or_id) == str: # id - load the surfaces from the directory
             self.id = color_surface_or_id
             for surf_id in self.surf_ids():
@@ -1197,7 +1212,11 @@ class Frame:
         s.blit(self.lines, (0, 0), (0, 0, s.get_width(), s.get_height()))
         return s
 
-    def filename(self,surface_id): return os.path.join(self.dir, f'{self.id}-{surface_id}.bmp')
+    def filename(self,surface_id):
+        fname = f'{self.id}-{surface_id}.bmp'
+        if self.layer_id:
+            fname = os.path.join(f'layer-{self.layer_id}', fname)
+        return os.path.join(self.dir, fname)
     def save(self):
         if self.dirty:
             for surf_id in self.surf_ids():
@@ -1208,6 +1227,17 @@ class Frame:
             fname = self.filename(surf_id)
             if os.path.exists(fname):
                 os.unlink(fname)
+
+class Layer:
+    def __init__(self, frames, dir, layer_id=None):
+        self.dir = dir
+        self.frames = frames
+        self.id = layer_id if layer_id else str(uuid.uuid1())
+        for frame in frames:
+            frame.layer_id = self.id
+        subdir = os.path.join(dir, f'layer-{self.id}')
+        if not os.path.isdir(subdir):
+            os.makedirs(subdir)
 
 def clip_frame_filenames(clipdir):
     with open(os.path.join(clipdir, FRAME_ORDER_FILE), 'r') as frame_order:
@@ -1222,20 +1252,31 @@ class Movie:
         if not os.path.isdir(dir): # new clip
             os.makedirs(dir)
             self.frames = [Frame(layout.drawing_area().new_frame(), self.dir)]
-            self.frames[0].save()
             self.pos = 0
+            self.layers = [Layer(self.frames, dir)]
+            self.layer_pos = 0
+            self.frames[0].save()
             self.save_meta()
         else:
-            self.frames = []
-            fname2id = {}
-            for frameid, fname, hold in clip_frame_filenames(self.dir):
-                fname2id[fname] = frameid
-                frame = Frame(frameid, self.dir)
-                frame.hold = hold
-                self.frames.append(frame)
-            last_modified_id = fname2id[get_last_modified(fname2id.keys())]
-            # reopen at the last modified frame
-            self.pos = [frame.id for frame in self.frames].index(last_modified_id)
+            with open(os.path.join(dir, CLIP_FILE), 'r') as clip_file:
+                clip = json.loads(clip_file.read())
+            frame_ids = clip['frame_order']
+            layer_ids = clip['layer_order']
+            holds = clip['hold']
+
+            self.layers = []
+            for layer_index, layer_id in enumerate(layer_ids):
+                frames = []
+                for frame_index, frame_id in enumerate(frame_ids):
+                    frame = Frame(frame_id, dir, layer_id)
+                    frame.hold = holds[layer_index][frame_index]
+                    frames.append(frame)
+                self.layers.append(Layer(frames, dir, layer_id))
+
+            self.pos = clip['frame_pos']
+            self.layer_pos = clip['layer_pos']
+            self.frames = self.layers[self.layer_pos].frames
+
         self.mask_cache = {}
         self.thumbnail_cache = {}
 
@@ -1260,10 +1301,16 @@ class Movie:
         return self.frames[self._surface_pos(pos)]
 
     def save_meta(self):
-        frames = [{'id':frame.id,'hold':frame.hold} for frame in self.frames]
-        text = json.dumps(frames,indent=2)
-        with open(os.path.join(self.dir, FRAME_ORDER_FILE), 'w') as frame_order:
-            frame_order.write(text)
+        clip = {
+            'frame_pos':self.pos,
+            'layer_pos':self.layer_pos,
+            'frame_order':[frame.id for frame in self.frames],
+            'layer_order':[layer.id for layer in self.layers],
+            'hold':[[frame.hold for frame in layer.frames] for layer in self.layers],
+        }
+        text = json.dumps(clip,indent=2)
+        with open(os.path.join(self.dir, CLIP_FILE), 'w') as clip_file:
+            clip_file.write(text)
 
     def get_mask(self, pos, color, transparency):
         assert pos != self.pos
@@ -1307,12 +1354,35 @@ class Movie:
         self.clear_cache()
         self.save_meta()
 
+    def seek_layer(self,pos):
+        assert pos >= 0 and pos < len(self.layers)
+        if pos == self.layer_pos:
+            return
+        self.frame(self.pos).save()
+        self.layer_pos = pos
+        self.frames = self.layers[pos].frames
+        self.clear_cache()
+        self.save_meta()
+
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
     def prev_frame(self): self.seek_frame((self.pos - 1) % len(self.frames))
+
+    def next_layer(self): self.seek_layer((self.layer_pos + 1) % len(self.layers))
+    def prev_layer(self): self.seek_layer((self.layer_pos - 1) % len(self.layers))
 
     def insert_frame(self):
         self.frames.insert(self.pos+1, Frame(layout.drawing_area().new_frame(), self.dir))
         self.next_frame()
+
+    def insert_layer(self):
+        # FIXME... either create the layer in full and save the images
+        # or create and save the images incrementally
+        frames = [Frame(layout.drawing_area().new_frame(), self.dir)]
+        frames[0].id = self.frames[self.pos].id
+        layer = Layer(frames, self.dir)
+        frames[0].save() # now Layer has set the frames' layer_id
+        self.layers.insert(self.layer_pos+1, layer)
+        self.next_layer()
 
     def insert_frame_at_pos(self, pos, frame):
         assert pos >= 0 and pos <= len(self.frames)
@@ -1322,7 +1392,6 @@ class Movie:
         self.clear_cache()
         frame.save()
         self.save_meta()
-
     # TODO: this works with pos modified from the outside but it's scary as the API
     def remove_frame(self, at_pos=-1, new_pos=-1):
         if len(self.frames) <= 1:
@@ -1361,6 +1430,19 @@ class Movie:
         f = self.frame(self.pos)
         f.dirty = True
         return f
+
+    def curr_bottom_layers_surface(self):
+        # FIXME: cache this
+        f = self.curr_frame()
+        s = make_surface(f.get_width(), f.get_height())
+        s.fill(BACKGROUND)
+        surfaces = []
+        for layer in self.layers[:self.layer_pos]:
+            f = layer.frames[self.pos]
+            surfaces.append(f.surf_by_id('color'))
+            surfaces.append(f.surf_by_id('lines'))
+        s.blits([(surface, (0, 0), (0, 0, surface.get_width(), surface.get_height())) for surface in surfaces])
+        return s
 
     def save_gif(self):
         with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, mode='I') as writer:
@@ -1438,6 +1520,9 @@ def insert_frame():
     movie.insert_frame()
     history.append_item(InsertFrameHistoryItem(movie.pos))
 
+def insert_layer():
+    movie.insert_layer()
+
 def remove_frame():
     if len(movie.frames) == 1:
         return
@@ -1511,6 +1596,7 @@ TOOLS = {
 
 FUNCTIONS = {
     'insert-frame': (insert_frame, '=+', pg.image.load('sheets.png')),
+    'insert-layer': (insert_layer, 'q', pg.image.load('sheets.png')),
     'remove-frame': (remove_frame, '-_', pg.image.load('garbage.png')),
     'next-frame': (next_frame, '.<', None),
     'prev-frame': (prev_frame, ',>', None),
@@ -1533,11 +1619,14 @@ def set_tool(tool):
 def restore_tool():
     set_tool(prev_tool)
 
-def color_image(s, color):
+def color_image(s, rgba):
     sc = s.copy()
     pixels = pg.surfarray.pixels3d(sc)
     for ch in range(3):
-        pixels[:,:,ch] = (pixels[:,:,ch].astype(int)*color[ch])//255
+        pixels[:,:,ch] = (pixels[:,:,ch].astype(int)*rgba[ch])//255
+    if rgba[-1] == 0:
+        alphas = pg.surfarray.pixels_alpha(sc)
+        alphas[:] = np.minimum(alphas[:], 255 - pixels[:,:,0])
     return sc
 
 class Palette:
@@ -1556,7 +1645,7 @@ class Palette:
                     color_hist[color] = color_hist.get(color,0) + 1
 
         colors = [[None for col in range(columns)] for row in range(rows)]
-        colors[0] = [BACKGROUND, white, white]
+        colors[0] = [BACKGROUND+(0,), white+(255,), white+(255,)]
         color2popularity = dict(list(reversed(sorted(list(color_hist.items()), key=lambda x: x[1])))[:(rows-1)*columns])
         hit2color = [(first_hit, color) for color, first_hit in sorted(list(first_color_hit.items()), key=lambda x: x[1])]
 
@@ -1564,7 +1653,7 @@ class Palette:
         col = 0
         for hit, color in hit2color:
             if color in color2popularity:
-                colors[row][col] = color
+                colors[row][col] = color + (255,)
                 row+=1
                 if row == rows:
                     row = 1
@@ -1595,7 +1684,7 @@ def get_clip_dirs():
         try:
             if d.endswith('-deleted'):
                 continue
-            frame_order_file = os.path.join(os.path.join(WD, d), FRAME_ORDER_FILE)
+            frame_order_file = os.path.join(os.path.join(WD, d), CLIP_FILE)
             s = os.stat(frame_order_file)
             clipdirs[d] = s.st_mtime
         except:
