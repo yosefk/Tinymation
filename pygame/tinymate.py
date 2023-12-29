@@ -36,7 +36,9 @@ WIDTH = 3 # the smallest width where you always have a pure pen color rendered a
 # the line path, making our naive flood fill work well...
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 MAX_HISTORY_BYTE_SIZE = 2*1024**3
-CLIP_FILE = 'clip.json'
+FRAME_FMT = 'frame%04d.png'
+CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
+# makes the png the image inside the directory icon displayed in Explorer... which is very nice
 FRAME_ORDER_FILE = 'frame_order.json'
 
 MY_DOCUMENTS = winpath.get_my_documents()
@@ -1038,7 +1040,7 @@ def get_last_modified(filenames):
 class MovieListArea:
     def __init__(self):
         self.show_pos = None
-        self.prevy = None
+        self.prevx = None
         self.reload()
         self.histories = {}
     def delete_current_history(self):
@@ -1047,16 +1049,13 @@ class MovieListArea:
         self.clips = []
         self.images = []
         for clipdir in get_clip_dirs():
-            clip = os.path.join(WD, clipdir)
-            try:
-                ids_and_names = clip_frame_filenames(clip)
-                file2id = dict([(f, frameid) for frameid, f, h in ids_and_names])
-                last_modified = get_last_modified([f for frameid, f, h in ids_and_names])
-                last_modified_id = file2id[last_modified]
-            except:
-                continue
-            self.clips.append(clip)
-            self.images.append(scale_image(Frame(last_modified_id, clip).surface(), int(screen.get_width() * 0.15)))
+            fulldir = os.path.join(WD, clipdir)
+            with open(os.path.join(fulldir, CLIP_FILE), 'r') as clipfile:
+                clip = json.loads(clipfile.read())
+            curr_frame = clip['frame_pos']
+            frame_file = os.path.join(fulldir, FRAME_FMT % curr_frame)
+            self.images.append(scale_image(pg.image.load(frame_file), int(screen.get_width() * 0.1)))
+            self.clips.append(fulldir)
         self.clip_pos = 0 
     def draw(self):
         left, bottom, width, height = self.rect
@@ -1066,7 +1065,7 @@ class MovieListArea:
             border = 1 + first*2
             if first and pos == self.clip_pos:
                 try:
-                    image = scale_image(movie.curr_frame().surface(), image.get_width()) 
+                    image = scale_image(movie.curr_layers_surface(), image.get_width()) 
                     self.images[pos] = image # this keeps the image correct when scrolled out of clip_pos
                     # (we don't self.reload() upon scrolling so self.images can go stale when the current
                     # clip is modified)
@@ -1075,44 +1074,44 @@ class MovieListArea:
             first = False
             screen.blit(image, (left, bottom), image.get_rect()) 
             pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), border)
-            bottom += image.get_height()
+            left += image.get_width()
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
-    def y2frame(self, y):
-        if not self.images or y is None:
+    def x2frame(self, x):
+        if not self.images or x is None:
             return None
-        return y // self.images[0].get_height()
+        return x // self.images[0].get_width()
     def on_mouse_down(self,x,y):
         if self.new_delete_tool():
             # TODO: add condition on position
             layout.tool.clip_func()
             restore_tool()
             return
-        self.prevy = y
+        self.prevx = x
         self.show_pos = self.clip_pos
     def on_mouse_move(self,x,y):
-        if self.prevy is None:
-            self.prevy = y # this happens eg when a new_delete_tool is used upon mouse down
+        if self.prevx is None:
+            self.prevx = x # this happens eg when a new_delete_tool is used upon mouse down
             # and then the original tool is restored
             self.show_pos = self.clip_pos
         if self.new_delete_tool():
             return
-        prev_pos = self.y2frame(self.prevy)
-        curr_pos = self.y2frame(y)
+        prev_pos = self.x2frame(self.prevx)
+        curr_pos = self.x2frame(x)
         if prev_pos is None and curr_pos is None:
-            self.prevy = y
+            self.prevx = x
             return
         if curr_pos is not None and prev_pos is not None:
             pos_dist = prev_pos - curr_pos
         else:
-            pos_dist = -1 if y > self.prevy else 1
-        self.prevy = y
+            pos_dist = -1 if x > self.prevx else 1
+        self.prevx = x
         self.show_pos = min(max(0, self.show_pos + pos_dist), len(self.clips)-1) 
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
         # opening a movie is a slow operation so we don't want it to be "too interactive"
         # (like timeline scrolling) - we wait for the mouse-up event to actually open the clip
         self.open_clip(self.show_pos)
-        self.prevy = None
+        self.prevx = None
         self.show_pos = None
     def open_clip(self, clip_pos):
         if clip_pos == self.clip_pos:
@@ -1239,13 +1238,6 @@ class Layer:
         if not os.path.isdir(subdir):
             os.makedirs(subdir)
 
-def clip_frame_filenames(clipdir):
-    with open(os.path.join(clipdir, FRAME_ORDER_FILE), 'r') as frame_order:
-        frames = json.loads(frame_order.read())
-        # we only return the lines layer filename per frame - since we always write out both lines and color,
-        # this is good enough for checking timestamps
-        return [(frame['id'], os.path.join(clipdir, frame['id']+'-lines.bmp'), frame['hold']) for frame in frames]
-
 class Movie:
     def __init__(self, dir):
         self.dir = dir
@@ -1292,13 +1284,15 @@ class Movie:
         self.frames[pos].hold = not self.frames[pos].hold
         self.clear_cache()
 
-    def _surface_pos(self, pos):
-        while self.frames[pos].hold:
+    def _surface_pos(self, pos, frames):
+        while frames[pos].hold:
             pos -= 1
         return pos
 
-    def frame(self, pos): # return the closest frame in the past where hold is false
-        return self.frames[self._surface_pos(pos)]
+    def frame(self, pos, frames=None): # return the closest frame in the past where hold is false
+        if frames is None:
+            frames = self.frames
+        return frames[self._surface_pos(pos, frames)]
 
     def save_meta(self):
         clip = {
@@ -1327,7 +1321,6 @@ class Movie:
         return mask.surface
 
     def get_thumbnail(self, pos, width, height):
-        pos = self._surface_pos(pos)
         thumbnail = self.thumbnail_cache.setdefault(pos, Thumbnail())
         # self.pos is "volatile" (being edited right now) - don't cache 
         if pos != self.pos and thumbnail.width == width and thumbnail.height == height and \
@@ -1337,7 +1330,9 @@ class Movie:
         thumbnail.movie_len = len(self.frames)
         thumbnail.width = width
         thumbnail.height = height
-        thumbnail.surface = scale_image(self.frames[pos].surface(), width, height)
+        # TODO: might be better to blit cached per-layer thumbnails than do this, especially important
+        # for the current frame's thumbnail
+        thumbnail.surface = scale_image(self._blit_layers(self.layers, pos), width, height)
         return thumbnail.surface
 
     def clear_cache(self):
@@ -1431,24 +1426,32 @@ class Movie:
         f.dirty = True
         return f
 
-    def curr_bottom_layers_surface(self):
-        # FIXME: cache this
+    def _blit_layers(self, layers, pos):
         f = self.curr_frame()
         s = make_surface(f.get_width(), f.get_height())
         s.fill(BACKGROUND)
         surfaces = []
-        for layer in self.layers[:self.layer_pos]:
-            f = layer.frames[self.pos]
+        for layer in layers:
+            f = self.frame(pos, layer.frames)
             surfaces.append(f.surf_by_id('color'))
             surfaces.append(f.surf_by_id('lines'))
         s.blits([(surface, (0, 0), (0, 0, surface.get_width(), surface.get_height())) for surface in surfaces])
         return s
 
-    def save_gif(self):
+    def curr_bottom_layers_surface(self):
+        # FIXME: cache this
+        return self._blit_layers(self.layers[:self.layer_pos], self.pos)
+
+    def curr_layers_surface(self):
+        return self._blit_layers(self.layers, self.pos)
+
+    def save_gif_and_pngs(self):
         with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, mode='I') as writer:
             for i in range(len(self.frames)):
-                frame = self.frame(i)
-                writer.append_data(np.transpose(pygame.surfarray.pixels3d(frame.surface()), [1,0,2]))
+                frame = self._blit_layers(self.layers, i)
+                pixels = np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2])
+                writer.append_data(pixels)
+                imageio.imwrite(os.path.join(self.dir, FRAME_FMT%i), pixels) 
 
     def save_before_closing(self):
         layout.movie_list_area().save_history()
@@ -1456,7 +1459,7 @@ class Movie:
         history = History()
         self.frame(self.pos).dirty = True # updates the image timestamp so we open at that image next time...
         self.frame(self.pos).save()
-        self.save_gif()
+        self.save_gif_and_pngs()
         self.save_meta()
 
 class SeekFrameHistoryItem:
@@ -1547,6 +1550,7 @@ def insert_clip():
     global movie
     movie.save_before_closing()
     movie = Movie(new_movie_clip_dir())
+    movie.save_gif_and_pngs() # write out FRAME_FMT % 0 for MovieListArea.reload...
     layout.movie_list_area().reload()
 
 def remove_clip():
@@ -1697,11 +1701,11 @@ def init_layout_basic():
 
     global layout
     layout = Layout()
-    layout.add((0.15,0.15,0.7,0.85), DrawingArea())
+    layout.add((0.15,0.15,0.7,0.75), DrawingArea())
 
 def init_layout_rest():
     layout.add((0, 0, 1, 0.15), TimelineArea())
-    layout.add((0.85, 0.15, 0.15, 0.85), MovieListArea())
+    layout.add((0.15, 0.9, 0.7, 0.1), MovieListArea())
 
     tools_width_height = [
         ('pencil', 0.33, 1),
