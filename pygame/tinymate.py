@@ -30,7 +30,8 @@ FRAME_RATE = 12
 FADING_RATE = 3
 PEN = (20, 20, 20)
 BACKGROUND = (240, 235, 220)
-UNDRAWABLE = (220, 215, 190)
+MARGIN = (220, 215, 190)
+UNDRAWABLE = (220-20, 215-20, 190-20)
 SELECTED = (220-80, 215-80, 190-80)
 WIDTH = 3 # the smallest width where you always have a pure pen color rendered along
 # the line path, making our naive flood fill work well...
@@ -98,7 +99,8 @@ def bspline_interp(points, suggest_options, existing_lines):
     ix = np.round(results[0][0]).astype(int)
     iy = np.round(results[0][1]).astype(int)
     within_bounds = (ix >= 0) & (iy >= 0) & (ix < existing_lines.shape[0]) & (iy < existing_lines.shape[1])
-    line_alphas = existing_lines[ix[within_bounds], iy[within_bounds]]
+    line_alphas = np.zeros(len(ix), int)
+    line_alphas[within_bounds] = existing_lines[ix[within_bounds], iy[within_bounds]]
     intersections = np.where(line_alphas == 255)[0]
     if len(intersections) > 0:
         len_first = intersections[0]
@@ -371,7 +373,8 @@ class PenTool(Button):
 
     def on_mouse_up(self, x, y):
         self.lines_array = None
-        self.points.append((x,y))
+        drawing_area = layout.drawing_area()
+        self.points.append((x-drawing_area.xmargin,y-drawing_area.ymargin))
         self.prev_drawn = None
         frame = movie.edit_curr_frame().surf_by_id('lines')
         lines = pygame.surfarray.pixels_alpha(frame)
@@ -402,13 +405,13 @@ class PenTool(Button):
         
         if len(line_options)>1:
             if self.suggestion_mask is None:
-                left, bottom, width, height = layout.drawing_area().rect
-                self.suggestion_mask = pg.Surface((width, height), pg.SRCALPHA)
+                left, bottom, width, height = drawing_area.rect
+                self.suggestion_mask = pg.Surface((width-drawing_area.xmargin*2, height-drawing_area.ymargin*2), pg.SRCALPHA)
                 self.suggestion_mask.fill((0,255,0))
             alt_option = line_options[-2]
             pg.surfarray.pixels_alpha(self.suggestion_mask)[:] = 255-alt_option
             self.suggestion_mask.set_alpha(10)
-            layout.drawing_area().fading_mask = self.suggestion_mask
+            drawing_area.fading_mask = self.suggestion_mask
             class Fading:
                 def __init__(self):
                     self.i = 0
@@ -420,13 +423,14 @@ class PenTool(Button):
                         return 130
                     else:
                         return 110-self.i*10
-            layout.drawing_area().fading_func = Fading().fade
+            drawing_area.fading_func = Fading().fade
 
     def on_mouse_move(self, x, y):
        if self.eraser and self.bucket_color is None and self.lines_array[x,y] != 255:
            self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((x,y))
-       draw_into = screen.subsurface(layout.drawing_area().rect)
-       self.points.append((x,y))
+       drawing_area = layout.drawing_area()
+       draw_into = drawing_area.subsurface
+       self.points.append((x-drawing_area.xmargin,y-drawing_area.ymargin))
        color = self.color if not self.eraser else (self.bucket_color if self.bucket_color else BACKGROUND)
        if self.prev_drawn:
             drawLine(draw_into, self.prev_drawn, (x,y), color, self.width)
@@ -615,6 +619,7 @@ class Layout:
         left, bottom, width, height = rect
         srect = (round(left*self.width), round(bottom*self.height), round(width*self.width), round(height*self.height))
         elem.rect = srect
+        elem.subsurface = screen.subsurface(srect)
         self.elems.append(elem)
 
     def draw(self):
@@ -704,8 +709,18 @@ class DrawingArea:
         self.fading_func = None
         self.fade_per_frame = 0
         self.last_update_time = 0
+        self.ymargin = WIDTH * 3
+        self.xmargin = round(self.ymargin * (screen.get_width() / screen.get_height()))
     def draw(self):
         left, bottom, width, height = self.rect
+        pygame.draw.rect(self.subsurface, MARGIN, (0, 0, width, self.ymargin))
+        pygame.draw.rect(self.subsurface, MARGIN, (0, 0, self.xmargin, height))
+        pygame.draw.rect(self.subsurface, MARGIN, (width-self.xmargin, 0, self.xmargin, height))
+        pygame.draw.rect(self.subsurface, MARGIN, (0, height-self.ymargin, width, self.ymargin))
+
+        left += self.xmargin
+        bottom += self.ymargin
+
         frame = movie.frame(layout.playing_index).surface() if layout.is_playing else movie.curr_frame().surface()
         screen.blit(movie.curr_bottom_layers_surface(), (left, bottom), (0, 0, width, height))
         screen.blit(frame, (left, bottom), (0, 0, width, height))
@@ -753,7 +768,7 @@ class DrawingArea:
         layout.tool.on_mouse_move(*self.fix_xy(x,y))
     def new_frame(self):
         _, _, width, height = self.rect
-        frame = pygame.Surface((width, height), pygame.SRCALPHA)
+        frame = pygame.Surface((width-self.xmargin*2, height-self.ymargin*2), pygame.SRCALPHA)
         frame.fill(BACKGROUND)
         pg.surfarray.pixels_alpha(frame)[:] = 0
         pg.surfarray.pixels_alpha(frame)[:] = 0
@@ -1030,6 +1045,20 @@ class TimelineArea:
                 new_pos = min(max(0, movie.pos + pos_dist), len(movie.frames)-1)
             movie.seek_frame(new_pos)
 
+class LayersArea:
+    def __init__(self):
+        pass
+    def draw(self):
+        left, bottom, width, height = self.rect
+        top = bottom + width
+        for pos, layer in reversed(list(enumerate(movie.layers))):
+            border = 1 + (pos == movie.layer_pos)*2
+            # TODO: caching
+            image = scale_image(movie._blit_layers([layer], movie.pos), width)
+            screen.blit(image, (left, bottom), image.get_rect()) 
+            pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), border)
+            bottom += image.get_height()
+
 def get_last_modified(filenames):
     f2mtime = {}
     for f in filenames:
@@ -1048,17 +1077,19 @@ class MovieListArea:
     def reload(self):
         self.clips = []
         self.images = []
+        single_image_width = screen.get_width() * MOVIES_Y_SHARE
         for clipdir in get_clip_dirs():
             fulldir = os.path.join(WD, clipdir)
             with open(os.path.join(fulldir, CLIP_FILE), 'r') as clipfile:
                 clip = json.loads(clipfile.read())
             curr_frame = clip['frame_pos']
             frame_file = os.path.join(fulldir, FRAME_FMT % curr_frame)
-            self.images.append(scale_image(pg.image.load(frame_file), int(screen.get_width() * 0.1)))
+            self.images.append(scale_image(pg.image.load(frame_file), single_image_width))
             self.clips.append(fulldir)
         self.clip_pos = 0 
     def draw(self):
-        left, bottom, width, height = self.rect
+        _, _, width, _ = self.rect
+        left = 0
         first = True
         pos = self.show_pos if self.show_pos is not None else self.clip_pos
         for image in self.images[pos:]:
@@ -1072,9 +1103,11 @@ class MovieListArea:
                 except:
                     pass
             first = False
-            screen.blit(image, (left, bottom), image.get_rect()) 
-            pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), border)
+            self.subsurface.blit(image, (left, 0), image.get_rect()) 
+            pygame.draw.rect(self.subsurface, PEN, (left, 0, image.get_width(), image.get_height()), border)
             left += image.get_width()
+            if left >= width:
+                break
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
     def x2frame(self, x):
         if not self.images or x is None:
@@ -1696,16 +1729,26 @@ def get_clip_dirs():
 
     return list(reversed(sorted(clipdirs.keys(), key=lambda d: clipdirs[d])))
 
+TIMELINE_Y_SHARE = 0.15
+LAYERS_Y_SHARE = 1-TIMELINE_Y_SHARE
+MAX_LAYERS = 8
+LAYERS_X_SHARE = LAYERS_Y_SHARE / MAX_LAYERS
+TOOLBAR_X_SHARE = 0.15
+DRAWING_AREA_X_SHARE = 1 - TOOLBAR_X_SHARE - LAYERS_X_SHARE
+DRAWING_AREA_Y_SHARE = DRAWING_AREA_X_SHARE # preserve screen aspect ratio
+MOVIES_X_SHARE = 1-TOOLBAR_X_SHARE-LAYERS_X_SHARE
+MOVIES_Y_SHARE = 1-DRAWING_AREA_Y_SHARE-TIMELINE_Y_SHARE
 def init_layout_basic():
     screen.fill(UNDRAWABLE)
 
     global layout
     layout = Layout()
-    layout.add((0.15,0.15,0.7,0.75), DrawingArea())
+    layout.add((TOOLBAR_X_SHARE, TIMELINE_Y_SHARE, DRAWING_AREA_X_SHARE, DRAWING_AREA_Y_SHARE), DrawingArea())
 
 def init_layout_rest():
-    layout.add((0, 0, 1, 0.15), TimelineArea())
-    layout.add((0.15, 0.9, 0.7, 0.1), MovieListArea())
+    layout.add((0, 0, 1, TIMELINE_Y_SHARE), TimelineArea())
+    layout.add((TOOLBAR_X_SHARE, TIMELINE_Y_SHARE+DRAWING_AREA_Y_SHARE, MOVIES_X_SHARE, MOVIES_Y_SHARE), MovieListArea())
+    layout.add((TOOLBAR_X_SHARE+DRAWING_AREA_X_SHARE, TIMELINE_Y_SHARE, LAYERS_X_SHARE, LAYERS_Y_SHARE), LayersArea())
 
     tools_width_height = [
         ('pencil', 0.33, 1),
