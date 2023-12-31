@@ -1922,10 +1922,10 @@ while not escape:
             continue # ignore keystrokes (except ESC) when a mouse tool is being used
         
         if event.key == ord(' '):
-            history.undo_item()
-
-        if pg.key.get_mods() & pg.KMOD_LALT:
-            history.redo_item()
+            if pg.key.get_mods() & pg.KMOD_LCTRL:
+                history.redo_item()
+            else:
+                history.undo_item()
 
         if keyboard_shortcuts_enabled:
           for tool in TOOLS.values():
