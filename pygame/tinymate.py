@@ -33,6 +33,8 @@ BACKGROUND = (240, 235, 220)
 MARGIN = (220, 215, 190)
 UNDRAWABLE = (220-20, 215-20, 190-20)
 SELECTED = (220-80, 215-80, 190-80)
+LAYERS_BELOW = (0,128,255)
+LAYERS_ABOVE = (255,128,0)
 WIDTH = 3 # the smallest width where you always have a pure pen color rendered along
 # the line path, making our naive flood fill work well...
 CURSOR_SIZE = int(screen.get_width() * 0.07)
@@ -267,6 +269,7 @@ class HistoryItem:
         self.saved_alpha = pg.surfarray.pixels_alpha(surface)
         self.saved_rgb = pg.surfarray.pixels3d(surface) if surface_id == 'color' else None
         self.pos = movie.pos
+        self.layer_pos = movie.layer_pos
         self.minx = 10**9
         self.miny = 10**9
         self.maxx = -10**9
@@ -280,9 +283,9 @@ class HistoryItem:
         if self.nop():
             return
 
-        if self.pos != movie.pos:
-            print(f'WARNING: HistoryItem at the wrong position! should be {self.pos}, but is {movie.pos}')
-        movie.seek_frame(self.pos) # we should already be here, but just in case
+        if self.pos != movie.pos or self.layer_pos != movie.layer_pos:
+            print(f'WARNING: HistoryItem at the wrong position! should be {self.pos} [layer {self.layer_pos}], but is {movie.pos} [layer {movie.layer_pos}]')
+        movie.seek_frame_and_layer(self.pos, self.layer_pos) # we should already be here, but just in case
 
         # we could have created this item a bit more quickly with a bit more code but doesn't seem worth it
         redo = HistoryItem(self.surface_id)
@@ -438,10 +441,11 @@ class PenTool(Button):
        self.prev_drawn = (x,y) 
 
 class NewDeleteTool(PenTool):
-    def __init__(self, frame_func, clip_func):
+    def __init__(self, frame_func, clip_func, layer_func):
         PenTool.__init__(self)
         self.frame_func = frame_func
         self.clip_func = clip_func
+        self.layer_func = layer_func
 
     def on_mouse_down(self, x, y): pass
     def on_mouse_up(self, x, y): pass
@@ -625,7 +629,7 @@ class Layout:
     def draw(self):
         if self.is_pressed and self.focus_elem is self.drawing_area():
             return
-        screen.fill(UNDRAWABLE)
+        screen.fill(MARGIN if self.is_playing else UNDRAWABLE)
         for elem in self.elems:
             if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
                 elem.draw()
@@ -713,17 +717,19 @@ class DrawingArea:
         self.xmargin = round(self.ymargin * (screen.get_width() / screen.get_height()))
     def draw(self):
         left, bottom, width, height = self.rect
-        pygame.draw.rect(self.subsurface, MARGIN, (0, 0, width, self.ymargin))
-        pygame.draw.rect(self.subsurface, MARGIN, (0, 0, self.xmargin, height))
-        pygame.draw.rect(self.subsurface, MARGIN, (width-self.xmargin, 0, self.xmargin, height))
-        pygame.draw.rect(self.subsurface, MARGIN, (0, height-self.ymargin, width, self.ymargin))
+        if not layout.is_playing:
+            pygame.draw.rect(self.subsurface, MARGIN, (0, 0, width, self.ymargin))
+            pygame.draw.rect(self.subsurface, MARGIN, (0, 0, self.xmargin, height))
+            pygame.draw.rect(self.subsurface, MARGIN, (width-self.xmargin, 0, self.xmargin, height))
+            pygame.draw.rect(self.subsurface, MARGIN, (0, height-self.ymargin, width, self.ymargin))
 
         left += self.xmargin
         bottom += self.ymargin
 
         frame = movie.frame(layout.playing_index).surface() if layout.is_playing else movie.curr_frame().surface()
-        screen.blit(movie.curr_bottom_layers_surface(), (left, bottom), (0, 0, width, height))
+        screen.blit(movie.curr_bottom_layers_surface(highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
         screen.blit(frame, (left, bottom), (0, 0, width, height))
+        screen.blit(movie.curr_top_layers_surface(highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
         # FIXME: add curr_top_layers_surface
 
         if not layout.is_playing:
@@ -1045,19 +1051,94 @@ class TimelineArea:
                 new_pos = min(max(0, movie.pos + pos_dist), len(movie.frames)-1)
             movie.seek_frame(new_pos)
 
+class CachedLayerThumbnail:
+    def __init__(self, layer, image):
+        self.layer = layer
+        self.image = image
+        self.pos = movie.pos
+        self.layer_pos = movie.layer_pos
+
+    def valid(self):
+        # don't cache the current layer. moving to another frame invalidates the cache. moving to another
+        # layer does, too because we color the layers according to whether they're above or below the current layer
+        return self.pos == movie.pos and self.layer_pos == movie.layer_pos and self.layer != movie.layer_pos
+
 class LayersArea:
     def __init__(self):
-        pass
+        self.prevy = None
+        self.thumbnails = {}
+        self.cache_pos = None
+        self.cache_layer_pos = None
+        self.above_image = None
+        self.below_image = None
+    
+    def cached_image(self, layer_pos, layer):
+        if layer_pos not in self.thumbnails or not self.thumbnails[layer_pos].valid():
+            left, bottom, width, height = self.rect
+            image = scale_image(movie._blit_layers([layer], movie.pos), width)
+            if layer_pos != movie.layer_pos: # color the image
+                s = pg.Surface((image.get_width(), image.get_height()), pg.SRCALPHA)
+                s.fill(BACKGROUND)
+                if not self.above_image:
+                    self.above_image = pg.Surface((image.get_width(), image.get_height()))
+                    self.above_image.set_alpha(128)
+                    self.above_image.fill(LAYERS_ABOVE)
+                    self.below_image = pg.Surface((image.get_width(), image.get_height()))
+                    self.below_image.set_alpha(128)
+                    self.below_image.fill(LAYERS_BELOW)
+                image.blit(self.above_image if layer_pos > movie.layer_pos else self.below_image, (0,0))
+                image.set_alpha(128)
+                s.blit(image, (0,0))
+                image = s
+            self.thumbnails[layer_pos] = CachedLayerThumbnail(layer_pos, image)
+        return self.thumbnails[layer_pos].image
+
     def draw(self):
         left, bottom, width, height = self.rect
         top = bottom + width
-        for pos, layer in reversed(list(enumerate(movie.layers))):
-            border = 1 + (pos == movie.layer_pos)*2
-            # TODO: caching
-            image = scale_image(movie._blit_layers([layer], movie.pos), width)
+        for layer_pos, layer in reversed(list(enumerate(movie.layers))):
+            border = 1 + (layer_pos == movie.layer_pos)*2
+            image = self.cached_image(layer_pos, layer)
             screen.blit(image, (left, bottom), image.get_rect()) 
             pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), border)
             bottom += image.get_height()
+
+    def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool)
+
+    def y2frame(self, y):
+        if not self.thumbnails or movie.layer_pos not in self.thumbnails or y is None:
+            return None
+        _, bottom, _, _ = self.rect
+        return len(movie.layers) - ((y-bottom) // self.thumbnails[movie.layer_pos].image.get_height()) - 1
+
+    def on_mouse_down(self,x,y):
+        if self.new_delete_tool():
+            if self.y2frame(y) == movie.pos:
+                layout.tool.layer_func()
+                restore_tool() # we don't want multiple clicks in a row to delete lots of frames etc
+            return
+        f = self.y2frame(y)
+        if f == movie.layer_pos:
+            self.prevy = y
+        else:
+            self.prevy = None
+    def on_mouse_up(self,x,y):
+        self.on_mouse_move(x,y)
+    def on_mouse_move(self,x,y):
+        if self.prevy is None:
+            return
+        if self.new_delete_tool():
+            return
+        prev_pos = self.y2frame(self.prevy)
+        curr_pos = self.y2frame(y)
+        if curr_pos is None or curr_pos < 0 or curr_pos >= len(movie.layers):
+            return
+        self.prevy = y
+        pos_dist = curr_pos - prev_pos
+        if pos_dist != 0:
+            append_seek_frame_history_item_if_frame_is_dirty()
+            new_pos = min(max(0, movie.layer_pos + pos_dist), len(movie.layers)-1)
+            movie.seek_layer(new_pos)
 
 def get_last_modified(filenames):
     f2mtime = {}
@@ -1112,12 +1193,13 @@ class MovieListArea:
     def x2frame(self, x):
         if not self.images or x is None:
             return None
-        return x // self.images[0].get_width()
+        left, _, _, _ = self.rect
+        return (x-left) // self.images[0].get_width()
     def on_mouse_down(self,x,y):
         if self.new_delete_tool():
-            # TODO: add condition on position
-            layout.tool.clip_func()
-            restore_tool()
+            if self.x2frame(x) == 0:
+                layout.tool.clip_func()
+                restore_tool()
             return
         self.prevx = x
         self.show_pos = self.clip_pos
@@ -1373,24 +1455,20 @@ class Movie:
         self.thumbnail_cache = {}
         layout.drawing_area().fading_mask = None
 
-    def seek_frame(self,pos):
+    def seek_frame_and_layer(self,pos,layer_pos):
         assert pos >= 0 and pos < len(self.frames)
-        if pos == self.pos:
+        assert layer_pos >= 0 and layer_pos < len(self.layers)
+        if pos == self.pos and layer_pos == self.layer_pos:
             return
         self.frame(self.pos).save()
         self.pos = pos
+        self.layer_pos = layer_pos
+        self.frames = self.layers[layer_pos].frames
         self.clear_cache()
         self.save_meta()
 
-    def seek_layer(self,pos):
-        assert pos >= 0 and pos < len(self.layers)
-        if pos == self.layer_pos:
-            return
-        self.frame(self.pos).save()
-        self.layer_pos = pos
-        self.frames = self.layers[pos].frames
-        self.clear_cache()
-        self.save_meta()
+    def seek_frame(self,pos): self.seek_frame_and_layer(pos, self.layer_pos)
+    def seek_layer(self,layer_pos): self.seek_frame_and_layer(self.pos, layer_pos)
 
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
     def prev_frame(self): self.seek_frame((self.pos - 1) % len(self.frames))
@@ -1459,10 +1537,13 @@ class Movie:
         f.dirty = True
         return f
 
-    def _blit_layers(self, layers, pos):
+    def _blit_layers(self, layers, pos, transparent=False):
         f = self.curr_frame()
-        s = make_surface(f.get_width(), f.get_height())
-        s.fill(BACKGROUND)
+        if transparent:
+            s = pg.Surface((f.get_width(), f.get_height()), pg.SRCALPHA)
+        else:
+            s = make_surface(f.get_width(), f.get_height())
+            s.fill(BACKGROUND)
         surfaces = []
         for layer in layers:
             f = self.frame(pos, layer.frames)
@@ -1471,9 +1552,43 @@ class Movie:
         s.blits([(surface, (0, 0), (0, 0, surface.get_width(), surface.get_height())) for surface in surfaces])
         return s
 
-    def curr_bottom_layers_surface(self):
+    def _set_undrawable_layers_grid(self, s):
+        alpha = pg.surfarray.pixels3d(s)
+        alpha[::WIDTH*3, ::WIDTH*3, :] = 0
+        alpha[1::WIDTH*3, ::WIDTH*3, :] = 0
+        alpha[:1:WIDTH*3, ::WIDTH*3, :] = 0
+        alpha[1:1:WIDTH*3, ::WIDTH*3, :] = 0
+
+    def curr_bottom_layers_surface(self, highlight):
         # FIXME: cache this
-        return self._blit_layers(self.layers[:self.layer_pos], self.pos)
+        layers = self._blit_layers(self.layers[:self.layer_pos], self.pos)
+        if not highlight:
+            return layers
+        below_image = pg.Surface((layers.get_width(), layers.get_height()))
+        below_image.set_alpha(128)
+        below_image.fill(LAYERS_BELOW)
+        layers.blit(below_image, (0,0))
+        layers.set_alpha(128)
+        self._set_undrawable_layers_grid(layers)
+        return layers
+
+    def curr_top_layers_surface(self, highlight):
+        layers = self._blit_layers(self.layers[self.layer_pos+1:], self.pos, transparent=True)
+        if not highlight:
+            return layers
+        layers.set_alpha(128)
+        s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+        s.fill(BACKGROUND)
+        above_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+        above_image.set_alpha(128)
+        above_image.fill(LAYERS_ABOVE)
+        #pg.surfarray.pixels_alpha(above_image)[:] = pg.surfarray.pixels_alpha(layers)
+        alpha = pg.surfarray.array_alpha(layers)
+        layers.blit(above_image, (0,0))
+        self._set_undrawable_layers_grid(layers)
+        s.blit(layers, (0,0))
+        pg.surfarray.pixels_alpha(s)[:] = alpha
+        return s
 
     def curr_layers_surface(self):
         return self._blit_layers(self.layers, self.pos)
@@ -1496,12 +1611,14 @@ class Movie:
         self.save_meta()
 
 class SeekFrameHistoryItem:
-    def __init__(self, pos): self.pos = pos
+    def __init__(self, pos, layer_pos):
+        self.pos = pos
+        self.layer_pos = layer_pos
     def undo(self):
-        redo = SeekFrameHistoryItem(movie.pos)
-        movie.seek_frame(self.pos)
+        redo = SeekFrameHistoryItem(movie.pos, movie.layer_pos)
+        movie.seek_frame_and_layer(self.pos, self.layer_pos)
         return redo
-    def __str__(self): return f'SeekFrameHistoryItem(restoring pos to {self.pos})'
+    def __str__(self): return f'SeekFrameHistoryItem(restoring pos to {self.pos} and layer_pos to {self.layer_pos})'
 
 class InsertFrameHistoryItem:
     def __init__(self, pos): self.pos = pos
@@ -1550,7 +1667,7 @@ class ToggleHoldHistoryItem:
 
 def append_seek_frame_history_item_if_frame_is_dirty():
     if history.undo and not isinstance(history.undo[-1], SeekFrameHistoryItem):
-        history.append_item(SeekFrameHistoryItem(movie.pos))
+        history.append_item(SeekFrameHistoryItem(movie.pos, movie.layer_pos))
 
 def insert_frame():
     movie.insert_frame()
@@ -1558,6 +1675,9 @@ def insert_frame():
 
 def insert_layer():
     movie.insert_layer()
+
+def remove_layer():
+    print('NOT IMPLEMENTED')
 
 def remove_frame():
     if len(movie.frames) == 1:
@@ -1627,8 +1747,8 @@ TOOLS = {
     # (a changing cursor is more obviously "I clicked a wrong button, I should click
     # a different one" than inserting/removing a frame where you need to undo but to
     # do that, you need to understand what just happened)
-    'insert-frame': Tool(NewDeleteTool(insert_frame, insert_clip), blank_page_cursor, ''),
-    'remove-frame': Tool(NewDeleteTool(remove_frame, remove_clip), garbage_bin_cursor, ''),
+    'insert-frame': Tool(NewDeleteTool(insert_frame, insert_clip, insert_layer), blank_page_cursor, ''),
+    'remove-frame': Tool(NewDeleteTool(remove_frame, remove_clip, remove_layer), garbage_bin_cursor, ''),
 }
 
 FUNCTIONS = {
