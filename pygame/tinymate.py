@@ -51,8 +51,16 @@ if not os.path.exists(WD):
 print('clips read from, and saved to',WD)
 
 import time
+# add tdiff() to printouts to see how many ms passed since the last call to tdiff()
+prevts=time.time_ns()
+def tdiff():
+    global prevts
+    now=time.time_ns()
+    diff=(now-prevts)//10**6
+    prevts = now
+    return diff
+
 def image_from_fig(fig):
-    start = time.time_ns()
     with io.BytesIO() as buff:
         fig.savefig(buff, format='raw')
         buff.seek(0)
@@ -697,13 +705,13 @@ class Layout:
         self.is_playing = not self.is_playing
         self.playing_index = 0
             
-def pen2mask(lines, rgb, transparency):
-    mask_surface = pygame.Surface((lines.get_width(), lines.get_height()), pygame.SRCALPHA)
+def pen2mask(lines_list, rgb, transparency):
+    mask_surface = pygame.Surface((empty_frame().get_width(), empty_frame().get_height()), pygame.SRCALPHA)
     mask = pygame.surfarray.pixels3d(mask_surface)
-    pen = pygame.surfarray.pixels_alpha(lines)
+    pen = [pygame.surfarray.pixels_alpha(lines) for lines in lines_list]
     for ch in range(3):
         mask[:,:,ch] = rgb[ch]
-    pygame.surfarray.pixels_alpha(mask_surface)[:] = pen
+    pygame.surfarray.pixels_alpha(mask_surface)[:] = np.maximum.reduce(pen) if pen else 0
     mask_surface.set_alpha(int(transparency*255))
     return mask_surface
 
@@ -731,7 +739,6 @@ class DrawingArea:
         screen.blit(movie.curr_bottom_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
         screen.blit(frame, (left, bottom), (0, 0, width, height))
         screen.blit(movie.curr_top_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
-        # FIXME: add curr_top_layers_surface
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
@@ -857,13 +864,12 @@ class TimelineArea:
                 num = num_enabled_neg
                 curr_neg += 1
             brightness = int((200 * (num - curr - 1) / (num - 1)) + 55 if num > 1 else 255)
-            color = (0,0,brightness) if pos_dist < 0 else (0,brightness,0)
+            color = (0,0,brightness) if pos_dist < 0 else (0,int(brightness*0.5),0)
             transparency = 0.3
             yield (pos, color, transparency)
 
     def light_table_masks(self):
         masks = []
-        return masks # FIXME
         for pos, color, transparency in self.light_table_positions():
             masks.append(movie.get_mask(pos, color, transparency))
         return masks
@@ -1322,17 +1328,17 @@ class Frame:
         self.dirty = True
 
     def surf_ids(self): return ['lines','color']
-    def get_width(self): return self._empty_frame().color.get_width()
-    def get_height(self): return self._empty_frame().color.get_height()
-    def get_rect(self): return self._empty_frame().color.get_rect()
+    def get_width(self): return empty_frame().color.get_width()
+    def get_height(self): return empty_frame().color.get_height()
+    def get_rect(self): return empty_frame().color.get_rect()
 
     def surf_by_id(self, surface_id):
         s = getattr(self, surface_id)
-        return s if s is not None else self._empty_frame().surf_by_id(surface_id)
+        return s if s is not None else empty_frame().surf_by_id(surface_id)
 
     def surface(self):
         if self.color is None:
-            return self._empty_frame().color
+            return empty_frame().color
         s = self.color.copy()
         s.blit(self.lines, (0, 0), (0, 0, s.get_width(), s.get_height()))
         return s
@@ -1353,22 +1359,27 @@ class Frame:
             if os.path.exists(fname):
                 os.unlink(fname)
 
-    def _empty_frame(self):
-        empty_frame._create_surfaces_if_needed()
-        return empty_frame
-
-empty_frame = Frame('')
+_empty_frame = Frame('')
+def empty_frame():
+    _empty_frame._create_surfaces_if_needed()
+    return _empty_frame
 
 class Layer:
     def __init__(self, frames, dir, layer_id=None):
         self.dir = dir
         self.frames = frames
         self.id = layer_id if layer_id else str(uuid.uuid1())
+        self.lit = True
         for frame in frames:
             frame.layer_id = self.id
         subdir = os.path.join(dir, f'layer-{self.id}')
         if not os.path.isdir(subdir):
             os.makedirs(subdir)
+
+    def frame(self, pos): # return the closest frame in the past where hold is false
+        while self.frames[pos].hold:
+            pos -= 1
+        return self.frames[pos]
 
 class Movie:
     def __init__(self, dir):
@@ -1416,16 +1427,6 @@ class Movie:
         self.frames[pos].hold = not self.frames[pos].hold
         self.clear_cache()
 
-    def _surface_pos(self, pos, frames):
-        while frames[pos].hold:
-            pos -= 1
-        return pos
-
-    def frame(self, pos, frames=None): # return the closest frame in the past where hold is false
-        if frames is None:
-            frames = self.frames
-        return frames[self._surface_pos(pos, frames)]
-
     def save_meta(self):
         clip = {
             'frame_pos':self.pos,
@@ -1438,14 +1439,16 @@ class Movie:
         with open(os.path.join(self.dir, CLIP_FILE), 'w') as clip_file:
             clip_file.write(text)
 
+    def frame(self, pos):
+        return self.layers[self.layer_pos].frame(pos)
+
     def get_mask(self, pos, color, transparency):
         assert pos != self.pos
-        pos = self._surface_pos(pos)
         mask = self.mask_cache.setdefault(pos, LightTableMask())
         if pos != self.pos and mask.color == color and mask.transparency == transparency \
             and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
             return mask.surface
-        mask.surface = pen2mask(self.frames[pos].surf_by_id('lines'), color, transparency)
+        mask.surface = pen2mask([layer.frame(pos).surf_by_id('lines') for layer in self.layers if layer.lit], color, transparency)
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
@@ -1565,7 +1568,7 @@ class Movie:
             s.fill(BACKGROUND)
         surfaces = []
         for layer in layers:
-            f = self.frame(pos, layer.frames)
+            f = layer.frame(pos)
             surfaces.append(f.surf_by_id('color'))
             surfaces.append(f.surf_by_id('lines'))
         s.blits([(surface, (0, 0), (0, 0, surface.get_width(), surface.get_height())) for surface in surfaces])
@@ -1581,7 +1584,7 @@ class Movie:
     def curr_bottom_layers_surface(self, pos, highlight):
         # FIXME: cache this
         layers = self._blit_layers(self.layers[:self.layer_pos], pos)
-        if not highlight:
+        if not highlight or self.layer_pos == 0:
             return layers
         below_image = pg.Surface((layers.get_width(), layers.get_height()))
         below_image.set_alpha(128)
@@ -1593,7 +1596,7 @@ class Movie:
 
     def curr_top_layers_surface(self, pos, highlight):
         layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True)
-        if not highlight:
+        if not highlight or self.layer_pos == len(self.layers)-1:
             return layers
         layers.set_alpha(128)
         s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
@@ -2032,15 +2035,6 @@ interesting_events = [
 
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard
-
-# add tdiff() to printouts to see how many ms passed since the last call to tdiff()
-prevts=time.time_ns()
-def tdiff():
-    global prevts
-    now=time.time_ns()
-    diff=(now-prevts)//10**6
-    prevts = now
-    return diff
 
 set_tool(TOOLS['pencil'])
 
