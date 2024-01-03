@@ -2,7 +2,6 @@ import pygame
 import pygame.gfxdraw
 import imageio
 import winpath
-import subprocess
 import collections
 import uuid
 import math
@@ -15,6 +14,7 @@ import io
 import sys
 import os
 import json
+import shutil
 from scipy.interpolate import splprep, splev
 
 # this requires numpy to be installed in addition to scikit-image
@@ -1376,7 +1376,7 @@ class Layer:
         self.lit = True
         for frame in frames:
             frame.layer_id = self.id
-        subdir = os.path.join(dir, f'layer-{self.id}')
+        subdir = self.subdir()
         if not os.path.isdir(subdir):
             os.makedirs(subdir)
 
@@ -1384,6 +1384,12 @@ class Layer:
         while self.frames[pos].hold:
             pos -= 1
         return self.frames[pos]
+
+    def subdir(self): return os.path.join(self.dir, f'layer-{self.id}')
+    def deleted_subdir(self): return self.subdir() + '-deleted'
+
+    def delete(self): os.rename(self.subdir(), self.deleted_subdir())
+    def undelete(self): os.rename(self.deleted_subdir(), self.subdir())
 
 class Movie:
     def __init__(self, dir):
@@ -1532,6 +1538,19 @@ class Movie:
         self.clear_cache()
         self.save_meta()
 
+    def reinsert_layer_at_pos(self, layer_pos, removed_layer):
+        assert layer_pos >= 0 and layer_pos <= len(self.layers)
+        assert len(removed_layer.frames) == len(self.frames)
+
+        self.frame(self.pos).save()
+        self.layer_pos = layer_pos
+
+        self.layers.insert(self.layer_pos, removed_layer)
+        removed_layer.undelete()
+
+        self.clear_cache()
+        self.save_meta()
+
     def remove_frame(self, at_pos=-1, new_pos=-1):
         if len(self.frames) <= 1:
             return
@@ -1569,6 +1588,32 @@ class Movie:
         self.save_meta()
 
         return removed_frames, first_holds
+
+    def remove_layer(self, at_pos=-1, new_pos=-1):
+        if len(self.layers) <= 1:
+            return
+
+        self.clear_cache()
+
+        if at_pos == -1:
+            at_pos = self.layer_pos
+        else:
+            self.frame(self.pos).save()
+        self.layer_pos = at_pos
+
+        removed = self.layers[self.layer_pos]
+        del self.layers[self.layer_pos]
+        removed.delete()
+
+        if self.layer_pos >= len(self.layers):
+            self.layer_pos = len(self.layers)-1
+
+        if new_pos >= 0:
+            self.layer_pos = new_pos
+
+        self.save_meta()
+
+        return removed
 
     def curr_frame(self):
         return self.frame(self.pos)
@@ -1650,6 +1695,15 @@ class Movie:
                 writer.append_data(pixels)
                 imageio.imwrite(os.path.join(self.dir, FRAME_FMT%i), pixels) 
 
+    def garbage_collect_layer_dirs(self):
+        # we don't remove deleted layers from the disk when they're deleted since if there are a lot
+        # of frames, this could be slow. those deleted layers not later un-deleted by the removal ops being undone
+        # will be garbage-collected here
+        for f in os.listdir(self.dir):
+            full = os.path.join(self.dir, f)
+            if f.endswith('-deleted') and f.startswith('layer-') and os.path.isdir(full):
+                shutil.rmtree(full)
+
     def save_before_closing(self):
         layout.movie_list_area().save_history()
         global history
@@ -1658,6 +1712,7 @@ class Movie:
         self.frame(self.pos).save()
         self.save_gif_and_pngs()
         self.save_meta()
+        self.garbage_collect_layer_dirs()
 
 class SeekFrameHistoryItem:
     def __init__(self, pos, layer_pos):
@@ -1679,7 +1734,7 @@ class InsertFrameHistoryItem:
         removed_frame_data = movie.remove_frame(at_pos=self.pos, new_pos=max(0, self.pos-1))
         return RemoveFrameHistoryItem(self.pos, removed_frame_data)
     def __str__(self):
-        return f'InsertFrameHistoryItem(removing at pos {self.pos}, then seeking to pos {(self.pos-1)%len(movie.frames)})'
+        return f'InsertFrameHistoryItem(removing at pos {self.pos})'
 
 class RemoveFrameHistoryItem:
     def __init__(self, pos, removed_frame_data):
@@ -1694,6 +1749,26 @@ class RemoveFrameHistoryItem:
         frames, holds = self.removed_frame_data
         return sum([f.size() for f in frames])
 
+class InsertLayerHistoryItem:
+    def __init__(self, layer_pos): self.layer_pos = layer_pos
+    def undo(self):
+        removed_layer = movie.remove_layer(at_pos=self.layer_pos, new_pos=max(0, self.layer_pos-1))
+        return RemoveLayerHistoryItem(self.layer_pos, removed_layer)
+    def __str__(self):
+        return f'InsertLayerHistoryItem(removing layer {self.layer_pos})'
+
+class RemoveLayerHistoryItem:
+    def __init__(self, layer_pos, removed_layer):
+        self.layer_pos = layer_pos
+        self.removed_layer = removed_layer
+    def undo(self):
+        movie.reinsert_layer_at_pos(self.layer_pos, self.removed_layer)
+        return InsertLayerHistoryItem(self.layer_pos)
+    def __str__(self):
+        return f'RemoveLayerHistoryItem(inserting layer {self.layer_pos})'
+    def byte_size(self):
+        return sum([f.size() for f in self.removed_layer.frames])
+
 class ToggleHoldHistoryItem:
     def __init__(self, pos):
         self.pos = pos
@@ -1704,6 +1779,8 @@ class ToggleHoldHistoryItem:
         movie.toggle_hold()
         layout.timeline_area().combined_mask = None
         return self
+    def __str__(self):
+        return f'ToggleHoldHistoryItem(toggling at frame {self.pos})'
 
 def append_seek_frame_history_item_if_frame_is_dirty():
     if history.undo:
@@ -1717,9 +1794,7 @@ def insert_frame():
 
 def insert_layer():
     movie.insert_layer()
-
-def remove_layer():
-    print('NOT IMPLEMENTED')
+    history.append_item(InsertLayerHistoryItem(movie.layer_pos))
 
 def remove_frame():
     if len(movie.frames) == 1:
@@ -1727,6 +1802,13 @@ def remove_frame():
     pos = movie.pos
     removed_frame_data = movie.remove_frame()
     history.append_item(RemoveFrameHistoryItem(pos, removed_frame_data))
+
+def remove_layer():
+    if len(movie.layers) == 1:
+        return
+    layer_pos = movie.layer_pos
+    removed_layer = movie.remove_layer()
+    history.append_item(RemoveLayerHistoryItem(layer_pos, removed_layer))
 
 def next_frame():
     if movie.pos >= len(movie.frames)-1 and not layout.timeline_area().loop_mode:
@@ -1794,7 +1876,6 @@ TOOLS = {
 
 FUNCTIONS = {
     'insert-frame': (insert_frame, '=+', pg.image.load('sheets.png')),
-    'insert-layer': (insert_layer, 'q', pg.image.load('sheets.png')),
     'remove-frame': (remove_frame, '-_', pg.image.load('garbage.png')),
     'next-frame': (next_frame, '.<', None),
     'prev-frame': (prev_frame, ',>', None),
