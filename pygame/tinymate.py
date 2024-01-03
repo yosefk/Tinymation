@@ -375,11 +375,17 @@ class PenTool(Button):
         self.points = []
         self.lines_array = None
         self.suggestion_mask = None
+        if self.eraser:
+            self.alpha_surface = None
 
     def on_mouse_down(self, x, y):
         self.points = []
         self.bucket_color = None
         self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
+        if self.eraser:
+            if not self.alpha_surface:
+                self.alpha_surface = layout.drawing_area().new_frame()
+            pg.surfarray.pixels_red(self.alpha_surface)[:] = 0
         self.on_mouse_move(x,y)
 
     def on_mouse_up(self, x, y):
@@ -437,16 +443,47 @@ class PenTool(Button):
             drawing_area.fading_func = Fading().fade
 
     def on_mouse_move(self, x, y):
-       if self.eraser and self.bucket_color is None and self.lines_array[x,y] != 255:
-           self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((x,y))
-       drawing_area = layout.drawing_area()
-       draw_into = drawing_area.subsurface
-       self.points.append((x-drawing_area.xmargin,y-drawing_area.ymargin))
-       color = self.color if not self.eraser else (self.bucket_color if self.bucket_color else BACKGROUND)
-       if self.prev_drawn:
-            drawLine(draw_into, self.prev_drawn, (x,y), color, self.width)
-       drawCircle(draw_into, x, y, color, self.circle_width)
-       self.prev_drawn = (x,y) 
+        drawing_area = layout.drawing_area()
+        cx = x-drawing_area.xmargin
+        cy = y-drawing_area.ymargin
+        if self.eraser and self.bucket_color is None and self.lines_array[cx,cy] != 255:
+            self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((cx,cy))
+        self.points.append((cx,cy))
+        color = self.color if not self.eraser else (self.bucket_color if self.bucket_color else (255,255,255,0))
+        expose_other_layers = self.eraser and color[3]==0
+        if expose_other_layers:
+            color = (255,0,0,0)
+        draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface
+        ox,oy = (0,0) if not expose_other_layers else (drawing_area.xmargin, drawing_area.ymargin)
+        if self.prev_drawn:
+            drawLine(draw_into, (self.prev_drawn[0]-ox, self.prev_drawn[1]-oy), (x-ox,y-oy), color, self.width)
+        drawCircle(draw_into, x-ox, y-oy, color, self.circle_width)
+        if expose_other_layers:
+            alpha = pg.surfarray.pixels_red(draw_into)
+            w, h = self.lines_array.shape
+            def clipw(val): return max(0, min(val, w))
+            def cliph(val): return max(0, min(val, h))
+            px, py = self.prev_drawn if self.prev_drawn else (x, y)
+            left = clipw(min(x-ox-self.width, px-ox-self.width))
+            right = clipw(max(x-ox+self.width, px-ox+self.width))
+            bottom = cliph(min(y-oy-self.width, py-oy-self.width))
+            top = cliph(max(y-oy+self.width, py-oy+self.width))
+            def render_surface(s):
+                if not s:
+                    return
+                salpha = pg.surfarray.pixels_alpha(s)
+                orig_alpha = salpha[left:right+1, bottom:top+1].copy()
+                salpha[left:right+1, bottom:top+1] = np.minimum(orig_alpha, alpha[left:right+1,bottom:top+1])
+                del salpha
+                drawing_area.subsurface.blit(s, (ox+left,oy+bottom), (left,bottom,right-left+1,top-bottom+1))
+                salpha = pg.surfarray.pixels_alpha(s)
+                salpha[left:right+1, bottom:top+1] = orig_alpha
+
+            render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True))
+            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True))
+            render_surface(layout.timeline_area().combined_light_table_mask())
+
+        self.prev_drawn = (x,y) 
 
 class NewDeleteTool(PenTool):
     def __init__(self, frame_func, clip_func, layer_func):
@@ -472,6 +509,8 @@ class PaintBucketTool(Button):
         Button.__init__(self)
         self.color = color
     def on_mouse_down(self, x, y):
+        x -= layout.drawing_area().xmargin
+        y -= layout.drawing_area().ymargin
         color_surface = movie.edit_curr_frame().surf_by_id('color')
         color_rgb = pg.surfarray.pixels3d(color_surface)
         color_alpha = pg.surfarray.pixels_alpha(color_surface)
@@ -589,6 +628,8 @@ class FlashlightTool(Button):
     def __init__(self):
         Button.__init__(self)
     def on_mouse_down(self, x, y):
+        x -= layout.drawing_area().xmargin
+        y -= layout.drawing_area().ymargin
         color = pygame.surfarray.pixels3d(movie.curr_frame().surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
         fading_mask = skeletonize_color_based_on_lines(color, lines, x, y)
@@ -1380,10 +1421,13 @@ class Layer:
         if not os.path.isdir(subdir):
             os.makedirs(subdir)
 
-    def frame(self, pos): # return the closest frame in the past where hold is false
+    def surface_pos(self, pos):
         while self.frames[pos].hold:
             pos -= 1
-        return self.frames[pos]
+        return pos
+
+    def frame(self, pos): # return the closest frame in the past where hold is false
+        return self.frames[self.surface_pos(pos)]
 
     def subdir(self): return os.path.join(self.dir, f'layer-{self.id}')
     def deleted_subdir(self): return self.subdir() + '-deleted'
@@ -1424,6 +1468,12 @@ class Movie:
 
         self.mask_cache = {}
         self.thumbnail_cache = {}
+        # like some others, these caches are cleared conservatively ATM (eg when moving along the same layer between frames,
+        # we clear them though we needn't do it.) one case when we don't in fact clear them is when playing the movie,
+        # where it could matter for playback speed [though ATM they might be mostly cleared before we press play and only
+        # fill up while we're playing...]
+        self.above_layers_mask = {}
+        self.below_layers_mask = {}
 
     def toggle_hold(self):
         pos = self.pos
@@ -1458,7 +1508,11 @@ class Movie:
         if pos != self.pos and mask.color == color and mask.transparency == transparency \
             and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
             return mask.surface
-        mask.surface = pen2mask([layer.frame(pos).surf_by_id('lines') for layer in self.layers if layer.lit], color, transparency)
+        # ignore the layers where the frame at the current position is an alias for the frame at the requested position
+        # (it's visually noisy to see the same lines colored in different colors all over, and also slow, especially
+        # because doing so correctly without effects where you erase at the current frame and then still see the erased
+        # lines in the light table masks precludes caching)
+        mask.surface = pen2mask([layer.frame(pos).surf_by_id('lines') for layer in self.layers if layer.lit and layer.surface_pos(pos) != layer.surface_pos(self.pos)], color, transparency)
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
@@ -1484,6 +1538,8 @@ class Movie:
         self.mask_cache = {}
         self.thumbnail_cache = {}
         layout.drawing_area().fading_mask = None
+        self.above_layers_mask = {}
+        self.below_layers_mask = {}
 
     def seek_frame_and_layer(self,pos,layer_pos):
         assert pos >= 0 and pos < len(self.frames)
@@ -1647,15 +1703,20 @@ class Movie:
         alpha[1:1:WIDTH*3, ::WIDTH*3, :] = 0
 
     def curr_bottom_layers_surface(self, pos, highlight):
-        # FIXME: cache this
+        if self.below_layers_mask.setdefault(highlight, dict()).get(pos):
+            return self.below_layers_mask[highlight][pos]
+        def cache(v):
+            self.below_layers_mask[highlight][pos] = v
+            return v
+
         layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True)
         if not highlight:
-            return layers
+            return cache(layers)
         layers.set_alpha(128)
         s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
         s.fill(BACKGROUND)
         if self.layer_pos == 0:
-            return s
+            return cache(s)
         below_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
         below_image.set_alpha(128)
         below_image.fill(LAYERS_BELOW)
@@ -1664,12 +1725,19 @@ class Movie:
         pg.surfarray.pixels_alpha(layers)[:] = alpha
         self._set_undrawable_layers_grid(layers)
         s.blit(layers, (0,0))
-        return s
+
+        return cache(s)
 
     def curr_top_layers_surface(self, pos, highlight):
+        if self.above_layers_mask.setdefault(highlight, dict()).get(pos):
+            return self.above_layers_mask[highlight][pos]
+        def cache(v):
+            self.above_layers_mask[highlight][pos] = v
+            return v
+
         layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True)
         if not highlight or self.layer_pos == len(self.layers)-1:
-            return layers
+            return cache(layers)
         layers.set_alpha(128)
         s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
         s.fill(BACKGROUND)
@@ -1682,7 +1750,8 @@ class Movie:
         s.blit(layers, (0,0))
         pg.surfarray.pixels_alpha(s)[:] = alpha
         s.set_alpha(192)
-        return s
+
+        return cache(s)
 
     def curr_layers_surface(self):
         return self._blit_layers(self.layers, self.pos)
@@ -2042,7 +2111,6 @@ def default_clip_dir():
         # first clip - create a new directory
         return new_movie_clip_dir()
     else:
-        # TODO: pick the clip with the last-modified clip
         return os.path.join(WD, clip_dirs[0])
 
 init_layout_basic()
@@ -2091,9 +2159,6 @@ class History:
 
     def undo_item(self):
         if self.undo:
-            # TODO: we might want a loop here since some undo ops
-            # turn out to be "no-ops" (specifically seek frame where we're already there.)
-            # though we try to avoid having spurious seek-frame ops in the history
             last_op = self.undo[-1]
             redo = last_op.undo()
             History.byte_size += byte_size(redo) - byte_size(last_op)
