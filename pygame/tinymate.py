@@ -726,10 +726,11 @@ class DrawingArea:
         left += self.xmargin
         bottom += self.ymargin
 
-        frame = movie.frame(layout.playing_index).surface() if layout.is_playing else movie.curr_frame().surface()
-        screen.blit(movie.curr_bottom_layers_surface(highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
+        pos = layout.playing_index if layout.is_playing else movie.pos
+        frame = movie.frame(pos).surface()
+        screen.blit(movie.curr_bottom_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
         screen.blit(frame, (left, bottom), (0, 0, width, height))
-        screen.blit(movie.curr_top_layers_surface(highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
+        screen.blit(movie.curr_top_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
         # FIXME: add curr_top_layers_surface
 
         if not layout.is_playing:
@@ -862,6 +863,7 @@ class TimelineArea:
 
     def light_table_masks(self):
         masks = []
+        return masks # FIXME
         for pos, color, transparency in self.light_table_positions():
             masks.append(movie.get_mask(pos, color, transparency))
         return masks
@@ -1113,7 +1115,7 @@ class LayersArea:
 
     def on_mouse_down(self,x,y):
         if self.new_delete_tool():
-            if self.y2frame(y) == movie.pos:
+            if self.y2frame(y) == movie.layer_pos:
                 layout.tool.layer_func()
                 restore_tool() # we don't want multiple clicks in a row to delete lots of frames etc
             return
@@ -1291,37 +1293,46 @@ class Thumbnail:
         self.movie_len = None
 
 class Frame:
-    def __init__(self, color_surface_or_id, dir, layer_id=None):
+    def __init__(self, dir, layer_id=None, frame_id=None):
         self.dir = dir
         self.layer_id = layer_id
-        if type(color_surface_or_id) == str: # id - load the surfaces from the directory
-            self.id = color_surface_or_id
+        if frame_id is not None: # id - load the surfaces from the directory
+            self.id = frame_id
             for surf_id in self.surf_ids():
-                setattr(self,surf_id,pygame.image.load(self.filename(surf_id)))
-            self.dirty = False
+                setattr(self,surf_id,pygame.image.load(self.filename(surf_id)) if os.path.exists(self.filename(surf_id)) else None)
         else:
-            self.color = color_surface_or_id
-            blank = make_surface(color_surface_or_id.get_width(), color_surface_or_id.get_height())
-            self.lines = pygame.Surface((blank.get_width(), blank.get_height()), pygame.SRCALPHA, blank.copy())
-            self.lines.fill(PEN)
-            pygame.surfarray.pixels_alpha(self.lines)[:,:] = 0
             self.id = str(uuid.uuid1())
-            self.dirty = True
+            self.color = None
+            self.lines = None
 
+        self.dirty = False
         self.hold = False
         # we don't aim to maintain a "perfect" dirty flag such as "doing 5 things and undoing
         # them should result in dirty==False." The goal is to avoid gratuitous saving when
         # scrolling thru the timeline, which slows things down and prevents reopening
         # clips at the last actually-edited frame after exiting the program
 
-    def surf_ids(self): return ['lines','color']
-    def get_width(self): return self.lines.get_width()
-    def get_height(self): return self.lines.get_height()
-    def get_rect(self): return self.lines.get_rect()
+    def _create_surfaces_if_needed(self):
+        if self.color is not None:
+            return
+        self.color = layout.drawing_area().new_frame()
+        self.lines = pg.Surface((self.color.get_width(), self.color.get_height()), pygame.SRCALPHA)
+        self.lines.fill(PEN)
+        pygame.surfarray.pixels_alpha(self.lines)[:] = 0
+        self.dirty = True
 
-    def surf_by_id(self, surface_id): return getattr(self, surface_id)
+    def surf_ids(self): return ['lines','color']
+    def get_width(self): return self._empty_frame().color.get_width()
+    def get_height(self): return self._empty_frame().color.get_height()
+    def get_rect(self): return self._empty_frame().color.get_rect()
+
+    def surf_by_id(self, surface_id):
+        s = getattr(self, surface_id)
+        return s if s is not None else self._empty_frame().surf_by_id(surface_id)
 
     def surface(self):
+        if self.color is None:
+            return self._empty_frame().color
         s = self.color.copy()
         s.blit(self.lines, (0, 0), (0, 0, s.get_width(), s.get_height()))
         return s
@@ -1342,6 +1353,12 @@ class Frame:
             if os.path.exists(fname):
                 os.unlink(fname)
 
+    def _empty_frame(self):
+        empty_frame._create_surfaces_if_needed()
+        return empty_frame
+
+empty_frame = Frame('')
+
 class Layer:
     def __init__(self, frames, dir, layer_id=None):
         self.dir = dir
@@ -1358,7 +1375,7 @@ class Movie:
         self.dir = dir
         if not os.path.isdir(dir): # new clip
             os.makedirs(dir)
-            self.frames = [Frame(layout.drawing_area().new_frame(), self.dir)]
+            self.frames = [Frame(self.dir)]
             self.pos = 0
             self.layers = [Layer(self.frames, dir)]
             self.layer_pos = 0
@@ -1375,7 +1392,7 @@ class Movie:
             for layer_index, layer_id in enumerate(layer_ids):
                 frames = []
                 for frame_index, frame_id in enumerate(frame_ids):
-                    frame = Frame(frame_id, dir, layer_id)
+                    frame = Frame(dir, layer_id, frame_id)
                     frame.hold = holds[layer_index][frame_index]
                     frames.append(frame)
                 self.layers.append(Layer(frames, dir, layer_id))
@@ -1477,16 +1494,17 @@ class Movie:
     def prev_layer(self): self.seek_layer((self.layer_pos - 1) % len(self.layers))
 
     def insert_frame(self):
-        self.frames.insert(self.pos+1, Frame(layout.drawing_area().new_frame(), self.dir))
+        frame_id = str(uuid.uuid1())
+        for layer in self.layers:
+            frame = Frame(self.dir, layer.id)
+            frame.id = frame_id
+            frame.hold = layer is not self.layers[self.layer_pos] # by default, hold the other layers' frames
+            layer.frames.insert(self.pos+1, frame)
         self.next_frame()
 
     def insert_layer(self):
-        # FIXME... either create the layer in full and save the images
-        # or create and save the images incrementally
-        frames = [Frame(layout.drawing_area().new_frame(), self.dir)]
-        frames[0].id = self.frames[self.pos].id
+        frames = [Frame(self.dir, None, frame.id) for frame in self.frames]
         layer = Layer(frames, self.dir)
-        frames[0].save() # now Layer has set the frames' layer_id
         self.layers.insert(self.layer_pos+1, layer)
         self.next_layer()
 
@@ -1534,6 +1552,7 @@ class Movie:
 
     def edit_curr_frame(self):
         f = self.frame(self.pos)
+        f._create_surfaces_if_needed()
         f.dirty = True
         return f
 
@@ -1559,9 +1578,9 @@ class Movie:
         alpha[:1:WIDTH*3, ::WIDTH*3, :] = 0
         alpha[1:1:WIDTH*3, ::WIDTH*3, :] = 0
 
-    def curr_bottom_layers_surface(self, highlight):
+    def curr_bottom_layers_surface(self, pos, highlight):
         # FIXME: cache this
-        layers = self._blit_layers(self.layers[:self.layer_pos], self.pos)
+        layers = self._blit_layers(self.layers[:self.layer_pos], pos)
         if not highlight:
             return layers
         below_image = pg.Surface((layers.get_width(), layers.get_height()))
@@ -1572,8 +1591,8 @@ class Movie:
         self._set_undrawable_layers_grid(layers)
         return layers
 
-    def curr_top_layers_surface(self, highlight):
-        layers = self._blit_layers(self.layers[self.layer_pos+1:], self.pos, transparent=True)
+    def curr_top_layers_surface(self, pos, highlight):
+        layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True)
         if not highlight:
             return layers
         layers.set_alpha(128)
@@ -1588,6 +1607,7 @@ class Movie:
         self._set_undrawable_layers_grid(layers)
         s.blit(layers, (0,0))
         pg.surfarray.pixels_alpha(s)[:] = alpha
+        s.set_alpha(192)
         return s
 
     def curr_layers_surface(self):
