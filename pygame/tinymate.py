@@ -1359,6 +1359,10 @@ class Frame:
             if os.path.exists(fname):
                 os.unlink(fname)
 
+    def size(self):
+        # a frame is 2 RGBA surfaces
+        return (self.get_width() * self.get_height() * 8) if self.color is not None else 0
+
 _empty_frame = Frame('')
 def empty_frame():
     _empty_frame._create_surfaces_if_needed()
@@ -1511,15 +1515,23 @@ class Movie:
         self.layers.insert(self.layer_pos+1, layer)
         self.next_layer()
 
-    def insert_frame_at_pos(self, pos, frame):
+    def reinsert_frame_at_pos(self, pos, removed_frame_data):
         assert pos >= 0 and pos <= len(self.frames)
+        removed_frames, first_holds = removed_frame_data
+        assert len(removed_frames) == len(self.layers)
+        assert len(first_holds) == len(self.layers)
+
         self.frame(self.pos).save()
         self.pos = pos
-        self.frames.insert(self.pos, frame)
+
+        for layer, frame, hold in zip(self.layers, removed_frames, first_holds):
+            layer.frames[0].hold = hold
+            layer.frames.insert(self.pos, frame)
+            frame.save()
+
         self.clear_cache()
-        frame.save()
         self.save_meta()
-    # TODO: this works with pos modified from the outside but it's scary as the API
+
     def remove_frame(self, at_pos=-1, new_pos=-1):
         if len(self.frames) <= 1:
             return
@@ -1532,13 +1544,21 @@ class Movie:
             self.frame(self.pos).save()
         self.pos = at_pos
 
-        removed = self.frames[self.pos]
+        removed_frames = []
+        first_holds = []
+        for layer in self.layers:
+            removed = layer.frames[self.pos]
+    
+            del layer.frames[self.pos]
+            removed.delete()
+            removed.dirty = True # otherwise reinsert_frame_at_pos() calling frame.save() will not save the frame to disk,
+            # which would be bad we just called frame.delete() to delete it from the disk
 
-        del self.frames[self.pos]
-        removed.delete()
+            removed_frames.append(removed)
+            first_holds.append(layer.frames[0].hold)
 
-        self.frames[0].hold = False # could have been made true if we deleted frame 0
-        # and frame 1 had hold==True - now this wouldn't make sense
+            layer.frames[0].hold = False # could have been made true if we deleted frame 0
+            # and frame 1 had hold==True - now this wouldn't make sense
 
         if self.pos >= len(self.frames):
             self.pos = len(self.frames)-1
@@ -1548,7 +1568,7 @@ class Movie:
 
         self.save_meta()
 
-        return removed
+        return removed_frames, first_holds
 
     def curr_frame(self):
         return self.frame(self.pos)
@@ -1583,16 +1603,23 @@ class Movie:
 
     def curr_bottom_layers_surface(self, pos, highlight):
         # FIXME: cache this
-        layers = self._blit_layers(self.layers[:self.layer_pos], pos)
-        if not highlight or self.layer_pos == 0:
+        layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True)
+        if not highlight:
             return layers
-        below_image = pg.Surface((layers.get_width(), layers.get_height()))
+        layers.set_alpha(128)
+        s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+        s.fill(BACKGROUND)
+        if self.layer_pos == 0:
+            return s
+        below_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
         below_image.set_alpha(128)
         below_image.fill(LAYERS_BELOW)
+        alpha = pg.surfarray.array_alpha(layers)
         layers.blit(below_image, (0,0))
-        layers.set_alpha(128)
+        pg.surfarray.pixels_alpha(layers)[:] = alpha
         self._set_undrawable_layers_grid(layers)
-        return layers
+        s.blit(layers, (0,0))
+        return s
 
     def curr_top_layers_surface(self, pos, highlight):
         layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True)
@@ -1604,7 +1631,6 @@ class Movie:
         above_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
         above_image.set_alpha(128)
         above_image.fill(LAYERS_ABOVE)
-        #pg.surfarray.pixels_alpha(above_image)[:] = pg.surfarray.pixels_alpha(layers)
         alpha = pg.surfarray.array_alpha(layers)
         layers.blit(above_image, (0,0))
         self._set_undrawable_layers_grid(layers)
@@ -1650,32 +1676,23 @@ class InsertFrameHistoryItem:
         # but when undoing insert_frame, we bring you to the previous frame after the one
         # you removed - it's the one where you inserted the frame we're now removing to undo
         # the insert, so this is where we should go to bring you back in time.
-        next_hold = False if self.pos+1 == len(movie.frames) else movie.frames[self.pos+1].hold
-        removed = movie.remove_frame(at_pos=self.pos, new_pos=max(0, self.pos-1))
-        return RemoveFrameHistoryItem(self.pos, removed, next_hold)
+        removed_frame_data = movie.remove_frame(at_pos=self.pos, new_pos=max(0, self.pos-1))
+        return RemoveFrameHistoryItem(self.pos, removed_frame_data)
     def __str__(self):
         return f'InsertFrameHistoryItem(removing at pos {self.pos}, then seeking to pos {(self.pos-1)%len(movie.frames)})'
 
 class RemoveFrameHistoryItem:
-    def __init__(self, pos, frame, next_hold):
+    def __init__(self, pos, removed_frame_data):
         self.pos = pos
-        self.frame = frame
-        frame.dirty = True # otherwise undo() will not save the frame to disk... which is bad
-        # because remove_frame() deleted it from the disk!
-        self.next_hold = next_hold
+        self.removed_frame_data = removed_frame_data
     def undo(self):
-        movie.insert_frame_at_pos(self.pos, self.frame)
-        # there's a special case when removing frame 0 while frames[1].hold was True -
-        # remove_frame will force it to False, in that case we need to restore it
-        if self.next_hold and self.pos==0:
-            movie.frames[1].hold = True
-            movie.save_meta()
+        movie.reinsert_frame_at_pos(self.pos, self.removed_frame_data)
         return InsertFrameHistoryItem(self.pos)
     def __str__(self):
         return f'RemoveFrameHistoryItem(inserting at pos {self.pos})'
     def byte_size(self):
-        f = self.frame
-        return f.get_width()*f.get_height()*4
+        frames, holds = self.removed_frame_data
+        return sum([f.size() for f in frames])
 
 class ToggleHoldHistoryItem:
     def __init__(self, pos):
@@ -1689,8 +1706,10 @@ class ToggleHoldHistoryItem:
         return self
 
 def append_seek_frame_history_item_if_frame_is_dirty():
-    if history.undo and not isinstance(history.undo[-1], SeekFrameHistoryItem):
-        history.append_item(SeekFrameHistoryItem(movie.pos, movie.layer_pos))
+    if history.undo:
+        last_op = history.undo[-1]
+        if not isinstance(last_op, SeekFrameHistoryItem):
+            history.append_item(SeekFrameHistoryItem(movie.pos, movie.layer_pos))
 
 def insert_frame():
     movie.insert_frame()
@@ -1706,9 +1725,8 @@ def remove_frame():
     if len(movie.frames) == 1:
         return
     pos = movie.pos
-    next_hold = False if movie.pos+1 == len(movie.frames) else movie.frames[movie.pos+1].hold
-    removed = movie.remove_frame()
-    history.append_item(RemoveFrameHistoryItem(pos, removed, next_hold))
+    removed_frame_data = movie.remove_frame()
+    history.append_item(RemoveFrameHistoryItem(pos, removed_frame_data))
 
 def next_frame():
     if movie.pos >= len(movie.frames)-1 and not layout.timeline_area().loop_mode:
