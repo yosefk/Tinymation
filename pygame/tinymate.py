@@ -480,8 +480,8 @@ class PenTool(Button):
                 salpha[left:right+1, bottom:top+1] = orig_alpha
 
             render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True))
-            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True))
             render_surface(layout.timeline_area().combined_light_table_mask())
+            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True))
 
         self.prev_drawn = (x,y) 
 
@@ -746,13 +746,19 @@ class Layout:
         self.is_playing = not self.is_playing
         self.playing_index = 0
             
-def pen2mask(lines_list, rgb, transparency):
+def pen2mask(frames, rgb, transparency):
     mask_surface = pygame.Surface((empty_frame().get_width(), empty_frame().get_height()), pygame.SRCALPHA)
     mask = pygame.surfarray.pixels3d(mask_surface)
-    pen = [pygame.surfarray.pixels_alpha(lines) for lines in lines_list]
+    pen = [pygame.surfarray.pixels_alpha(f.surf_by_id('lines')) for f in frames]
+    color = [pygame.surfarray.pixels_alpha(f.surf_by_id('color')) for f in frames]
     for ch in range(3):
         mask[:,:,ch] = rgb[ch]
-    pygame.surfarray.pixels_alpha(mask_surface)[:] = np.maximum.reduce(pen) if pen else 0
+
+    alpha = pg.surfarray.pixels_alpha(mask_surface)
+    alpha[:] = 0
+    for p, c in zip(pen, color):
+        # hide the areas colored by this layer, and expose the lines of these layer
+        alpha[:] = np.maximum(p, np.minimum(255-c, alpha))
     mask_surface.set_alpha(int(transparency*255))
     return mask_surface
 
@@ -779,14 +785,16 @@ class DrawingArea:
         frame = movie.frame(pos).surface()
         screen.blit(movie.curr_bottom_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
         screen.blit(frame, (left, bottom), (0, 0, width, height))
-        screen.blit(movie.curr_top_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
             if mask:
                 screen.blit(mask, (left, bottom), (0, 0, width, height))
-            if self.fading_mask:
-                screen.blit(self.fading_mask, (left, bottom), (0, 0, width, height))
+
+        screen.blit(movie.curr_top_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
+
+        if not layout.is_playing and self.fading_mask:
+            screen.blit(self.fading_mask, (left, bottom), (0, 0, width, height))
 
     def update_fading_mask(self):
         if not self.fading_mask:
@@ -835,7 +843,7 @@ class TimelineArea:
         self.frame_boundaries = []
         self.eye_boundaries = []
         self.prevx = None
-        self.factors = [x*(0.75/0.6) for x in[0.7,0.6,0.5,0.4,0.3,0.2,0.15]]
+        self.factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.15]
 
         eye_icon_size = int(screen.get_width() * 0.15*0.14)
         self.eye_open = scale_image(pg.image.load('eye_open.png'), eye_icon_size)
@@ -1512,7 +1520,7 @@ class Movie:
         # (it's visually noisy to see the same lines colored in different colors all over, and also slow, especially
         # because doing so correctly without effects where you erase at the current frame and then still see the erased
         # lines in the light table masks precludes caching)
-        mask.surface = pen2mask([layer.frame(pos).surf_by_id('lines') for layer in self.layers if layer.lit and layer.surface_pos(pos) != layer.surface_pos(self.pos)], color, transparency)
+        mask.surface = pen2mask([layer.frame(pos) for layer in self.layers if layer.lit and layer.surface_pos(pos) != layer.surface_pos(self.pos)], color, transparency)
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
