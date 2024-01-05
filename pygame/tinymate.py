@@ -480,8 +480,8 @@ class PenTool(Button):
                 salpha[left:right+1, bottom:top+1] = orig_alpha
 
             render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True))
-            render_surface(layout.timeline_area().combined_light_table_mask())
             render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True))
+            render_surface(layout.timeline_area().combined_light_table_mask())
 
         self.prev_drawn = (x,y) 
 
@@ -746,19 +746,25 @@ class Layout:
         self.is_playing = not self.is_playing
         self.playing_index = 0
             
-def pen2mask(frames, rgb, transparency):
+def pen2mask(layers, pos, rgb, transparency):
     mask_surface = pygame.Surface((empty_frame().get_width(), empty_frame().get_height()), pygame.SRCALPHA)
     mask = pygame.surfarray.pixels3d(mask_surface)
-    pen = [pygame.surfarray.pixels_alpha(f.surf_by_id('lines')) for f in frames]
-    color = [pygame.surfarray.pixels_alpha(f.surf_by_id('color')) for f in frames]
     for ch in range(3):
         mask[:,:,ch] = rgb[ch]
 
     alpha = pg.surfarray.pixels_alpha(mask_surface)
     alpha[:] = 0
-    for p, c in zip(pen, color):
-        # hide the areas colored by this layer, and expose the lines of these layer
-        alpha[:] = np.maximum(p, np.minimum(255-c, alpha))
+    for layer in layers:
+        if not layer.visible: 
+            continue
+        frame = layer.frame(pos)
+        pen = pygame.surfarray.pixels_alpha(frame.surf_by_id('lines'))
+        color = pygame.surfarray.pixels_alpha(frame.surf_by_id('color'))
+        # hide the areas colored by this layer, and expose the lines of these layer (the latter, only if it's lit and not held)
+        alpha[:] = np.minimum(255-color, alpha)
+        held = layer.surface_pos(movie.pos) == layer.surface_pos(pos)
+        if layer.lit and not held:
+            alpha[:] = np.maximum(pen, alpha)
     mask_surface.set_alpha(int(transparency*255))
     return mask_surface
 
@@ -782,19 +788,18 @@ class DrawingArea:
         bottom += self.ymargin
 
         pos = layout.playing_index if layout.is_playing else movie.pos
-        frame = movie.frame(pos).surface()
         screen.blit(movie.curr_bottom_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
-        screen.blit(frame, (left, bottom), (0, 0, width, height))
+        if movie.layers[movie.layer_pos].visible:
+            frame = movie.frame(pos).surface()
+            screen.blit(frame, (left, bottom), (0, 0, width, height))
+        screen.blit(movie.curr_top_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
             if mask:
                 screen.blit(mask, (left, bottom), (0, 0, width, height))
-
-        screen.blit(movie.curr_top_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
-
-        if not layout.is_playing and self.fading_mask:
-            screen.blit(self.fading_mask, (left, bottom), (0, 0, width, height))
+            if self.fading_mask:
+                screen.blit(self.fading_mask, (left, bottom), (0, 0, width, height))
 
     def update_fading_mask(self):
         if not self.fading_mask:
@@ -846,8 +851,8 @@ class TimelineArea:
         self.factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.15]
 
         eye_icon_size = int(screen.get_width() * 0.15*0.14)
-        self.eye_open = scale_image(pg.image.load('eye_open.png'), eye_icon_size)
-        self.eye_shut = scale_image(pg.image.load('eye_shut.png'), eye_icon_size)
+        self.eye_open = scale_image(pg.image.load('light_on.png'), eye_icon_size)
+        self.eye_shut = scale_image(pg.image.load('light_off.png'), eye_icon_size)
 
         self.loop_icon = scale_image(pg.image.load('loop.png'), int(screen.get_width()*0.15*0.14))
         self.arrow_icon = scale_image(pg.image.load('arrow.png'), int(screen.get_width()*0.15*0.2))
@@ -1124,15 +1129,20 @@ class LayersArea:
     def __init__(self):
         self.prevy = None
         self.thumbnails = {}
-        self.cache_pos = None
-        self.cache_layer_pos = None
         self.above_image = None
         self.below_image = None
+        icon_size = int(screen.get_width() * 0.15*0.14)
+        self.eye_open = scale_image(pg.image.load('eye_open.png'), icon_size)
+        self.eye_shut = scale_image(pg.image.load('eye_shut.png'), icon_size)
+        self.light_on = scale_image(pg.image.load('light_on.png'), icon_size)
+        self.light_off = scale_image(pg.image.load('light_off.png'), icon_size)
+        self.eye_boundaries = []
+        self.lit_boundaries = []
     
     def cached_image(self, layer_pos, layer):
         if layer_pos not in self.thumbnails or not self.thumbnails[layer_pos].valid():
             left, bottom, width, height = self.rect
-            image = scale_image(movie._blit_layers([layer], movie.pos), width)
+            image = scale_image(movie._blit_layers([layer], movie.pos, include_invisible=True), width)
             if layer_pos != movie.layer_pos: # color the image
                 s = pg.Surface((image.get_width(), image.get_height()), pg.SRCALPHA)
                 s.fill(BACKGROUND)
@@ -1151,13 +1161,28 @@ class LayersArea:
         return self.thumbnails[layer_pos].image
 
     def draw(self):
+        self.eye_boundaries = []
+        self.lit_boundaries = []
+
         left, bottom, width, height = self.rect
         top = bottom + width
+
         for layer_pos, layer in reversed(list(enumerate(movie.layers))):
             border = 1 + (layer_pos == movie.layer_pos)*2
             image = self.cached_image(layer_pos, layer)
             screen.blit(image, (left, bottom), image.get_rect()) 
             pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), border)
+
+            max_border = 3
+            if len(movie.frames) > 1 and layer.visible and layout.timeline_area().combined_light_table_mask():
+                lit = self.light_on if layer.lit else self.light_off
+                screen.blit(lit, (left + width - lit.get_width() - max_border, bottom))
+                self.lit_boundaries.append((left + width - lit.get_width() - max_border, bottom, left+width, bottom+lit.get_height(), layer_pos))
+               
+            eye = self.eye_open if layer.visible else self.eye_shut
+            screen.blit(eye, (left + width - eye.get_width() - max_border, bottom + image.get_height() - eye.get_height() - max_border))
+            self.eye_boundaries.append((left + width - eye.get_width() - max_border, bottom + image.get_height() - eye.get_height() - max_border, left+width, bottom+image.get_height(), layer_pos))
+
             bottom += image.get_height()
 
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool)
@@ -1168,17 +1193,37 @@ class LayersArea:
         _, bottom, _, _ = self.rect
         return len(movie.layers) - ((y-bottom) // self.thumbnails[movie.layer_pos].image.get_height()) - 1
 
+    def update_on_light_table(self,x,y):
+        for left, bottom, right, top, layer_pos in self.lit_boundaries:
+            if y >= bottom and y <= top and x >= left and x <= right:
+                movie.layers[layer_pos].lit = not movie.layers[layer_pos].lit
+                movie.clear_cache()
+                layout.timeline_area().combined_mask = None
+                return True
+
+    def update_visible(self,x,y):
+        for left, bottom, right, top, layer_pos in self.eye_boundaries:
+            if y >= bottom and y <= top and x >= left and x <= right:
+                movie.layers[layer_pos].visible = not movie.layers[layer_pos].visible
+                movie.layers[layer_pos].lit = movie.layers[layer_pos].visible
+                movie.clear_cache()
+                layout.timeline_area().combined_mask = None
+                return True
+
     def on_mouse_down(self,x,y):
+        self.prevy = None
         if self.new_delete_tool():
             if self.y2frame(y) == movie.layer_pos:
                 layout.tool.layer_func()
-                restore_tool() # we don't want multiple clicks in a row to delete lots of frames etc
+                restore_tool() # we don't want multiple clicks in a row to delete lots of layers
+            return
+        if self.update_on_light_table(x,y):
+            return
+        if self.update_visible(x,y):
             return
         f = self.y2frame(y)
         if f == movie.layer_pos:
             self.prevy = y
-        else:
-            self.prevy = None
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
     def on_mouse_move(self,x,y):
@@ -1423,6 +1468,7 @@ class Layer:
         self.frames = frames
         self.id = layer_id if layer_id else str(uuid.uuid1())
         self.lit = True
+        self.visible = True
         for frame in frames:
             frame.layer_id = self.id
         subdir = self.subdir()
@@ -1460,6 +1506,7 @@ class Movie:
             frame_ids = clip['frame_order']
             layer_ids = clip['layer_order']
             holds = clip['hold']
+            visible = clip.get('layer_visible', [True]*len(layer_ids))
 
             self.layers = []
             for layer_index, layer_id in enumerate(layer_ids):
@@ -1468,7 +1515,9 @@ class Movie:
                     frame = Frame(dir, layer_id, frame_id)
                     frame.hold = holds[layer_index][frame_index]
                     frames.append(frame)
-                self.layers.append(Layer(frames, dir, layer_id))
+                layer = Layer(frames, dir, layer_id)
+                layer.visible = visible[layer_index]
+                self.layers.append(layer)
 
             self.pos = clip['frame_pos']
             self.layer_pos = clip['layer_pos']
@@ -1496,11 +1545,13 @@ class Movie:
         self.clear_cache()
 
     def save_meta(self):
+        # TODO: save light table settings
         clip = {
             'frame_pos':self.pos,
             'layer_pos':self.layer_pos,
             'frame_order':[frame.id for frame in self.frames],
             'layer_order':[layer.id for layer in self.layers],
+            'layer_visible':[layer.visible for layer in self.layers],
             'hold':[[frame.hold for frame in layer.frames] for layer in self.layers],
         }
         text = json.dumps(clip,indent=2)
@@ -1520,7 +1571,7 @@ class Movie:
         # (it's visually noisy to see the same lines colored in different colors all over, and also slow, especially
         # because doing so correctly without effects where you erase at the current frame and then still see the erased
         # lines in the light table masks precludes caching)
-        mask.surface = pen2mask([layer.frame(pos) for layer in self.layers if layer.lit and layer.surface_pos(pos) != layer.surface_pos(self.pos)], color, transparency)
+        mask.surface = pen2mask(self.layers, pos, color, transparency)
         mask.color = color
         mask.transparency = transparency
         mask.movie_pos = self.pos
@@ -1688,7 +1739,7 @@ class Movie:
         f.dirty = True
         return f
 
-    def _blit_layers(self, layers, pos, transparent=False):
+    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False):
         f = self.curr_frame()
         if transparent:
             s = pg.Surface((f.get_width(), f.get_height()), pg.SRCALPHA)
@@ -1697,6 +1748,8 @@ class Movie:
             s.fill(BACKGROUND)
         surfaces = []
         for layer in layers:
+            if not layer.visible and not include_invisible:
+                continue
             f = layer.frame(pos)
             surfaces.append(f.surf_by_id('color'))
             surfaces.append(f.surf_by_id('lines'))
