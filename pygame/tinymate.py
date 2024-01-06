@@ -1186,24 +1186,10 @@ class TimelineArea:
                 new_pos = min(max(0, movie.pos + pos_dist), len(movie.frames)-1)
             movie.seek_frame(new_pos)
 
-class CachedLayerThumbnail:
-    def __init__(self, layer, image):
-        self.layer = layer
-        self.image = image
-        self.pos = movie.pos
-        self.layer_pos = movie.layer_pos
-
-    def valid(self):
-        # don't cache the current layer. moving to another frame invalidates the cache. moving to another
-        # layer does, too because we color the layers according to whether they're above or below the current layer
-        return self.pos == movie.pos and self.layer_pos == movie.layer_pos and self.layer != movie.layer_pos
-
 class LayersArea:
     def __init__(self):
         self.prevy = None
-        self.thumbnails = {}
-        self.above_image = None
-        self.below_image = None
+        self.color_images = {}
         icon_size = int(screen.get_width() * 0.15*0.14)
         self.eye_open = scale_image(pg.image.load('eye_open.png'), icon_size)
         self.eye_shut = scale_image(pg.image.load('eye_shut.png'), icon_size)
@@ -1211,27 +1197,44 @@ class LayersArea:
         self.light_off = scale_image(pg.image.load('light_off.png'), icon_size)
         self.eye_boundaries = []
         self.lit_boundaries = []
+        self.thumbnail_height = 0
     
     def cached_image(self, layer_pos, layer):
-        if layer_pos not in self.thumbnails or not self.thumbnails[layer_pos].valid():
-            left, bottom, width, height = self.rect
-            image = scale_image(movie._blit_layers([layer], movie.pos, include_invisible=True), width)
-            if layer_pos != movie.layer_pos: # color the image
+        left, bottom, width, height = self.rect
+        class CachedLayerThumbnail(CachedItem):
+            def __init__(s, color=None):
+                s.color = color
+            def compute_key(s):
+                frame = layer.frame(movie.pos) # note that we compute the thumbnail even if the layer is invisible
+                return (frame.cache_id_version(),), ('single-layer-thumbnail', width, s.color)
+            def compute_value(se):
+                if se.color is None:
+                    image = scale_image(movie._blit_layers([layer], movie.pos, include_invisible=True), width)
+                    self.thumbnail_height = image.get_height()
+                    return image
+                image = cache.fetch(CachedLayerThumbnail()).copy()
                 s = pg.Surface((image.get_width(), image.get_height()), pg.SRCALPHA)
                 s.fill(BACKGROUND)
-                if not self.above_image:
-                    self.above_image = pg.Surface((image.get_width(), image.get_height()))
-                    self.above_image.set_alpha(128)
-                    self.above_image.fill(LAYERS_ABOVE)
-                    self.below_image = pg.Surface((image.get_width(), image.get_height()))
-                    self.below_image.set_alpha(128)
-                    self.below_image.fill(LAYERS_BELOW)
-                image.blit(self.above_image if layer_pos > movie.layer_pos else self.below_image, (0,0))
+                if not self.color_images:
+                    above_image = pg.Surface((image.get_width(), image.get_height()))
+                    above_image.set_alpha(128)
+                    above_image.fill(LAYERS_ABOVE)
+                    below_image = pg.Surface((image.get_width(), image.get_height()))
+                    below_image.set_alpha(128)
+                    below_image.fill(LAYERS_BELOW)
+                    self.color_images = {LAYERS_ABOVE: above_image, LAYERS_BELOW: below_image}
+                image.blit(self.color_images[se.color], (0,0))
                 image.set_alpha(128)
                 s.blit(image, (0,0))
-                image = s
-            self.thumbnails[layer_pos] = CachedLayerThumbnail(layer_pos, image)
-        return self.thumbnails[layer_pos].image
+                return s
+
+        if layer_pos > movie.layer_pos:
+            color = LAYERS_ABOVE
+        elif layer_pos < movie.layer_pos:
+            color = LAYERS_BELOW
+        else:
+            color = None
+        return cache.fetch(CachedLayerThumbnail(color))
 
     def draw(self):
         self.eye_boundaries = []
@@ -1261,10 +1264,10 @@ class LayersArea:
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool)
 
     def y2frame(self, y):
-        if not self.thumbnails or movie.layer_pos not in self.thumbnails or y is None:
+        if not self.thumbnail_height:
             return None
         _, bottom, _, _ = self.rect
-        return len(movie.layers) - ((y-bottom) // self.thumbnails[movie.layer_pos].image.get_height()) - 1
+        return len(movie.layers) - ((y-bottom) // self.thumbnail_height) - 1
 
     def update_on_light_table(self,x,y):
         for left, bottom, right, top, layer_pos in self.lit_boundaries:
@@ -1457,14 +1460,6 @@ class LightTableMask:
         self.movie_pos = None
         self.movie_len = None
 
-class Thumbnail:
-    def __init__(self):
-        self.surface = None
-        self.width = None
-        self.height = None
-        self.movie_pos = None
-        self.movie_len = None
-
 class Frame:
     def __init__(self, dir, layer_id=None, frame_id=None):
         self.dir = dir
@@ -1618,13 +1613,6 @@ class Movie:
             self.frames = self.layers[self.layer_pos].frames
 
         self.mask_cache = {}
-        self.thumbnail_cache = {}
-        # like some others, these caches are cleared conservatively ATM (eg when moving along the same layer between frames,
-        # we clear them though we needn't do it.) one case when we don't in fact clear them is when playing the movie,
-        # where it could matter for playback speed [though ATM they might be mostly cleared before we press play and only
-        # fill up while we're playing...]
-        self.above_layers_mask = {}
-        self.below_layers_mask = {}
 
     def toggle_hold(self):
         pos = self.pos
@@ -1707,10 +1695,7 @@ class Movie:
 
     def clear_cache(self):
         self.mask_cache = {}
-        self.thumbnail_cache = {}
         layout.drawing_area().fading_mask = None
-        self.above_layers_mask = {}
-        self.below_layers_mask = {}
 
     def seek_frame_and_layer(self,pos,layer_pos):
         assert pos >= 0 and pos < len(self.frames)
