@@ -257,6 +257,79 @@ def try_set_cursor(c):
         pass
 try_set_cursor(pencil_cursor[0])
 
+class CachedItem:
+    def compute_key(self):
+        '''a key is a tuple of:
+        1. a list of tuples mapping IDs to versions. a cached item referencing
+        unknown IDs or IDs with old versions is eventually garbage-collected
+        2. any additional info making the key unique.
+        
+        compute_key returns the key computed from the current system state.
+        for example, CachedThumbnail(pos=5) might return a dictionary mapping
+        the IDs of frames making up frame 5 in every layer, and the string
+        "thumbnail." The number 5 is not a part of the key; if frame 6
+        is made of the same frames in every layer, CachedThumbnail(pos=6)
+        will compute the same key. If in the future a CachedThumbnail(pos=5)
+        is created computing a different key because the movie was edited,
+        you'll get a cache miss as expected.
+        '''
+        return {}, None
+
+    def compute_value(self):
+        '''returns the value - used upon cached miss. note that CachedItems
+        are not kept in the cache themselves - only the keys and the values.'''
+        return None
+
+# there are 2 reasons to evict a cached item:
+# * no more room in the cache - evict the least recently used items until there's room
+# * the cached item has no chance to be useful - eg it was computed from a deleted or
+#   since-edited frame - this is done by collect_garbage() and assisted by update_id()
+#   and delete_id()
+class Cache:
+    def __init__(self):
+        self.key2value = {}
+        self.id2version = {}
+        self.debug = False
+        self.gc_iter = 0
+        self.last_check = {}
+    def fetch(self, cached_item):
+        key = cached_item.compute_key()
+        value = self.key2value.get(key)
+        if value is None:
+            value = cached_item.compute_value()
+            # TODO: evict when running out of room
+            self.key2value[key] = value
+        elif self.debug:
+            if self.last_check.get(key, 0) < self.gc_iter:
+                # slow debug mode
+                ref = cached_item.compute_value()
+                if not np.array_equal(pg.surfarray.pixels3d(ref), pg.surfarray.pixels3d(value)) or not np.array_equal(pg.surfarray.pixels_alpha(ref), pg.surfarray.pixels_alpha(value)):
+                    print('HIT BUG!',key)
+                self.last_check[key] = self.gc_iter
+        return value
+
+    def update_id(self, id, version):
+        self.id2version[id] = version
+    def delete_id(self, id):
+        if id in self.id2version:
+            del self.id2version[id]
+    def stale(self, key):
+        id2version, _ = key
+        for id, version in id2version:
+            current_version = self.id2version.get(id)
+            if current_version is None or version < current_version:
+                #print('stale',id,version,current_version)
+                return True
+        return False
+    def collect_garbage(self):
+        orig = len(self.key2value)
+        for key in list(self.key2value.keys()):
+            if self.stale(key):
+                del self.key2value[key]
+        #print('gc',orig,'->',len(self.key2value))
+        self.gc_iter += 1
+
+cache = Cache()
 
 def bounding_rectangle_of_a_boolean_mask(mask):
     # Sum along the vertical and horizontal axes
@@ -1405,21 +1478,39 @@ class Frame:
             self.color = None
             self.lines = None
 
-        self.dirty = False
-        self.hold = False
         # we don't aim to maintain a "perfect" dirty flag such as "doing 5 things and undoing
         # them should result in dirty==False." The goal is to avoid gratuitous saving when
         # scrolling thru the timeline, which slows things down and prevents reopening
         # clips at the last actually-edited frame after exiting the program
+        self.dirty = False
+        # similarly to dirty, version isn't a perfect version number; we're fine with it
+        # going up instead of back down upon undo, or going up by more than 1 upon a single
+        # editing operation. the version number is used for knowing when a cache hit
+        # would produce stale data; if we occasionally evict valid data it's not as bad
+        # as for hits to occasionally return stale data
+        self.version = 0
+        self.hold = False
+
+        cache.update_id(self.cache_id(), self.version)
+
+    def __del__(self):
+        cache.delete_id(self.cache_id())
+
+    def empty(self): return self.color is None
 
     def _create_surfaces_if_needed(self):
-        if self.color is not None:
+        if not self.empty():
             return
         self.color = layout.drawing_area().new_frame()
         self.lines = pg.Surface((self.color.get_width(), self.color.get_height()), pygame.SRCALPHA)
         self.lines.fill(PEN)
         pygame.surfarray.pixels_alpha(self.lines)[:] = 0
+
+    def increment_version(self):
+        self._create_surfaces_if_needed()
         self.dirty = True
+        self.version += 1
+        cache.update_id(self.cache_id(), self.version)
 
     def surf_ids(self): return ['lines','color']
     def get_width(self): return empty_frame().color.get_width()
@@ -1431,7 +1522,7 @@ class Frame:
         return s if s is not None else empty_frame().surf_by_id(surface_id)
 
     def surface(self):
-        if self.color is None:
+        if self.empty():
             return empty_frame().color
         s = self.color.copy()
         s.blit(self.lines, (0, 0), (0, 0, s.get_width(), s.get_height()))
@@ -1455,7 +1546,10 @@ class Frame:
 
     def size(self):
         # a frame is 2 RGBA surfaces
-        return (self.get_width() * self.get_height() * 8) if self.color is not None else 0
+        return (self.get_width() * self.get_height() * 8) if not self.empty() else 0
+
+    def cache_id(self): return (self.id, self.layer_id) if not self.empty() else None
+    def cache_id_version(self): return self.cache_id(), self.version
 
 _empty_frame = Frame('')
 def empty_frame():
@@ -1578,20 +1672,38 @@ class Movie:
         mask.movie_len = len(self.frames)
         return mask.surface
 
+    def _visible_layers_id2version(self, layers, pos):
+        frames = [layer.frame(pos) for layer in layers if layer.visible]
+        return tuple([frame.cache_id_version() for frame in frames if not frame.empty()])
+
     def get_thumbnail(self, pos, width, height):
-        thumbnail = self.thumbnail_cache.setdefault(pos, Thumbnail())
-        # self.pos is "volatile" (being edited right now) - don't cache 
-        if pos != self.pos and thumbnail.width == width and thumbnail.height == height and \
-            thumbnail.movie_pos == self.pos and thumbnail.movie_len == len(self.frames):
-            return thumbnail.surface
-        thumbnail.movie_pos = self.pos
-        thumbnail.movie_len = len(self.frames)
-        thumbnail.width = width
-        thumbnail.height = height
-        # TODO: might be better to blit cached per-layer thumbnails than do this, especially important
-        # for the current frame's thumbnail
-        thumbnail.surface = scale_image(self._blit_layers(self.layers, pos), width, height)
-        return thumbnail.surface
+
+        class CachedThumbnail(CachedItem):
+            def compute_key(_): return self._visible_layers_id2version(self.layers, pos), ('thumbnail', width, height)
+            def compute_value(_):
+                #print('value',pos,width,height,_.compute_key())
+                w = int(screen.get_width() * 0.15)
+                h = int(screen.get_height() * 0.15)
+                if w == width and h == height:
+                    class CachedBottomThumbnail:
+                        def compute_key(_): return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('thumbnail', width, height)
+                        def compute_value(_): return scale_image(self.curr_bottom_layers_surface(pos, highlight=False), width, height)
+                    class CachedTopThumbnail: # top layers are transparent so it's a distinct cache category from normal "thumbnails"
+                        def compute_key(_): return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('transparent-thumbnail', width, height)
+                        def compute_value(_): return scale_image(self.curr_top_layers_surface(pos, highlight=False), width, height)
+                    class CachedMiddleThumbnail:
+                        def compute_key(_): return self._visible_layers_id2version([self.layers[self.layer_pos]], pos), ('transparent-thumbnail', width, height)
+                        def compute_value(_): return scale_image(self.frame(pos).surface(), width, height)
+
+                    s = cache.fetch(CachedBottomThumbnail()).copy()
+                    if self.layers[self.layer_pos].visible:
+                        s.blit(cache.fetch(CachedMiddleThumbnail()), (0, 0))
+                    s.blit(cache.fetch(CachedTopThumbnail()), (0, 0))
+                    return s
+                else:
+                    return scale_image(self.get_thumbnail(pos, w, h), width, height)
+
+        return cache.fetch(CachedThumbnail())
 
     def clear_cache(self):
         self.mask_cache = {}
@@ -1735,8 +1847,7 @@ class Movie:
 
     def edit_curr_frame(self):
         f = self.frame(self.pos)
-        f._create_surfaces_if_needed()
-        f.dirty = True
+        f.increment_version()
         return f
 
     def _blit_layers(self, layers, pos, transparent=False, include_invisible=False):
@@ -1764,55 +1875,56 @@ class Movie:
         alpha[1:1:WIDTH*3, ::WIDTH*3, :] = 0
 
     def curr_bottom_layers_surface(self, pos, highlight):
-        if self.below_layers_mask.setdefault(highlight, dict()).get(pos):
-            return self.below_layers_mask[highlight][pos]
-        def cache(v):
-            self.below_layers_mask[highlight][pos] = v
-            return v
+        class CachedBottomLayers:
+            def compute_key(_):
+                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), 'blit-bottom-layers' if not highlight else 'bottom-layers-highlighted'
+            def compute_value(_):
+                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True)
+                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                s.fill(BACKGROUND)
+                if self.layer_pos == 0:
+                    return s
+                if not highlight:
+                    s.blit(layers, (0, 0))
+                    return s
+                layers.set_alpha(128)
+                below_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                below_image.set_alpha(128)
+                below_image.fill(LAYERS_BELOW)
+                alpha = pg.surfarray.array_alpha(layers)
+                layers.blit(below_image, (0,0))
+                pg.surfarray.pixels_alpha(layers)[:] = alpha
+                self._set_undrawable_layers_grid(layers)
+                s.blit(layers, (0,0))
 
-        layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True)
-        if not highlight:
-            return cache(layers)
-        layers.set_alpha(128)
-        s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
-        s.fill(BACKGROUND)
-        if self.layer_pos == 0:
-            return cache(s)
-        below_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
-        below_image.set_alpha(128)
-        below_image.fill(LAYERS_BELOW)
-        alpha = pg.surfarray.array_alpha(layers)
-        layers.blit(below_image, (0,0))
-        pg.surfarray.pixels_alpha(layers)[:] = alpha
-        self._set_undrawable_layers_grid(layers)
-        s.blit(layers, (0,0))
+                return s
 
-        return cache(s)
+        return cache.fetch(CachedBottomLayers())
 
     def curr_top_layers_surface(self, pos, highlight):
-        if self.above_layers_mask.setdefault(highlight, dict()).get(pos):
-            return self.above_layers_mask[highlight][pos]
-        def cache(v):
-            self.above_layers_mask[highlight][pos] = v
-            return v
+        class CachedTopLayers:
+            def compute_key(_):
+                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), 'blit-top-layers' if not highlight else 'top-layers-highlighted'
+            def compute_value(_):
+                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True)
+                if not highlight or self.layer_pos == len(self.layers)-1:
+                    return layers
+                layers.set_alpha(128)
+                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                s.fill(BACKGROUND)
+                above_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                above_image.set_alpha(128)
+                above_image.fill(LAYERS_ABOVE)
+                alpha = pg.surfarray.array_alpha(layers)
+                layers.blit(above_image, (0,0))
+                self._set_undrawable_layers_grid(layers)
+                s.blit(layers, (0,0))
+                pg.surfarray.pixels_alpha(s)[:] = alpha
+                s.set_alpha(192)
 
-        layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True)
-        if not highlight or self.layer_pos == len(self.layers)-1:
-            return cache(layers)
-        layers.set_alpha(128)
-        s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
-        s.fill(BACKGROUND)
-        above_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
-        above_image.set_alpha(128)
-        above_image.fill(LAYERS_ABOVE)
-        alpha = pg.surfarray.array_alpha(layers)
-        layers.blit(above_image, (0,0))
-        self._set_undrawable_layers_grid(layers)
-        s.blit(layers, (0,0))
-        pg.surfarray.pixels_alpha(s)[:] = alpha
-        s.set_alpha(192)
+                return s
 
-        return cache(s)
+        return cache.fetch(CachedTopLayers())
 
     def curr_layers_surface(self):
         return self._blit_layers(self.layers, self.pos)
@@ -2310,6 +2422,8 @@ while not escape:
         # when we should have been receiving the next x,y coordinates
         if event.type != pygame.MOUSEMOTION or layout.is_pressed:
             layout.draw()
+            if not layout.is_playing:
+                cache.collect_garbage()
         pygame.display.flip()
    except KeyboardInterrupt:
     print('Ctrl-C - exiting')
