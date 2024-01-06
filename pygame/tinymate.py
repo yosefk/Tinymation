@@ -292,15 +292,24 @@ class Cache:
         self.debug = False
         self.gc_iter = 0
         self.last_check = {}
+        self.computed_bytes = 0
+        self.cached_bytes = 0
+    def size(self,value):
+        try:
+            return value.get_width() * value.get_height() * 4
+        except:
+            return 0
     def fetch(self, cached_item):
         key = cached_item.compute_key()
         value = self.key2value.get(key)
         if value is None:
             value = cached_item.compute_value()
+            self.computed_bytes += self.size(value)
             # TODO: evict when running out of room
             self.key2value[key] = value
-        elif self.debug:
-            if self.last_check.get(key, 0) < self.gc_iter:
+        else:
+            self.cached_bytes += self.size(value)
+            if self.debug and self.last_check.get(key, 0) < self.gc_iter:
                 # slow debug mode
                 ref = cached_item.compute_value()
                 if not np.array_equal(pg.surfarray.pixels3d(ref), pg.surfarray.pixels3d(value)) or not np.array_equal(pg.surfarray.pixels_alpha(ref), pg.surfarray.pixels_alpha(value)):
@@ -326,8 +335,10 @@ class Cache:
         for key in list(self.key2value.keys()):
             if self.stale(key):
                 del self.key2value[key]
-        #print('gc',orig,'->',len(self.key2value))
+        #print('gc',orig,'->',len(self.key2value),'computed',self.computed_bytes,'cached',self.cached_bytes)
         self.gc_iter += 1
+        self.computed_bytes = 0
+        self.cached_bytes = 0
 
 cache = Cache()
 
@@ -485,7 +496,7 @@ class PenTool(Button):
                 color = movie.edit_curr_frame().surf_by_id('color')
                 color_rgb = pg.surfarray.pixels3d(color)
                 color_alpha = pg.surfarray.pixels_alpha(color)
-                flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, self.bucket_color if self.bucket_color else BACKGROUND+(255,))
+                flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x-drawing_area.xmargin, y-drawing_area.ymargin, self.bucket_color if self.bucket_color else BACKGROUND+(0,))
                 history_item = HistoryItemSet([history_item, color_history_item])
 
             history_item.optimize()
@@ -1355,7 +1366,7 @@ class MovieListArea:
             border = 1 + first*2
             if first and pos == self.clip_pos:
                 try:
-                    image = scale_image(movie.curr_layers_surface(), image.get_width()) 
+                    image = movie.get_thumbnail(movie.pos, image.get_width(), image.get_height()) 
                     self.images[pos] = image # this keeps the image correct when scrolled out of clip_pos
                     # (we don't self.reload() upon scrolling so self.images can go stale when the current
                     # clip is modified)
@@ -1910,9 +1921,6 @@ class Movie:
                 return s
 
         return cache.fetch(CachedTopLayers())
-
-    def curr_layers_surface(self):
-        return self._blit_layers(self.layers, self.pos)
 
     def save_gif_and_pngs(self):
         with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, mode='I') as writer:
