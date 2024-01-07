@@ -286,6 +286,9 @@ class CachedItem:
 #   since-edited frame - this is done by collect_garbage() and assisted by update_id()
 #   and delete_id()
 class Cache:
+    class Miss:
+        pass
+    MISS = Miss()
     def __init__(self):
         self.key2value = {}
         self.id2version = {}
@@ -296,13 +299,18 @@ class Cache:
         self.cached_bytes = 0
     def size(self,value):
         try:
+            # surface
             return value.get_width() * value.get_height() * 4
         except:
-            return 0
+            try:
+                # numpy array
+                return reduce(lambda x,y: x*y, value.shape)
+            except:
+                return 0
     def fetch(self, cached_item):
         key = cached_item.compute_key()
-        value = self.key2value.get(key)
-        if value is None:
+        value = self.key2value.get(key, Cache.MISS)
+        if value is Cache.MISS:
             value = cached_item.compute_value()
             self.computed_bytes += self.size(value)
             # TODO: evict when running out of room
@@ -830,28 +838,6 @@ class Layout:
         self.is_playing = not self.is_playing
         self.playing_index = 0
             
-def pen2mask(layers, pos, rgb, transparency):
-    mask_surface = pygame.Surface((empty_frame().get_width(), empty_frame().get_height()), pygame.SRCALPHA)
-    mask = pygame.surfarray.pixels3d(mask_surface)
-    for ch in range(3):
-        mask[:,:,ch] = rgb[ch]
-
-    alpha = pg.surfarray.pixels_alpha(mask_surface)
-    alpha[:] = 0
-    for layer in layers:
-        if not layer.visible: 
-            continue
-        frame = layer.frame(pos)
-        pen = pygame.surfarray.pixels_alpha(frame.surf_by_id('lines'))
-        color = pygame.surfarray.pixels_alpha(frame.surf_by_id('color'))
-        # hide the areas colored by this layer, and expose the lines of these layer (the latter, only if it's lit and not held)
-        alpha[:] = np.minimum(255-color, alpha)
-        held = layer.surface_pos(movie.pos) == layer.surface_pos(pos)
-        if layer.lit and not held:
-            alpha[:] = np.maximum(pen, alpha)
-    mask_surface.set_alpha(int(transparency*255))
-    return mask_surface
-
 class DrawingArea:
     def __init__(self):
         self.fading_mask = None
@@ -960,14 +946,6 @@ class TimelineArea:
             self.traversal_order.append(-pos_dist)
             self.traversal_order.append(pos_dist)
 
-        # we can precombine the light table mask which doesn't change
-        # unless we seek to a different frame, or the the definition of which
-        # frames are on the light table changes
-        self.combined_mask = None
-        self.combined_on_light_table = None
-        self.combined_movie_pos = None
-        self.combined_movie_len = None
-
         self.loop_mode = False
 
         self.toggle_hold_boundaries = (0,0,0,0)
@@ -1006,36 +984,37 @@ class TimelineArea:
             transparency = 0.3
             yield (pos, color, transparency)
 
-    def light_table_masks(self):
-        masks = []
-        for pos, color, transparency in self.light_table_positions():
-            masks.append(movie.get_mask(pos, color, transparency))
-        return masks
-
     def combined_light_table_mask(self):
-        if movie.pos == self.combined_movie_pos and self.on_light_table == self.combined_on_light_table \
-                and len(movie.frames) == self.combined_movie_len and self.combined_mask:
-            return self.combined_mask
-        self.combined_movie_pos = movie.pos
-        self.combined_movie_len = len(movie.frames)
-        self.combined_on_light_table = self.on_light_table.copy()
-        
-        masks = self.light_table_masks()
-        if len(masks) == 0:
-            self.combined_mask = None
-        elif len(masks) == 1:
-            self.combined_mask = masks[0]
-        else:
-            mask = masks[0].copy()
-            alphas = []
-            for m in masks[1:]:
-                alphas.append(m.get_alpha())
-                m.set_alpha(255) # TODO: this assumes the same transparency in all masks - might want to change
-            mask.blits([(m, (0, 0), (0, 0, mask.get_width(), mask.get_height())) for m in masks[1:]])
-            for m,a in zip(masks[1:],alphas):
-                m.set_alpha(a)
-            self.combined_mask = mask
-        return self.combined_mask
+        class CachedCombinedMask:
+            def compute_key(_):
+                id2version = []
+                computation = []
+                for pos, color, transparency in self.light_table_positions():
+                    i2v, c = movie.get_mask(pos, color, transparency, key=True)
+                    id2version += i2v
+                    computation.append(c)
+                return tuple(id2version), ('combined-mask', tuple(computation))
+                
+            def compute_value(_):
+                masks = []
+                for pos, color, transparency in self.light_table_positions():
+                    masks.append(movie.get_mask(pos, color, transparency))
+                if len(masks) == 0:
+                    return None
+                elif len(masks) == 1:
+                    return masks[0]
+                else:
+                    mask = masks[0].copy()
+                    alphas = []
+                    for m in masks[1:]:
+                        alphas.append(m.get_alpha())
+                        m.set_alpha(255) # TODO: this assumes the same transparency in all masks - might want to change
+                    mask.blits([(m, (0, 0), (0, 0, mask.get_width(), mask.get_height())) for m in masks[1:]])
+                    for m,a in zip(masks[1:],alphas):
+                        m.set_alpha(a)
+                    return mask
+
+        return cache.fetch(CachedCombinedMask())
 
     def x2frame(self, x):
         for left, right, pos in self.frame_boundaries:
@@ -1285,7 +1264,6 @@ class LayersArea:
             if y >= bottom and y <= top and x >= left and x <= right:
                 movie.layers[layer_pos].lit = not movie.layers[layer_pos].lit
                 movie.clear_cache()
-                layout.timeline_area().combined_mask = None
                 return True
 
     def update_visible(self,x,y):
@@ -1294,7 +1272,6 @@ class LayersArea:
                 movie.layers[layer_pos].visible = not movie.layers[layer_pos].visible
                 movie.layers[layer_pos].lit = movie.layers[layer_pos].visible
                 movie.clear_cache()
-                layout.timeline_area().combined_mask = None
                 return True
 
     def on_mouse_down(self,x,y):
@@ -1463,14 +1440,6 @@ class TogglePlaybackButton:
 
 Tool = collections.namedtuple('Tool', ['tool', 'cursor', 'chars'])
 
-class LightTableMask:
-    def __init__(self):
-        self.surface = None
-        self.color = None
-        self.transparency = None
-        self.movie_pos = None
-        self.movie_len = None
-
 class Frame:
     def __init__(self, dir, layer_id=None, frame_id=None):
         self.dir = dir
@@ -1623,8 +1592,6 @@ class Movie:
             self.layer_pos = clip['layer_pos']
             self.frames = self.layers[self.layer_pos].frames
 
-        self.mask_cache = {}
-
     def toggle_hold(self):
         pos = self.pos
         assert pos != 0 # in loop mode one might expect to be able to hold the last frame and have it shown
@@ -1654,22 +1621,44 @@ class Movie:
     def frame(self, pos):
         return self.layers[self.layer_pos].frame(pos)
 
-    def get_mask(self, pos, color, transparency):
-        assert pos != self.pos
-        mask = self.mask_cache.setdefault(pos, LightTableMask())
-        if pos != self.pos and mask.color == color and mask.transparency == transparency \
-            and mask.movie_pos == self.pos and mask.movie_len == len(self.frames):
-            return mask.surface
+    def get_mask(self, pos, rgb, transparency, key=False):
+        # ignore invisible layers
+        layers = [layer for layer in self.layers if layer.visible]
         # ignore the layers where the frame at the current position is an alias for the frame at the requested position
-        # (it's visually noisy to see the same lines colored in different colors all over, and also slow, especially
-        # because doing so correctly without effects where you erase at the current frame and then still see the erased
-        # lines in the light table masks precludes caching)
-        mask.surface = pen2mask(self.layers, pos, color, transparency)
-        mask.color = color
-        mask.transparency = transparency
-        mask.movie_pos = self.pos
-        mask.movie_len = len(self.frames)
-        return mask.surface
+        # (it's visually noisy to see the same lines colored in different colors all over)
+        def lines_lit(layer): return layer.lit and layer.surface_pos(self.pos) != layer.surface_pos(pos)
+
+        class CachedMaskAlpha:
+            def compute_key(_):
+                frames = [layer.frame(pos) for layer in layers]
+                lines = tuple([lines_lit(layer) for layer in layers])
+                return tuple([frame.cache_id_version() for frame in frames if not frame.empty()]), ('mask-alpha', lines)
+            def compute_value(_):
+                alpha = np.zeros((empty_frame().get_width(), empty_frame().get_height()))
+                for layer in layers:
+                    frame = layer.frame(pos)
+                    pen = pygame.surfarray.pixels_alpha(frame.surf_by_id('lines'))
+                    color = pygame.surfarray.pixels_alpha(frame.surf_by_id('color'))
+                    # hide the areas colored by this layer, and expose the lines of these layer (the latter, only if it's lit and not held)
+                    alpha[:] = np.minimum(255-color, alpha)
+                    if lines_lit(layer):
+                        alpha[:] = np.maximum(pen, alpha)
+                return alpha
+
+        class CachedMask:
+            def compute_key(_):
+                id2version, computation = CachedMaskAlpha().compute_key()
+                return id2version, ('mask', rgb, transparency, computation)
+            def compute_value(_):
+                mask_surface = pygame.Surface((empty_frame().get_width(), empty_frame().get_height()), pygame.SRCALPHA)
+                pygame.surfarray.pixels3d(mask_surface)[:] = np.array(rgb)
+                pg.surfarray.pixels_alpha(mask_surface)[:] = cache.fetch(CachedMaskAlpha())
+                mask_surface.set_alpha(int(transparency*255))
+                return mask_surface
+
+        if key:
+            return CachedMask().compute_key()
+        return cache.fetch(CachedMask())
 
     def _visible_layers_id2version(self, layers, pos):
         frames = [layer.frame(pos) for layer in layers if layer.visible]
@@ -1705,7 +1694,6 @@ class Movie:
         return cache.fetch(CachedThumbnail())
 
     def clear_cache(self):
-        self.mask_cache = {}
         layout.drawing_area().fading_mask = None
 
     def seek_frame_and_layer(self,pos,layer_pos):
@@ -2012,7 +2000,6 @@ class ToggleHoldHistoryItem:
             print('WARNING: wrong pos for a toggle-hold history item - expected {self.pos}, got {movie.pos}')
             movie.seek_frame(self.pos)
         movie.toggle_hold()
-        layout.timeline_area().combined_mask = None
         return self
     def __str__(self):
         return f'ToggleHoldHistoryItem(toggling at frame {self.pos})'
@@ -2088,7 +2075,6 @@ def toggle_loop_mode():
 def toggle_frame_hold():
     if movie.pos != 0:
         movie.toggle_hold()
-        layout.timeline_area().combined_mask = None
         history.append_item(ToggleHoldHistoryItem(movie.pos))
 
 TOOLS = {
