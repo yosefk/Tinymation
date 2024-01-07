@@ -38,7 +38,9 @@ LAYERS_ABOVE = (255,128,0)
 WIDTH = 3 # the smallest width where you always have a pure pen color rendered along
 # the line path, making our naive flood fill work well...
 CURSOR_SIZE = int(screen.get_width() * 0.07)
-MAX_HISTORY_BYTE_SIZE = 2*1024**3
+MAX_HISTORY_BYTE_SIZE = 1*1024**3
+MAX_CACHE_BYTE_SIZE = 1*1024**3
+MAX_CACHED_ITEMS = 2000
 FRAME_FMT = 'frame%04d.png'
 CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
 # makes the png the image inside the directory icon displayed in Explorer... which is very nice
@@ -290,13 +292,16 @@ class Cache:
         pass
     MISS = Miss()
     def __init__(self):
-        self.key2value = {}
+        self.key2value = collections.OrderedDict()
         self.id2version = {}
         self.debug = False
         self.gc_iter = 0
         self.last_check = {}
+        # these are per-gc iteration counters
         self.computed_bytes = 0
         self.cached_bytes = 0
+        # sum([self.size(value) for value in self.key2value.values()])
+        self.cache_size = 0
     def size(self,value):
         try:
             # surface
@@ -312,10 +317,13 @@ class Cache:
         value = self.key2value.get(key, Cache.MISS)
         if value is Cache.MISS:
             value = cached_item.compute_value()
-            self.computed_bytes += self.size(value)
-            # TODO: evict when running out of room
+            vsize = self.size(value)
+            self.computed_bytes += vsize
+            self.cache_size += vsize
+            self._evict_lru_as_needed()
             self.key2value[key] = value
         else:
+            self.key2value.move_to_end(key)
             self.cached_bytes += self.size(value)
             if self.debug and self.last_check.get(key, 0) < self.gc_iter:
                 # slow debug mode
@@ -324,6 +332,11 @@ class Cache:
                     print('HIT BUG!',key)
                 self.last_check[key] = self.gc_iter
         return value
+
+    def _evict_lru_as_needed(self):
+        while self.cache_size > MAX_CACHE_BYTE_SIZE or len(self.key2value) > MAX_CACHED_ITEMS:
+            key, value = self.key2value.popitem(last=False)
+            self.cache_size -= self.size(value)
 
     def update_id(self, id, version):
         self.id2version[id] = version
@@ -339,11 +352,14 @@ class Cache:
                 return True
         return False
     def collect_garbage(self):
+        tdiff()
         orig = len(self.key2value)
-        for key in list(self.key2value.keys()):
+        orig_size = self.cache_size
+        for key, value in list(self.key2value.items()):
             if self.stale(key):
                 del self.key2value[key]
-        #print('gc',orig,'->',len(self.key2value),'computed',self.computed_bytes,'cached',self.cached_bytes)
+                self.cache_size -= self.size(value)
+        #print('gc',orig,orig_size,'->',len(self.key2value),self.cache_size,'computed',self.computed_bytes,'cached',self.cached_bytes,tdiff())
         self.gc_iter += 1
         self.computed_bytes = 0
         self.cached_bytes = 0
@@ -2340,15 +2356,18 @@ pygame.time.set_timer(PLAYBACK_TIMER_EVENT, 1000//FRAME_RATE) # we play back at 
 pygame.time.set_timer(SAVING_TIMER_EVENT, 15*1000) # we save a copy of the current clip every 15 seconds
 pygame.time.set_timer(FADING_TIMER_EVENT, 1000//FADING_RATE) # we save a copy of the current clip every 15 seconds
 
+timer_events = [
+    PLAYBACK_TIMER_EVENT,
+    SAVING_TIMER_EVENT,
+    FADING_TIMER_EVENT,
+]
+
 interesting_events = [
     pygame.KEYDOWN,
     pygame.MOUSEMOTION,
     pygame.MOUSEBUTTONDOWN,
     pygame.MOUSEBUTTONUP,
-    PLAYBACK_TIMER_EVENT,
-    SAVING_TIMER_EVENT,
-    FADING_TIMER_EVENT,
-]
+] + timer_events
 
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard
@@ -2395,7 +2414,7 @@ while not escape:
 
       # TODO: might be good to optimize repainting beyond "just repaint everything
       # upon every event"
-      if layout.is_playing or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in [PLAYBACK_TIMER_EVENT, SAVING_TIMER_EVENT]:
+      if layout.is_playing or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events:
         # don't repaint upon depressed mouse movement. this is important to avoid the pen
         # lagging upon "first contact" when a mouse motion event is sent before a mouse down
         # event at the same coordinate; repainting upon that mouse motion event loses time
