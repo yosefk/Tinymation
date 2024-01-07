@@ -1331,7 +1331,8 @@ class MovieListArea:
                 clip = json.loads(clipfile.read())
             curr_frame = clip['frame_pos']
             frame_file = os.path.join(fulldir, FRAME_FMT % curr_frame)
-            self.images.append(scale_image(pg.image.load(frame_file), single_image_width))
+            image = pg.image.load(frame_file) if os.path.exists(frame_file) else layout.drawing_area().new_frame()
+            self.images.append(scale_image(image, single_image_width))
             self.clips.append(fulldir)
         self.clip_pos = 0 
     def draw(self):
