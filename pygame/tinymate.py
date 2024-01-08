@@ -37,6 +37,8 @@ LAYERS_BELOW = (0,128,255)
 LAYERS_ABOVE = (255,128,0)
 WIDTH = 3 # the smallest width where you always have a pure pen color rendered along
 # the line path, making our naive flood fill work well...
+MEDIUM_ERASER_WIDTH = 5*WIDTH
+BIG_ERASER_WIDTH = 20*WIDTH
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
 MAX_CACHE_BYTE_SIZE = 1*1024**3
@@ -220,27 +222,37 @@ def scale_image(surface, width, height=None):
 def minmax(v, minv, maxv):
     return min(maxv,max(minv,v))
 
-def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=192):
+def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=192, edit=lambda x: x, hot_spot_offset=(0,0)):
   surface = pg.image.load(file)
   surface = scale_image(surface, size, size*surface.get_height()/surface.get_width())#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
       surface = pg.transform.flip(surface, True, True)
   non_transparent_surface = surface.copy()
-  for y in range(surface.get_height()):
-      for x in range(surface.get_width()):
-          r,g,b,a = surface.get_at((x,y))
-          surface.set_at((x,y), (r,g,b,min(a,min_alpha)))
-  hotx = minmax(int(hot_spot[0] * surface.get_width()), 0, surface.get_width()-1)
-  hoty = minmax(int(hot_spot[1] * surface.get_height()), 0, surface.get_height()-1)
+  alpha = pg.surfarray.pixels_alpha(surface)
+  alpha[:] = np.minimum(alpha, min_alpha)
+  del alpha
+  surface = edit(surface)
+  hotx = minmax(int(hot_spot[0] * surface.get_width()) + hot_spot_offset[0], 0, surface.get_width()-1)
+  hoty = minmax(int(hot_spot[1] * surface.get_height()) + hot_spot_offset[1], 0, surface.get_height()-1)
   return pg.cursors.Cursor((hotx, hoty), surface), non_transparent_surface
+
+def add_circle(image, radius, color=(255,0,0,128), outline_color=(0,0,0,128)):
+    new_width = radius + image.get_width()
+    new_height = radius + image.get_height()
+    result = pg.Surface((new_width, new_height), pg.SRCALPHA)
+    pg.gfxdraw.filled_circle(result, radius, new_height-radius, radius, outline_color)
+    pg.gfxdraw.filled_circle(result, radius, new_height-radius, radius-WIDTH+1, (0,0,0,0))
+    pg.gfxdraw.filled_circle(result, radius, new_height-radius, radius-WIDTH+1, color)
+    result.blit(image, (radius, 0))
+    return result
 
 pencil_cursor = load_cursor('pencil.png')
 pencil_cursor = (pencil_cursor[0], pg.image.load('pencil-tool.png'))
 eraser_cursor = load_cursor('eraser.png')
 eraser_cursor = (eraser_cursor[0], pg.image.load('eraser-tool.png'))
-eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5))
+eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5), edit=lambda s: add_circle(s, MEDIUM_ERASER_WIDTH//2), hot_spot_offset=(MEDIUM_ERASER_WIDTH//2,-MEDIUM_ERASER_WIDTH//2))
 eraser_medium_cursor = (eraser_medium_cursor[0], eraser_cursor[1])
-eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2))
+eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2), edit=lambda s: add_circle(s, BIG_ERASER_WIDTH//2), hot_spot_offset=(BIG_ERASER_WIDTH//2,-BIG_ERASER_WIDTH//2))
 eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
 flashlight_cursor = load_cursor('flashlight.png')
 flashlight_cursor = (flashlight_cursor[0], pg.image.load('flashlight-tool.png')) 
@@ -2167,8 +2179,8 @@ def toggle_layer_lock():
 TOOLS = {
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
-    'eraser-medium': Tool(PenTool(BACKGROUND, WIDTH*5), eraser_medium_cursor, 'rR'),
-    'eraser-big': Tool(PenTool(BACKGROUND, WIDTH*20), eraser_big_cursor, 'tT'),
+    'eraser-medium': Tool(PenTool(BACKGROUND, MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'rR'),
+    'eraser-big': Tool(PenTool(BACKGROUND, BIG_ERASER_WIDTH), eraser_big_cursor, 'tT'),
     'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'fF'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
