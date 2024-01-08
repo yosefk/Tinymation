@@ -472,6 +472,17 @@ class Button:
             self.button_surface = surface
         screen.blit(self.button_surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
 
+locked_image = pg.image.load('locked.png')
+def curr_layer_locked():
+    locked = movie.curr_layer().locked
+    if locked:
+        fading_mask = layout.drawing_area().new_frame()
+        fading_mask.blit(locked_image, ((fading_mask.get_width()-locked_image.get_width())//2, (fading_mask.get_height()-locked_image.get_height())//2))
+        fading_mask.set_alpha(192)
+        layout.drawing_area().fading_mask = fading_mask
+        layout.drawing_area().fade_per_frame = 192/(FADING_RATE*3)
+    return locked
+
 class PenTool(Button):
     def __init__(self, eraser=False, width=WIDTH):
         Button.__init__(self)
@@ -487,6 +498,8 @@ class PenTool(Button):
             self.alpha_surface = None
 
     def on_mouse_down(self, x, y):
+        if curr_layer_locked():
+            return
         self.points = []
         self.bucket_color = None
         self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
@@ -497,6 +510,8 @@ class PenTool(Button):
         self.on_mouse_move(x,y)
 
     def on_mouse_up(self, x, y):
+        if curr_layer_locked():
+            return
         self.lines_array = None
         drawing_area = layout.drawing_area()
         self.points.append((x-drawing_area.xmargin,y-drawing_area.ymargin))
@@ -551,6 +566,8 @@ class PenTool(Button):
             drawing_area.fading_func = Fading().fade
 
     def on_mouse_move(self, x, y):
+        if curr_layer_locked():
+            return
         drawing_area = layout.drawing_area()
         cx = x-drawing_area.xmargin
         cy = y-drawing_area.ymargin
@@ -617,6 +634,8 @@ class PaintBucketTool(Button):
         Button.__init__(self)
         self.color = color
     def on_mouse_down(self, x, y):
+        if curr_layer_locked():
+            return
         x -= layout.drawing_area().xmargin
         y -= layout.drawing_area().ymargin
         color_surface = movie.edit_curr_frame().surf_by_id('color')
@@ -874,11 +893,12 @@ class DrawingArea:
         bottom += self.ymargin
 
         pos = layout.playing_index if layout.is_playing else movie.pos
-        screen.blit(movie.curr_bottom_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
+        highlight = not layout.is_playing and not movie.curr_layer().locked
+        screen.blit(movie.curr_bottom_layers_surface(pos, highlight=highlight), (left, bottom), (0, 0, width, height))
         if movie.layers[movie.layer_pos].visible:
             frame = movie.frame(pos).surface()
             screen.blit(frame, (left, bottom), (0, 0, width, height))
-        screen.blit(movie.curr_top_layers_surface(pos, highlight=not layout.is_playing), (left, bottom), (0, 0, width, height))
+        screen.blit(movie.curr_top_layers_surface(pos, highlight=highlight), (left, bottom), (0, 0, width, height))
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
@@ -1201,8 +1221,11 @@ class LayersArea:
         self.eye_shut = scale_image(pg.image.load('eye_shut.png'), icon_size)
         self.light_on = scale_image(pg.image.load('light_on.png'), icon_size)
         self.light_off = scale_image(pg.image.load('light_off.png'), icon_size)
+        self.locked = scale_image(pg.image.load('locked.png'), icon_size)
+        self.unlocked = scale_image(pg.image.load('unlocked.png'), icon_size)
         self.eye_boundaries = []
         self.lit_boundaries = []
+        self.lock_boundaries = []
         self.thumbnail_height = 0
     
     def cached_image(self, layer_pos, layer):
@@ -1245,6 +1268,7 @@ class LayersArea:
     def draw(self):
         self.eye_boundaries = []
         self.lit_boundaries = []
+        self.lock_boundaries = []
 
         left, bottom, width, height = self.rect
         top = bottom + width
@@ -1265,6 +1289,11 @@ class LayersArea:
             screen.blit(eye, (left + width - eye.get_width() - max_border, bottom + image.get_height() - eye.get_height() - max_border))
             self.eye_boundaries.append((left + width - eye.get_width() - max_border, bottom + image.get_height() - eye.get_height() - max_border, left+width, bottom+image.get_height(), layer_pos))
 
+            lock = self.locked if layer.locked else self.unlocked
+            lock_start = bottom + self.thumbnail_height/2 - lock.get_height()/2
+            screen.blit(lock, (left, lock_start))
+            self.lock_boundaries.append((left, lock_start, left+lock.get_width(), lock_start+lock.get_height(), layer_pos))
+
             bottom += image.get_height()
 
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool)
@@ -1278,15 +1307,25 @@ class LayersArea:
     def update_on_light_table(self,x,y):
         for left, bottom, right, top, layer_pos in self.lit_boundaries:
             if y >= bottom and y <= top and x >= left and x <= right:
-                movie.layers[layer_pos].lit = not movie.layers[layer_pos].lit
+                movie.layers[layer_pos].toggle_lit() # no undo for this - it's not a "model change" but a "view change"
                 movie.clear_cache()
                 return True
 
     def update_visible(self,x,y):
         for left, bottom, right, top, layer_pos in self.eye_boundaries:
             if y >= bottom and y <= top and x >= left and x <= right:
-                movie.layers[layer_pos].visible = not movie.layers[layer_pos].visible
-                movie.layers[layer_pos].lit = movie.layers[layer_pos].visible
+                layer = movie.layers[layer_pos]
+                layer.toggle_visible()
+                history.append_item(ToggleHistoryItem(layer.toggle_visible))
+                movie.clear_cache()
+                return True
+
+    def update_locked(self,x,y):
+        for left, bottom, right, top, layer_pos in self.lock_boundaries:
+            if y >= bottom and y <= top and x >= left and x <= right:
+                layer = movie.layers[layer_pos]
+                layer.toggle_locked()
+                history.append_item(ToggleHistoryItem(layer.toggle_locked))
                 movie.clear_cache()
                 return True
 
@@ -1300,6 +1339,8 @@ class LayersArea:
         if self.update_on_light_table(x,y):
             return
         if self.update_visible(x,y):
+            return
+        if self.update_locked(x,y):
             return
         f = self.y2frame(y)
         if f == movie.layer_pos:
@@ -1555,6 +1596,7 @@ class Layer:
         self.id = layer_id if layer_id else str(uuid.uuid1())
         self.lit = True
         self.visible = True
+        self.locked = False
         for frame in frames:
             frame.layer_id = self.id
         subdir = self.subdir()
@@ -1575,6 +1617,12 @@ class Layer:
     def delete(self): os.rename(self.subdir(), self.deleted_subdir())
     def undelete(self): os.rename(self.deleted_subdir(), self.subdir())
 
+    def toggle_locked(self): self.locked = not self.locked
+    def toggle_lit(self): self.lit = not self.lit
+    def toggle_visible(self):
+        self.visible = not self.visible
+        self.lit = self.visible
+
 class Movie:
     def __init__(self, dir):
         self.dir = dir
@@ -1593,6 +1641,7 @@ class Movie:
             layer_ids = clip['layer_order']
             holds = clip['hold']
             visible = clip.get('layer_visible', [True]*len(layer_ids))
+            locked = clip.get('layer_locked', [False]*len(layer_ids))
 
             self.layers = []
             for layer_index, layer_id in enumerate(layer_ids):
@@ -1603,6 +1652,7 @@ class Movie:
                     frames.append(frame)
                 layer = Layer(frames, dir, layer_id)
                 layer.visible = visible[layer_index]
+                layer.locked = locked[layer_index]
                 self.layers.append(layer)
 
             self.pos = clip['frame_pos']
@@ -1620,6 +1670,7 @@ class Movie:
             self.frames[pos].save()
         self.frames[pos].hold = not self.frames[pos].hold
         self.clear_cache()
+        self.save_meta()
 
     def save_meta(self):
         # TODO: save light table settings
@@ -1629,6 +1680,7 @@ class Movie:
             'frame_order':[frame.id for frame in self.frames],
             'layer_order':[layer.id for layer in self.layers],
             'layer_visible':[layer.visible for layer in self.layers],
+            'layer_locked':[layer.locked for layer in self.layers],
             'hold':[[frame.hold for frame in layer.frames] for layer in self.layers],
         }
         text = json.dumps(clip,indent=2)
@@ -1846,6 +1898,9 @@ class Movie:
     def curr_frame(self):
         return self.frame(self.pos)
 
+    def curr_layer(self):
+        return self.layers[self.layer_pos]
+
     def edit_curr_frame(self):
         f = self.frame(self.pos)
         f.increment_version()
@@ -1948,10 +2003,9 @@ class Movie:
         layout.movie_list_area().save_history()
         global history
         history = History()
-        self.frame(self.pos).dirty = True # updates the image timestamp so we open at that image next time...
         self.frame(self.pos).save()
-        self.save_gif_and_pngs()
         self.save_meta()
+        self.save_gif_and_pngs()
         self.garbage_collect_layer_dirs()
 
 class SeekFrameHistoryItem:
@@ -2010,16 +2064,25 @@ class RemoveLayerHistoryItem:
         return sum([f.size() for f in self.removed_layer.frames])
 
 class ToggleHoldHistoryItem:
-    def __init__(self, pos):
+    def __init__(self, pos, layer_pos):
         self.pos = pos
+        self.layer_pos = layer_pos
     def undo(self):
-        if movie.pos != self.pos:
-            print('WARNING: wrong pos for a toggle-hold history item - expected {self.pos}, got {movie.pos}')
-            movie.seek_frame(self.pos)
+        if movie.pos != self.pos or movie.layer_pos != self.layer_pos:
+            print('WARNING: wrong pos for a toggle-hold history item - expected {self.pos} layer {self.layer_pos}, got {movie.pos} layer {movie.layer_pos}')
+            movie.seek_frame_and_layer(self.pos, self.layer_pos)
         movie.toggle_hold()
         return self
     def __str__(self):
-        return f'ToggleHoldHistoryItem(toggling at frame {self.pos})'
+        return f'ToggleHoldHistoryItem(toggling hold at frame {self.pos} layer {self.layer_pos})'
+
+class ToggleHistoryItem:
+    def __init__(self, toggle_func): self.toggle_func = toggle_func
+    def undo(self):
+        self.toggle_func()
+        return self
+    def __str__(self):
+        return f'ToggleHistoryItem({self.toggle_func.__qualname__})'
 
 def append_seek_frame_history_item_if_frame_is_dirty():
     if history.undo:
@@ -2092,7 +2155,12 @@ def toggle_loop_mode():
 def toggle_frame_hold():
     if movie.pos != 0:
         movie.toggle_hold()
-        history.append_item(ToggleHoldHistoryItem(movie.pos))
+        history.append_item(ToggleHoldHistoryItem(movie.pos, movie.layer_pos))
+
+def toggle_layer_lock():
+    layer = movie.curr_layer()
+    layer.toggle_locked()
+    history.append_item(ToggleHistoryItem(layer.toggle_locked))
 
 TOOLS = {
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
@@ -2118,8 +2186,9 @@ FUNCTIONS = {
     'next-frame': (next_frame, '.<', None),
     'prev-frame': (prev_frame, ',>', None),
     'toggle-playing': (toggle_playing, '\r', None),
-    'toggle-loop-mode': (toggle_loop_mode, 'l', None),
+    'toggle-loop-mode': (toggle_loop_mode, 'c', None),
     'toggle-frame-hold': (toggle_frame_hold, 'h', None),
+    'toggle-layer-lock': (toggle_layer_lock, 'l', None),
 }
 
 prev_tool = None
