@@ -473,15 +473,17 @@ class Button:
         screen.blit(self.button_surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
 
 locked_image = pg.image.load('locked.png')
+invisible_image = pg.image.load('eye_shut.png')
 def curr_layer_locked():
-    locked = movie.curr_layer().locked
-    if locked:
+    effectively_locked = movie.curr_layer().locked or not movie.curr_layer().visible
+    if effectively_locked: # invisible layers are effectively locked but we show it differently
+        reason_image = locked_image if movie.curr_layer().locked else invisible_image
         fading_mask = layout.drawing_area().new_frame()
-        fading_mask.blit(locked_image, ((fading_mask.get_width()-locked_image.get_width())//2, (fading_mask.get_height()-locked_image.get_height())//2))
+        fading_mask.blit(reason_image, ((fading_mask.get_width()-reason_image.get_width())//2, (fading_mask.get_height()-reason_image.get_height())//2))
         fading_mask.set_alpha(192)
         layout.drawing_area().fading_mask = fading_mask
         layout.drawing_area().fade_per_frame = 192/(FADING_RATE*3)
-    return locked
+    return effectively_locked
 
 class PenTool(Button):
     def __init__(self, eraser=False, width=WIDTH):
