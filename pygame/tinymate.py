@@ -656,6 +656,9 @@ class PaintBucketTool(Button):
         color_rgb = pg.surfarray.pixels3d(color_surface)
         color_alpha = pg.surfarray.pixels_alpha(color_surface)
         lines = pygame.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
+
+        if x >= lines.shape[0] or y >= lines.shape[1]:
+            return
         
         if (np.array_equal(color_rgb[x,y,:], np.array(self.color[0:3])) and color_alpha[x,y] == self.color[3]) or lines[x,y] == 255:
             return # we never flood the lines themselves - they keep the PEN color in a separate layer;
@@ -683,6 +686,12 @@ def skeleton_to_distances(skeleton, x, y):
     yg, xg = np.meshgrid(np.arange(height), np.arange(width))
     dist = np.sqrt((xg - x)**2 + (yg - y)**2)
 
+    # look at points around the point on the skeleton closest to the selected point
+    # (and not around the selected point itself since nothing could be close enough to it)
+    closest = np.argmin(dist[skeleton])
+    x,y = xg[skeleton].flat[closest],yg[skeleton].flat[closest]
+
+    dist = np.sqrt((xg - x)**2 + (yg - y)**2)
     skx, sky = np.where(skeleton & (dist < 200))
     if len(skx) == 0:
         return np.ones((width, height), int) * NO_PATH_DIST, NO_PATH_DIST
@@ -749,9 +758,16 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
     yg, xg = np.meshgrid(np.arange(flood_mask.shape[1]), np.arange(flood_mask.shape[0]))
 
     # Compute distance from each point to the specified center
-    dist = np.sqrt((xg - x)**2 + (yg - y)**2)
     d, maxdist = skeleton_to_distances(skeleton, x, y)
-    d = (d == NO_PATH_DIST)*maxdist + (d != NO_PATH_DIST)*d # replace NO_PATH_DIST with maxdist
+    if maxdist != NO_PATH_DIST:
+        d = (d == NO_PATH_DIST)*maxdist + (d != NO_PATH_DIST)*d # replace NO_PATH_DIST with maxdist
+    else: # if all the pixels are far from clicked coordinate, make the mask bright instead of dim,
+        # otherwise it might look like "the flashlight isn't working"
+        #
+        # note that this case shouldn't happen because we are highlighting points around the closest
+        # point on the skeleton to the clocked coordinate and not around the clicked coordinate itself
+        d = np.ones(lines.shape, int)
+        maxdist = 10
     outer_d = -grey_dilation(-d, 3)
     inner = (255,255,255)
     outer = [255-ch for ch in color[x,y]]
@@ -773,6 +789,8 @@ class FlashlightTool(Button):
         y -= layout.drawing_area().ymargin
         color = pygame.surfarray.pixels3d(movie.curr_frame().surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
+        if x >= color.shape[0] or y >= color.shape[1]:
+            return
         fading_mask = skeletonize_color_based_on_lines(color, lines, x, y)
         if not fading_mask:
             return
