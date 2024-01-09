@@ -2167,7 +2167,7 @@ def toggle_loop_mode():
     timeline_area.loop_mode = not timeline_area.loop_mode
 
 def toggle_frame_hold():
-    if movie.pos != 0:
+    if movie.pos != 0 and not curr_layer_locked():
         movie.toggle_hold()
         history.append_item(ToggleHoldHistoryItem(movie.pos, movie.layer_pos))
 
