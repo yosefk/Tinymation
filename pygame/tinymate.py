@@ -246,8 +246,8 @@ def add_circle(image, radius, color=(255,0,0,128), outline_color=(0,0,0,128)):
     result.blit(image, (radius, 0))
     return result
 
-pencil_cursor = load_cursor('pencil.png')
-pencil_cursor = (pencil_cursor[0], pg.image.load('pencil-tool.png'))
+pencil_cursor = load_cursor('pen.png')
+pencil_cursor = (pencil_cursor[0], pg.image.load('pen-tool.png'))
 eraser_cursor = load_cursor('eraser.png')
 eraser_cursor = (eraser_cursor[0], pg.image.load('eraser-tool.png'))
 eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5), edit=lambda s: add_circle(s, MEDIUM_ERASER_WIDTH//2), hot_spot_offset=(MEDIUM_ERASER_WIDTH//2,-MEDIUM_ERASER_WIDTH//2))
@@ -2290,6 +2290,8 @@ class Palette:
             for col in range(self.columns):
                 sc = color_image(s, self.colors[row][col])
                 self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), color_image(paint_bucket_cursor[1], self.colors[row][col]))
+                if self.colors[row][col][-1] == 0: # water tool
+                    self.cursors[row][col] = (self.cursors[row][col][0], scale_image(pg.image.load('water-tool.png'), self.cursors[row][col][1].get_width()))
 
 
 palette = Palette('palette.png')
