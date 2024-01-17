@@ -457,14 +457,14 @@ class HistoryItem:
 
 class HistoryItemSet:
     def __init__(self, items):
-        self.items = items
+        self.items = [item for item in items if item is not None]
     def nop(self):
         for item in self.items:
             if not item.nop():
                 return False
         return True
     def undo(self):
-        return HistoryItemSet([item.undo() for item in self.items])
+        return HistoryItemSet(list(reversed([item.undo() for item in self.items])))
     def optimize(self):
         for item in self.items:
             item.optimize()
@@ -535,6 +535,7 @@ class PenTool(Button):
 
         prev_history_item = None
         line_options = drawLines(frame.get_width(), frame.get_height(), self.points, self.width, suggest_options=not self.eraser, existing_lines=lines)
+        items = []
         for new_lines in line_options:
             history_item = HistoryItem('lines')
             if prev_history_item:
@@ -553,9 +554,11 @@ class PenTool(Button):
                 history_item = HistoryItemSet([history_item, color_history_item])
 
             history_item.optimize()
-            history.append_item(history_item)
+            items.append(history_item)
             if not prev_history_item:
                 prev_history_item = history_item
+
+        history.append_suggestions(items)
         
         if len(line_options)>1:
             if self.suggestion_mask is None:
@@ -2411,14 +2414,38 @@ class History:
         self.undo = []
         self.redo = []
         layout.drawing_area().fading_mask = None
+        self.suggestions = None
 
     def __del__(self):
         for op in self.undo + self.redo:
             History.byte_size -= byte_size(op)
 
+    def _merge_prev_suggestions(self):
+        if self.suggestions: # merge them into one
+            s = self.suggestions
+            self.suggestions = None
+            self.append_item(HistoryItemSet(list(reversed(s))))
+
+    def append_suggestions(self, items):
+        '''"suggestions" are multiple items taking us from a new state B to the old state A,
+        for 2 suggestions - thru a single intermediate state S: B -> S -> A.
+
+        there's a single opportunity to "accept" a suggestion by pressing 'undo' right after
+        the suggestions were "made" by a call to append_suggestions(). in this case the history
+        will have an item for B -> S and another one for S -> A. otherwise, the suggestions
+        will be "merged" into a single B -> A HistoryItemSet (when new items or suggestions 
+        are appended.)'''
+        self._merge_prev_suggestions()
+        if len(items) == 1:
+            self.append_item(items[0])
+        else:
+            self.suggestions = items
+
     def append_item(self, item):
         if nop(item):
             return
+
+        self._merge_prev_suggestions()
 
         self.undo.append(item)
         History.byte_size += byte_size(item) - sum([byte_size(op) for op in self.redo])
@@ -2430,6 +2457,12 @@ class History:
         layout.drawing_area().fading_mask = None # new operations invalidate old skeletons
 
     def undo_item(self):
+        if self.suggestions:
+            s = self.suggestions
+            self.suggestions = None
+            for item in s:
+                self.append_item(item)
+
         if self.undo:
             last_op = self.undo[-1]
             redo = last_op.undo()
