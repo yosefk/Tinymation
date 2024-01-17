@@ -116,6 +116,15 @@ def bspline_interp(points, suggest_options, existing_lines):
     line_alphas = np.zeros(len(ix), int)
     line_alphas[within_bounds] = existing_lines[ix[within_bounds], iy[within_bounds]]
     intersections = np.where(line_alphas == 255)[0]
+
+    def find_intersection_point(start, step):
+        indexes = [intersections[start]]
+        pos = start+step
+        while pos < len(intersections) and pos >= 0 and abs(intersections[pos]-indexes[-1]) == 1:
+            indexes.append(intersections[pos])
+            pos += step
+        return indexes[-1] #sum(indexes)/len(indexes)
+
     if len(intersections) > 0:
         len_first = intersections[0]
         len_last = len(ix) - intersections[-1]
@@ -127,7 +136,10 @@ def bspline_interp(points, suggest_options, existing_lines):
 
         step=(u[-1]-u[0])/curve_length
 
-        new_points = splev(np.arange(step*(intersections[0]+1) if first_short else u[0], step*(intersections[-1]) if last_short else u[-1], step), tck)
+        first_intersection = find_intersection_point(0, 1)
+        last_intersection = find_intersection_point(len(intersections)-1, -1)
+        uvals = np.arange(first_intersection if first_short else 0, (last_intersection if last_short else len(ix))+1, 1)*step
+        new_points = splev(uvals, tck)
         return [new_points] + results
 
     # check if we'd like to attempt to close the line
@@ -137,15 +149,8 @@ def bspline_interp(points, suggest_options, existing_lines):
     make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
 
     if make_closed:
-        orig_len = len(x)
-        def half(ls):
-            ls = list(ls)
-            return ls[:-len(ls)//2]
-        cx = np.array(list(x)+half([xi+0.001 for xi in x]))
-        cy = np.array(list(y)+half([yi+0.001 for yi in y]))
-
-        ctck, cu = splprep([cx, cy], s=len(cx)/5)
-        add_result(ctck, cu[orig_len//2-1], cu[-1])
+        tck, u = splprep([x, y], s=len(x)/5, per=True)
+        add_result(tck, u[0], u[-1])
         return reversed(results)
 
     return results
