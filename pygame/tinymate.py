@@ -22,10 +22,15 @@ from skimage.morphology import flood_fill, binary_dilation, skeletonize
 from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closing
 pg = pygame
 
+#screen = pygame.display.set_mode((800, 350*2), pygame.RESIZABLE)
+#screen = pygame.display.set_mode((350, 800), pygame.RESIZABLE)
+#screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
 screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
 pygame.display.set_caption("Tinymate")
 #screen = pygame.display.set_mode((500, 500))
 
+IWIDTH = 1920
+IHEIGHT = 1080
 FRAME_RATE = 12
 FADING_RATE = 3
 PEN = (20, 20, 20)
@@ -219,9 +224,12 @@ def drawLine(screen, pos1, pos2, color, width):
 def make_surface(width, height):
     return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
 
-def scale_image(surface, width, height=None):
+def scale_image(surface, width=None, height=None):
+    assert width or height
     if not height:
         height = int(surface.get_height() * width / surface.get_width())
+    if not width:
+        width = int(surface.get_width() * height / surface.get_height())
     return pg.transform.smoothscale(surface, (width, height))
 
 def minmax(v, minv, maxv):
@@ -369,7 +377,6 @@ class Cache:
                 return True
         return False
     def collect_garbage(self):
-        tdiff()
         orig = len(self.key2value)
         orig_size = self.cache_size
         for key, value in list(self.key2value.items()):
@@ -477,17 +484,26 @@ class HistoryItemSet:
     def byte_size(self):
         return sum([item.byte_size() for item in self.items])
 
+def scale_and_preserve_aspect_ratio(w, h, width, height):
+    if width/height > w/h:
+        scaled_width = w*height/h
+        scaled_height = h*scaled_width/w
+    else:
+        scaled_height = h*width/w
+        scaled_width = w*scaled_height/h
+    return scaled_width, scaled_height
+
 class Button:
     def __init__(self):
         self.button_surface = None
     def draw(self, rect, cursor_surface):
         left, bottom, width, height = rect
         _, _, w, h = cursor_surface.get_rect()
-        scaled_width = w*height/h
+        scaled_width, scaled_height = scale_and_preserve_aspect_ratio(w, h, width, height)
         if not self.button_surface:
-            surface = scale_image(cursor_surface, scaled_width, height)
+            surface = scale_image(cursor_surface, scaled_width, scaled_height)
             self.button_surface = surface
-        screen.blit(self.button_surface, (left+width/2-scaled_width/2, bottom), (0, 0, scaled_width, height))
+        screen.blit(self.button_surface, (left+(width-scaled_width)/2, bottom+height-scaled_height))
 
 locked_image = pg.image.load('locked.png')
 invisible_image = pg.image.load('eye_shut.png')
@@ -498,7 +514,7 @@ def curr_layer_locked():
         fading_mask = layout.drawing_area().new_frame()
         fading_mask.blit(reason_image, ((fading_mask.get_width()-reason_image.get_width())//2, (fading_mask.get_height()-reason_image.get_height())//2))
         fading_mask.set_alpha(192)
-        layout.drawing_area().fading_mask = fading_mask
+        layout.drawing_area().set_fading_mask(fading_mask)
         layout.drawing_area().fade_per_frame = 192/(FADING_RATE*3)
     return effectively_locked
 
@@ -533,13 +549,15 @@ class PenTool(Button):
             return
         self.lines_array = None
         drawing_area = layout.drawing_area()
-        self.points.append((x-drawing_area.xmargin,y-drawing_area.ymargin))
+        cx, cy = drawing_area.xy2frame(x, y)
+        self.points.append((cx,cy))
         self.prev_drawn = None
         frame = movie.edit_curr_frame().surf_by_id('lines')
         lines = pygame.surfarray.pixels_alpha(frame)
 
         prev_history_item = None
-        line_options = drawLines(frame.get_width(), frame.get_height(), self.points, self.width, suggest_options=not self.eraser, existing_lines=lines)
+        line_width = self.width * (1 if self.width == WIDTH else drawing_area.xscale)
+        line_options = drawLines(frame.get_width(), frame.get_height(), self.points, line_width, suggest_options=not self.eraser, existing_lines=lines)
         items = []
         for new_lines in line_options:
             history_item = HistoryItem('lines')
@@ -555,7 +573,7 @@ class PenTool(Button):
                 color = movie.edit_curr_frame().surf_by_id('color')
                 color_rgb = pg.surfarray.pixels3d(color)
                 color_alpha = pg.surfarray.pixels_alpha(color)
-                flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x-drawing_area.xmargin, y-drawing_area.ymargin, self.bucket_color if self.bucket_color else BACKGROUND+(0,))
+                flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, round(cx), round(cy), self.bucket_color if self.bucket_color else BACKGROUND+(0,))
                 history_item = HistoryItemSet([history_item, color_history_item])
 
             history_item.optimize()
@@ -568,12 +586,12 @@ class PenTool(Button):
         if len(line_options)>1:
             if self.suggestion_mask is None:
                 left, bottom, width, height = drawing_area.rect
-                self.suggestion_mask = pg.Surface((width-drawing_area.xmargin*2, height-drawing_area.ymargin*2), pg.SRCALPHA)
+                self.suggestion_mask = pg.Surface((IWIDTH, IHEIGHT), pg.SRCALPHA)
                 self.suggestion_mask.fill((0,255,0))
             alt_option = line_options[-2]
             pg.surfarray.pixels_alpha(self.suggestion_mask)[:] = 255-alt_option
             self.suggestion_mask.set_alpha(10)
-            drawing_area.fading_mask = self.suggestion_mask
+            drawing_area.set_fading_mask(self.suggestion_mask)
             class Fading:
                 def __init__(self):
                     self.i = 0
@@ -591,10 +609,11 @@ class PenTool(Button):
         if curr_layer_locked():
             return
         drawing_area = layout.drawing_area()
-        cx = x-drawing_area.xmargin
-        cy = y-drawing_area.ymargin
-        if self.eraser and self.bucket_color is None and self.lines_array[cx,cy] != 255:
-            self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((cx,cy))
+        cx, cy = drawing_area.xy2frame(x, y)
+        if self.eraser and self.bucket_color is None:
+            nx, ny = round(cx), round(cy)
+            if nx>=0 and ny>=0 and nx<self.lines_array.shape[0] and ny<self.lines_array.shape[1] and self.lines_array[nx,ny] == 0:
+                self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((cx,cy))
         self.points.append((cx,cy))
         color = self.color if not self.eraser else (self.bucket_color if self.bucket_color else (255,255,255,0))
         expose_other_layers = self.eraser and color[3]==0
@@ -658,14 +677,14 @@ class PaintBucketTool(Button):
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
             return
-        x -= layout.drawing_area().xmargin
-        y -= layout.drawing_area().ymargin
+        x, y = layout.drawing_area().xy2frame(x,y)
+        x, y = round(x), round(y)
         color_surface = movie.edit_curr_frame().surf_by_id('color')
         color_rgb = pg.surfarray.pixels3d(color_surface)
         color_alpha = pg.surfarray.pixels_alpha(color_surface)
         lines = pygame.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
 
-        if x >= lines.shape[0] or y >= lines.shape[1]:
+        if x < 0 or y < 0 or x >= lines.shape[0] or y >= lines.shape[1]:
             return
         
         if (np.array_equal(color_rgb[x,y,:], np.array(self.color[0:3])) and color_alpha[x,y] == self.color[3]) or lines[x,y] == 255:
@@ -793,8 +812,8 @@ class FlashlightTool(Button):
     def __init__(self):
         Button.__init__(self)
     def on_mouse_down(self, x, y):
-        x -= layout.drawing_area().xmargin
-        y -= layout.drawing_area().ymargin
+        x, y = layout.drawing_area().xy2frame(x,y)
+        x, y = round(x), round(y)
         color = pygame.surfarray.pixels3d(movie.curr_frame().surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
         if x >= color.shape[0] or y >= color.shape[1]:
@@ -803,7 +822,7 @@ class FlashlightTool(Button):
         if not fading_mask:
             return
         fading_mask.set_alpha(255)
-        layout.drawing_area().fading_mask = fading_mask
+        layout.drawing_area().set_fading_mask(fading_mask)
         layout.drawing_area().fade_per_frame = 255/(FADING_RATE*15)
     def on_mouse_up(self, x, y): pass
     def on_mouse_move(self, x, y): pass
@@ -840,6 +859,7 @@ class Layout:
         srect = (round(left*self.width), round(bottom*self.height), round(width*self.width), round(height*self.height))
         elem.rect = srect
         elem.subsurface = screen.subsurface(srect)
+        getattr(elem, 'init', lambda: None)()
         self.elems.append(elem)
 
     def draw(self):
@@ -920,8 +940,25 @@ class DrawingArea:
         self.fade_per_frame = 0
         self.last_update_time = 0
         self.ymargin = WIDTH * 3
-        self.xmargin = round(self.ymargin * (screen.get_width() / screen.get_height()))
+        self.xmargin = WIDTH * 3
+        self.render_surface = None
+        self.iwidth = 0
+        self.iheight = 0
+    def _internal_layout(self):
+        if self.iwidth and self.iheight:
+            return
+        left, bottom, width, height = self.rect
+        self.iwidth, self.iheight = scale_and_preserve_aspect_ratio(IWIDTH, IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
+        self.xmargin = round((width - self.iwidth)/2)
+        self.ymargin = round((height - self.iheight)/2)
+        self.xscale = IWIDTH/self.iwidth
+        self.yscale = IHEIGHT/self.iheight
+    def xy2frame(self, x, y):
+        return (x - self.xmargin)*self.xscale, (y - self.ymargin)*self.yscale
+    def scale(self, surface): return scale_image(surface, self.iwidth, self.iheight)
+    def set_fading_mask(self, fading_mask): self.fading_mask = self.scale(fading_mask)
     def draw(self):
+        self._internal_layout()
         left, bottom, width, height = self.rect
         if not layout.is_playing:
             pygame.draw.rect(self.subsurface, MARGIN, (0, 0, width, self.ymargin))
@@ -929,23 +966,21 @@ class DrawingArea:
             pygame.draw.rect(self.subsurface, MARGIN, (width-self.xmargin, 0, self.xmargin, height))
             pygame.draw.rect(self.subsurface, MARGIN, (0, height-self.ymargin, width, self.ymargin))
 
-        left += self.xmargin
-        bottom += self.ymargin
-
         pos = layout.playing_index if layout.is_playing else movie.pos
         highlight = not layout.is_playing and not movie.curr_layer().locked
-        screen.blit(movie.curr_bottom_layers_surface(pos, highlight=highlight), (left, bottom), (0, 0, width, height))
+        starting_point = (self.xmargin, self.ymargin)
+        self.subsurface.blit(movie.curr_bottom_layers_surface(pos, highlight=highlight), starting_point)
         if movie.layers[movie.layer_pos].visible:
             frame = movie.frame(pos).surface()
-            screen.blit(frame, (left, bottom), (0, 0, width, height))
-        screen.blit(movie.curr_top_layers_surface(pos, highlight=highlight), (left, bottom), (0, 0, width, height))
+            self.subsurface.blit(self.scale(frame), starting_point)
+        self.subsurface.blit(movie.curr_top_layers_surface(pos, highlight=highlight), starting_point)
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
             if mask:
-                screen.blit(mask, (left, bottom), (0, 0, width, height))
+                self.subsurface.blit(mask, starting_point)
             if self.fading_mask:
-                screen.blit(self.fading_mask, (left, bottom), (0, 0, width, height))
+                self.subsurface.blit(self.fading_mask, starting_point)
 
     def update_fading_mask(self):
         if not self.fading_mask:
@@ -982,9 +1017,8 @@ class DrawingArea:
         layout.tool.on_mouse_move(*self.fix_xy(x,y))
     def new_frame(self):
         _, _, width, height = self.rect
-        frame = pygame.Surface((width-self.xmargin*2, height-self.ymargin*2), pygame.SRCALPHA)
+        frame = pygame.Surface((IWIDTH, IHEIGHT), pygame.SRCALPHA)
         frame.fill(BACKGROUND)
-        pg.surfarray.pixels_alpha(frame)[:] = 0
         pg.surfarray.pixels_alpha(frame)[:] = 0
         return frame
 
@@ -1075,10 +1109,11 @@ class TimelineArea:
                 masks = []
                 for pos, color, transparency in self.light_table_positions():
                     masks.append(movie.get_mask(pos, color, transparency))
+                scale = layout.drawing_area().scale
                 if len(masks) == 0:
                     return None
                 elif len(masks) == 1:
-                    return masks[0]
+                    return scale(masks[0])
                 else:
                     mask = masks[0].copy()
                     alphas = []
@@ -1088,7 +1123,7 @@ class TimelineArea:
                     mask.blits([(m, (0, 0), (0, 0, mask.get_width(), mask.get_height())) for m in masks[1:]])
                     for m,a in zip(masks[1:],alphas):
                         m.set_alpha(a)
-                    return mask
+                    return scale(mask)
 
         return cache.fetch(CachedCombinedMask())
 
@@ -1253,32 +1288,37 @@ class TimelineArea:
             movie.seek_frame(new_pos)
 
 class LayersArea:
-    def __init__(self):
+    def init(self):
+        left, bottom, width, height = self.rect
+        max_height = height / MAX_LAYERS
+        max_width = IWIDTH * (max_height / IHEIGHT)
+        self.width = min(max_width, width)
+        image_height = int(self.width * IHEIGHT / IWIDTH)
+
         self.prevy = None
         self.color_images = {}
-        icon_size = int(screen.get_width() * 0.15*0.14)
-        self.eye_open = scale_image(pg.image.load('eye_open.png'), icon_size)
-        self.eye_shut = scale_image(pg.image.load('eye_shut.png'), icon_size)
-        self.light_on = scale_image(pg.image.load('light_on.png'), icon_size)
-        self.light_off = scale_image(pg.image.load('light_off.png'), icon_size)
-        self.locked = scale_image(pg.image.load('locked.png'), icon_size)
-        self.unlocked = scale_image(pg.image.load('unlocked.png'), icon_size)
+        icon_height = min(int(screen.get_width() * 0.15*0.14), image_height / 2)
+        self.eye_open = scale_image(pg.image.load('eye_open.png'), height=icon_height)
+        self.eye_shut = scale_image(pg.image.load('eye_shut.png'), height=icon_height)
+        self.light_on = scale_image(pg.image.load('light_on.png'), height=icon_height)
+        self.light_off = scale_image(pg.image.load('light_off.png'), height=icon_height)
+        self.locked = scale_image(pg.image.load('locked.png'), height=icon_height)
+        self.unlocked = scale_image(pg.image.load('unlocked.png'), height=icon_height)
         self.eye_boundaries = []
         self.lit_boundaries = []
         self.lock_boundaries = []
         self.thumbnail_height = 0
     
     def cached_image(self, layer_pos, layer):
-        left, bottom, width, height = self.rect
         class CachedLayerThumbnail(CachedItem):
             def __init__(s, color=None):
                 s.color = color
             def compute_key(s):
                 frame = layer.frame(movie.pos) # note that we compute the thumbnail even if the layer is invisible
-                return (frame.cache_id_version(),), ('single-layer-thumbnail', width, s.color)
+                return (frame.cache_id_version(),), ('single-layer-thumbnail', self.width, s.color)
             def compute_value(se):
                 if se.color is None:
-                    image = scale_image(movie._blit_layers([layer], movie.pos, include_invisible=True), width)
+                    image = scale_image(movie._blit_layers([layer], movie.pos, include_invisible=True), self.width)
                     self.thumbnail_height = image.get_height()
                     return image
                 image = cache.fetch(CachedLayerThumbnail()).copy()
@@ -1316,8 +1356,9 @@ class LayersArea:
         for layer_pos, layer in reversed(list(enumerate(movie.layers))):
             border = 1 + (layer_pos == movie.layer_pos)*2
             image = self.cached_image(layer_pos, layer)
-            screen.blit(image, (left, bottom), image.get_rect()) 
-            pygame.draw.rect(screen, PEN, (left, bottom, image.get_width(), image.get_height()), border)
+            image_left = left + (width - image.get_width())/2
+            screen.blit(image, (image_left, bottom), image.get_rect()) 
+            pygame.draw.rect(screen, PEN, (image_left, bottom, image.get_width(), image.get_height()), border)
 
             max_border = 3
             if len(movie.frames) > 1 and layer.visible and layout.timeline_area().combined_light_table_mask():
@@ -1518,7 +1559,7 @@ class ToolSelectionButton:
     def on_mouse_up(self,x,y): pass
     def on_mouse_move(self,x,y): pass
 
-class TogglePlaybackButton:
+class TogglePlaybackButton(Button):
     def __init__(self, play_icon, pause_icon):
         self.play = play_icon
         self.pause = pause_icon
@@ -1526,11 +1567,15 @@ class TogglePlaybackButton:
     def draw(self):
         left, bottom, width, height = self.rect
         if not self.scaled:
-            self.play = scale_image(self.play, width, height)
-            self.pause = scale_image(self.pause, width, height)
+            def scale(image):
+                scaled_width, scaled_height = scale_and_preserve_aspect_ratio(image.get_width(), image.get_height(), width, height)
+                return scale_image(image, scaled_width, scaled_height)
+            self.play = scale(self.play)
+            self.pause = scale(self.pause)
             self.scaled = True
             
-        screen.blit(self.pause if layout.is_playing else self.play, (left, bottom), (0, 0, width, height))
+        icon = self.pause if layout.is_playing else self.play
+        screen.blit(icon, (left + (width-icon.get_width())/2, bottom + height - icon.get_height()))
     def on_mouse_down(self,x,y):
         toggle_playing()
     def on_mouse_up(self,x,y): pass
@@ -1778,9 +1823,8 @@ class Movie:
         class CachedThumbnail(CachedItem):
             def compute_key(_): return self._visible_layers_id2version(self.layers, pos), ('thumbnail', width, height)
             def compute_value(_):
-                #print('value',pos,width,height,_.compute_key())
-                w = int(screen.get_width() * 0.15)
                 h = int(screen.get_height() * 0.15)
+                w = int(h * IWIDTH / IHEIGHT)
                 if w == width and h == height:
                     class CachedBottomThumbnail:
                         def compute_key(_): return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('thumbnail', width, height)
@@ -1978,11 +2022,12 @@ class Movie:
                 layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True)
                 s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
                 s.fill(BACKGROUND)
+                scale = layout.drawing_area().scale
                 if self.layer_pos == 0:
-                    return s
+                    return scale(s)
                 if not highlight:
                     s.blit(layers, (0, 0))
-                    return s
+                    return scale(s)
                 layers.set_alpha(128)
                 below_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
                 below_image.set_alpha(128)
@@ -1993,7 +2038,7 @@ class Movie:
                 self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
 
-                return s
+                return scale(s)
 
         return cache.fetch(CachedBottomLayers())
 
@@ -2003,8 +2048,9 @@ class Movie:
                 return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), 'blit-top-layers' if not highlight else 'top-layers-highlighted'
             def compute_value(_):
                 layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True)
+                scale = layout.drawing_area().scale
                 if not highlight or self.layer_pos == len(self.layers)-1:
-                    return layers
+                    return scale(layers)
                 layers.set_alpha(128)
                 s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
                 s.fill(BACKGROUND)
@@ -2018,7 +2064,7 @@ class Movie:
                 pg.surfarray.pixels_alpha(s)[:] = alpha
                 s.set_alpha(192)
 
-                return s
+                return scale(s)
 
         return cache.fetch(CachedTopLayers())
 
@@ -2360,8 +2406,6 @@ def init_layout_rest():
         for col,x in enumerate(np.arange(0,0.15-0.001,color_w)):            
             if row == len(palette.colors)-1 and col == 2:
                 continue
-            #rgb = pygame.Color(0)
-            #rgb.hsla = (i*10 % 360, 50, 50, 100)
             tool = Tool(PaintBucketTool(palette.colors[len(palette.colors)-row-1][col]), palette.cursors[len(palette.colors)-row-1][col], '')
             layout.add((x,y,color_w,color_w), ToolSelectionButton(tool))
             i += 1
@@ -2369,15 +2413,16 @@ def init_layout_rest():
     funcs_width = [
         ('insert-frame', 0.33),
         ('remove-frame', 0.33),
+        ('play', 0.33)
     ]
     offset = 0
     for func, width in funcs_width:
-        #f, _, icon = FUNCTIONS[func]
-        layout.add((offset*0.15,0.15,width*0.15, 0.1), ToolSelectionButton(TOOLS[func]))
+        if func == 'play':
+            button = TogglePlaybackButton(pg.image.load('play.png'), pg.image.load('pause.png'))
+        else:
+            button = ToolSelectionButton(TOOLS[func])
+        layout.add((offset*0.15,0.15,width*0.15, 0.1), button)
         offset += width
-
-    width = 0.05
-    layout.add((0.1,0.15 + 0.1/2 - layout.aspect_ratio()*width/2,width, layout.aspect_ratio()*width), TogglePlaybackButton(pg.image.load('play.png'), pg.image.load('pause.png')))
 
     layout.draw()
 
@@ -2514,6 +2559,9 @@ keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to a
 # upon random banging on the keyboard
 
 set_tool(TOOLS['pencil'])
+
+layout.draw()
+pygame.display.flip()
 
 while not escape: 
  try:
