@@ -21,6 +21,7 @@ from scipy.interpolate import splprep, splev
 from skimage.morphology import flood_fill, binary_dilation, skeletonize
 from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closing
 pg = pygame
+pg.init()
 
 #screen = pygame.display.set_mode((800, 350*2), pygame.RESIZABLE)
 #screen = pygame.display.set_mode((350, 800), pygame.RESIZABLE)
@@ -2573,6 +2574,22 @@ class History:
             self.undo.append(undo)
             self.redo.pop()
 
+    def clear(self):
+        History.byte_size -= sum([byte_size(op) for op in self.undo+self.redo])
+        self.undo = []
+        self.redo = []
+        self.suggestions = None
+
+def clear_history():
+    history.clear()
+    drawing_area = layout.drawing_area()
+    fading_mask = drawing_area.new_frame()
+    text_surface = font.render("Current Clip's\nUndo/Redo History\nDeleted!", True, (255, 0, 0), (255, 255, 255))
+    fading_mask.blit(text_surface, ((fading_mask.get_width()-text_surface.get_width())/2, (fading_mask.get_height()-text_surface.get_height())/2))
+    fading_mask.set_alpha(255)
+    drawing_area.set_fading_mask(fading_mask)
+    drawing_area.fade_per_frame = 255/(FADING_RATE*10)
+
 history = History()
 
 escape = False
@@ -2601,10 +2618,40 @@ interesting_events = [
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard
 
+def process_keydown_event(event):
+    # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
+    if event.key == ord(' '):
+        if pg.key.get_mods() & pg.KMOD_LCTRL:
+            history.redo_item()
+        else:
+            history.undo_item()
+
+    # LCtrl+LShift+Delete
+    if event.key == pg.K_DELETE and (pg.key.get_mods() & pg.KMOD_LCTRL) and (pg.key.get_mods() & pg.KMOD_LSHIFT):
+        clear_history()
+
+    # other keyboard shortcuts are enabled/disabled by Ctrl-A
+    global keyboard_shortcuts_enabled
+
+    if keyboard_shortcuts_enabled:
+        for tool in TOOLS.values():
+            if event.key in [ord(c) for c in tool.chars]:
+                set_tool(tool)
+
+        for func, chars, _ in FUNCTIONS.values():
+            if event.key in [ord(c) for c in chars]:
+                func()
+                
+    if event.key == pygame.K_a and pygame.key.get_mods() & pygame.KMOD_CTRL:
+        keyboard_shortcuts_enabled = not keyboard_shortcuts_enabled
+        print('Ctrl-A pressed -','enabling' if keyboard_shortcuts_enabled else 'disabling','keyboard shortcuts')
+
 set_tool(TOOLS['pencil'])
 
 layout.draw()
 pygame.display.flip()
+
+font = pygame.font.Font(size=screen.get_height()//10)
 
 while not escape: 
  try:
@@ -2622,25 +2669,9 @@ while not escape:
 
         if layout.is_pressed:
             continue # ignore keystrokes (except ESC) when a mouse tool is being used
+
+        process_keydown_event(event)
         
-        if event.key == ord(' '):
-            if pg.key.get_mods() & pg.KMOD_LCTRL:
-                history.redo_item()
-            else:
-                history.undo_item()
-
-        if keyboard_shortcuts_enabled:
-          for tool in TOOLS.values():
-            if event.key in [ord(c) for c in tool.chars]:
-                set_tool(tool)
-
-          for func, chars, _ in FUNCTIONS.values():
-            if event.key in [ord(c) for c in chars]:
-                func()
-                
-        if event.key == pygame.K_a and pygame.key.get_mods() & pygame.KMOD_CTRL:
-            keyboard_shortcuts_enabled = not keyboard_shortcuts_enabled
-            print('Ctrl-A pressed -','enabling' if keyboard_shortcuts_enabled else 'disabling','keyboard shortcuts')
       else:
           layout.on_event(event)
 
