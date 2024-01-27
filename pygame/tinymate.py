@@ -1668,6 +1668,15 @@ class Frame:
         self.lines.fill(PEN)
         pygame.surfarray.pixels_alpha(self.lines)[:] = 0
 
+    def get_content(self): return self.color.copy(), self.lines.copy()
+    def set_content(self, content):
+        color, lines = content
+        self.color = color.copy()
+        self.lines = lines.copy()
+    def clear(self):
+        self.color = None
+        self.lines = None
+
     def increment_version(self):
         self._create_surfaces_if_needed()
         self.dirty = True
@@ -2618,17 +2627,56 @@ interesting_events = [
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard
 
+cut_frame_content = None
+
+def copy_frame():
+    global cut_frame_content
+    cut_frame_content = movie.curr_frame().get_content()
+
+def cut_frame():
+    history_item = HistoryItemSet([HistoryItem('color'), HistoryItem('lines')])
+
+    global cut_frame_content
+    frame = movie.edit_curr_frame()
+    cut_frame_content = frame.get_content()
+    frame.clear()
+
+    history_item.optimize()
+    history.append_item(history_item)
+
+def paste_frame():
+    if not cut_frame_content:
+        return
+
+    history_item = HistoryItemSet([HistoryItem('color'), HistoryItem('lines')])
+
+    movie.edit_curr_frame().set_content(cut_frame_content)
+
+    history_item.optimize()
+    history.append_item(history_item)
+
 def process_keydown_event(event):
+    ctrl = pg.key.get_mods() & pg.KMOD_CTRL
+    shift = pg.key.get_mods() & pg.KMOD_SHIFT
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
-    if event.key == ord(' '):
-        if pg.key.get_mods() & pg.KMOD_LCTRL:
+    if event.key == pg.K_SPACE:
+        if ctrl:
             history.redo_item()
         else:
             history.undo_item()
 
-    # LCtrl+LShift+Delete
-    if event.key == pg.K_DELETE and (pg.key.get_mods() & pg.KMOD_LCTRL) and (pg.key.get_mods() & pg.KMOD_LSHIFT):
+    # Ctrl+Shift+Delete
+    if event.key == pg.K_DELETE and ctrl and shift:
         clear_history()
+
+    # Ctrl-C/X/V
+    if ctrl:
+        if event.key == pg.K_c:
+            copy_frame()
+        elif event.key == pg.K_x:
+            cut_frame()
+        elif event.key == pg.K_v:
+            paste_frame()
 
     # other keyboard shortcuts are enabled/disabled by Ctrl-A
     global keyboard_shortcuts_enabled
@@ -2642,7 +2690,7 @@ def process_keydown_event(event):
             if event.key in [ord(c) for c in chars]:
                 func()
                 
-    if event.key == pygame.K_a and pygame.key.get_mods() & pygame.KMOD_CTRL:
+    if event.key == pygame.K_a and ctrl:
         keyboard_shortcuts_enabled = not keyboard_shortcuts_enabled
         print('Ctrl-A pressed -','enabling' if keyboard_shortcuts_enabled else 'disabling','keyboard shortcuts')
 
