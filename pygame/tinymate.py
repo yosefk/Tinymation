@@ -27,7 +27,6 @@ pg = pygame
 #screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
 screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
 pygame.display.set_caption("Tinymate")
-#screen = pygame.display.set_mode((500, 500))
 
 IWIDTH = 1920
 IHEIGHT = 1080
@@ -1023,12 +1022,56 @@ class DrawingArea:
         return frame
 
 class TimelineArea:
+    def _calc_factors(self):
+        # TODO: handle layout so narrow that you have to scale the middle thumbnail
+        factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.15]
+        scale = 1
+        mid_scale = 1
+        step = 0.5
+        mid_width = IWIDTH * screen.get_height() * 0.15 / IHEIGHT
+        def scaled_factors(scale):
+            return [min(1, max(0.15, f*scale)) for f in factors]
+        def slack(scale):
+            total_width = mid_width*mid_scale + 2 * sum([int(mid_width)*f for f in scaled_factors(scale)])
+            return screen.get_width() - total_width
+        prev_slack = None
+        iteration = 0
+        while iteration < 1000:
+            opt = [scale+step, scale-step, scale+step/2, scale-step/2]
+            slacks = [abs(slack(s)) for s in opt]
+            best_slack = min(slacks)
+            best_opt = opt[slacks.index(best_slack)]
+
+            step = best_opt - scale
+            scale = best_opt
+
+            curr_slack = slack(scale)
+            def nice_fit(): return curr_slack >= 0 and curr_slack < 2
+            if nice_fit():
+                break
+            
+            sf = scaled_factors(scale)
+            if min(sf) == 1: # grown as big as we will allow?
+                break
+
+            if max(sf) == 0.15: # grown as small as we will allow? try shrinking the middle thumbnail
+                while not nice_fit() and mid_scale > 0.15:
+                    mid_scale = max(scale-0.1, 0.15)
+                    curr_slack = slack(scale)
+                break # can't do much if we still don't have a nice fit
+
+            iteration += 1
+            
+        self.factors = scaled_factors(scale)
+        self.mid_factor = mid_scale
+
     def __init__(self):
         # stuff for drawing the timeline
         self.frame_boundaries = []
         self.eye_boundaries = []
         self.prevx = None
-        self.factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.15]
+
+        self._calc_factors()
 
         eye_icon_size = int(screen.get_width() * 0.15*0.14)
         self.eye_open = scale_image(pg.image.load('light_on.png'), eye_icon_size)
@@ -1164,7 +1207,7 @@ class TimelineArea:
             return int((frame_width * height // frame_height) * factor)
 
         # current frame
-        curr_frame_width = thumb_width(1)
+        curr_frame_width = thumb_width(self.mid_factor)
         centerx = (left+width)/2
         draw_frame(movie.pos, 0, centerx - curr_frame_width/2, curr_frame_width)
 
@@ -1462,7 +1505,7 @@ class MovieListArea:
     def reload(self):
         self.clips = []
         self.images = []
-        single_image_width = screen.get_width() * MOVIES_Y_SHARE
+        single_image_height = screen.get_height() * MOVIES_Y_SHARE
         for clipdir in get_clip_dirs():
             fulldir = os.path.join(WD, clipdir)
             with open(os.path.join(fulldir, CLIP_FILE), 'r') as clipfile:
@@ -1470,7 +1513,7 @@ class MovieListArea:
             curr_frame = clip['frame_pos']
             frame_file = os.path.join(fulldir, FRAME_FMT % curr_frame)
             image = pg.image.load(frame_file) if os.path.exists(frame_file) else layout.drawing_area().new_frame()
-            self.images.append(scale_image(image, single_image_width))
+            self.images.append(scale_image(image, height=single_image_height))
             self.clips.append(fulldir)
         self.clip_pos = 0 
     def draw(self):
@@ -2069,7 +2112,7 @@ class Movie:
         return cache.fetch(CachedTopLayers())
 
     def save_gif_and_pngs(self):
-        with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, mode='I') as writer:
+        with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, loop=0) as writer:
             for i in range(len(self.frames)):
                 frame = self._blit_layers(self.layers, i)
                 pixels = np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2])
