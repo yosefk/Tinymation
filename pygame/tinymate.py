@@ -1,18 +1,32 @@
+import imageio
+import imageio.v3
+import numpy as np
+import sys
+import os
+
+def compress_and_remove(filepairs):
+    for infile, outfile in zip(filepairs[0::2], filepairs[1::2]):
+        pixels = imageio.v3.imread(infile)
+        imageio.imwrite(outfile, pixels)
+        if np.array_equal(imageio.v3.imread(outfile), pixels):
+            os.unlink(infile)
+
+if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
+    compress_and_remove(sys.argv[2:])
+    exit()
+
+import subprocess
 import pygame
 import pygame.gfxdraw
-import imageio
 import winpath
 import collections
 import uuid
 import math
 import datetime
-import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('agg')  # turn off interactive backend
 import io
-import sys
-import os
 import json
 import shutil
 from scipy.interpolate import splprep, splev
@@ -1634,7 +1648,11 @@ class Frame:
         if frame_id is not None: # id - load the surfaces from the directory
             self.id = frame_id
             for surf_id in self.surf_ids():
-                setattr(self,surf_id,pygame.image.load(self.filename(surf_id)) if os.path.exists(self.filename(surf_id)) else None)
+                setattr(self,surf_id,None)
+                for fname in self.filenames_png_bmp(surf_id):
+                    if os.path.exists(fname):
+                        setattr(self,surf_id,pygame.image.load(fname))
+                        break
         else:
             self.id = str(uuid.uuid1())
             self.color = None
@@ -1654,6 +1672,8 @@ class Frame:
         self.hold = False
 
         cache.update_id(self.cache_id(), self.version)
+
+        self.compression_subprocess = None
 
     def __del__(self):
         cache.delete_id(self.cache_id())
@@ -1699,21 +1719,32 @@ class Frame:
         s.blit(self.lines, (0, 0), (0, 0, s.get_width(), s.get_height()))
         return s
 
-    def filename(self,surface_id):
-        fname = f'{self.id}-{surface_id}.bmp'
+    def filenames_png_bmp(self,surface_id):
+        fname = f'{self.id}-{surface_id}.'
         if self.layer_id:
             fname = os.path.join(f'layer-{self.layer_id}', fname)
-        return os.path.join(self.dir, fname)
+        fname = os.path.join(self.dir, fname)
+        return fname+'png', fname+'bmp'
+    def wait_for_compression_to_finish(self):
+        if self.compression_subprocess:
+            self.compression_subprocess.wait()
+        self.compression_subprocess = None
     def save(self):
         if self.dirty:
+            self.wait_for_compression_to_finish()
+            fnames = []
             for surf_id in self.surf_ids():
-                pygame.image.save(self.surf_by_id(surf_id), self.filename(surf_id))
+                fname_png, fname_bmp = self.filenames_png_bmp(surf_id)
+                pygame.image.save(self.surf_by_id(surf_id), fname_bmp)
+                fnames += [fname_bmp, fname_png]
+            self.compression_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'compress-and-remove']+fnames)
             self.dirty = False
     def delete(self):
+        self.wait_for_compression_to_finish()
         for surf_id in self.surf_ids():
-            fname = self.filename(surf_id)
-            if os.path.exists(fname):
-                os.unlink(fname)
+            for fname in self.filenames_png_bmp(surf_id):
+                if os.path.exists(fname):
+                    os.unlink(fname)
 
     def size(self):
         # a frame is 2 RGBA surfaces
@@ -1752,7 +1783,10 @@ class Layer:
     def subdir(self): return os.path.join(self.dir, f'layer-{self.id}')
     def deleted_subdir(self): return self.subdir() + '-deleted'
 
-    def delete(self): os.rename(self.subdir(), self.deleted_subdir())
+    def delete(self):
+        for frame in self.frames:
+            frame.wait_for_compression_to_finish()
+        os.rename(self.subdir(), self.deleted_subdir())
     def undelete(self): os.rename(self.deleted_subdir(), self.subdir())
 
     def toggle_locked(self): self.locked = not self.locked
@@ -2146,6 +2180,9 @@ class Movie:
         self.save_meta()
         self.save_gif_and_pngs()
         self.garbage_collect_layer_dirs()
+        for layer in self.layers:
+            for frame in layer.frames:
+                frame.wait_for_compression_to_finish()
 
 class SeekFrameHistoryItem:
     def __init__(self, pos, layer_pos):
