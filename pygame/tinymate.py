@@ -54,8 +54,8 @@ MARGIN = (220, 215, 190)
 UNDRAWABLE = (220-20, 215-20, 190-20)
 SELECTED = (220-80, 215-80, 190-80)
 UNUSED = SELECTED
-LAYERS_BELOW = (0,128,255)
-LAYERS_ABOVE = (255,128,0)
+LAYERS_BELOW = (128,192,255)
+LAYERS_ABOVE = (255,192,0)
 WIDTH = 3 # the smallest width where you always have a pure pen color rendered along
 # the line path, making our naive flood fill work well...
 MEDIUM_ERASER_WIDTH = 5*WIDTH
@@ -1161,7 +1161,7 @@ class TimelineArea:
                 num = num_enabled_neg
                 curr_neg += 1
             brightness = int((200 * (num - curr - 1) / (num - 1)) + 55 if num > 1 else 255)
-            color = (0,0,brightness) if pos_dist < 0 else (0,int(brightness*0.5),0)
+            color = (brightness,0,0) if pos_dist < 0 else (0,int(brightness*0.7),0)
             transparency = 0.3
             yield (pos, color, transparency)
 
@@ -1394,11 +1394,10 @@ class LayersArea:
                 return (frame.cache_id_version(),), ('single-layer-thumbnail', self.width, s.color)
             def compute_value(se):
                 if se.color is None:
-                    image = scale_image(movie._blit_layers([layer], movie.pos, include_invisible=True), self.width)
-                    return image
+                    return movie.get_thumbnail(movie.pos, self.width, self.thumbnail_height, transparent_single_layer=layer_pos)
                 image = cache.fetch(CachedLayerThumbnail()).copy()
+                si = pg.Surface((image.get_width(), image.get_height()), pg.SRCALPHA)
                 s = pg.Surface((image.get_width(), image.get_height()), pg.SRCALPHA)
-                s.fill(BACKGROUND)
                 if not self.color_images:
                     above_image = pg.Surface((image.get_width(), image.get_height()))
                     above_image.set_alpha(128)
@@ -1407,9 +1406,11 @@ class LayersArea:
                     below_image.set_alpha(128)
                     below_image.fill(LAYERS_BELOW)
                     self.color_images = {LAYERS_ABOVE: above_image, LAYERS_BELOW: below_image}
-                image.blit(self.color_images[se.color], (0,0))
-                image.set_alpha(128)
-                s.blit(image, (0,0))
+                si.fill(BACKGROUND)
+                si.blit(image, (0,0))
+                si.blit(self.color_images[se.color], (0,0))
+                si.set_alpha(128)
+                s.blit(si, (0,0))
                 return s
 
         if layer_pos > movie.layer_pos:
@@ -1431,6 +1432,7 @@ class LayersArea:
             border = 1 + (layer_pos == movie.layer_pos)*2
             image = self.cached_image(layer_pos, layer)
             image_left = left + (width - image.get_width())/2
+            pygame.draw.rect(screen, BACKGROUND, (image_left, bottom, image.get_width(), image.get_height()))
             screen.blit(image, (image_left, bottom), image.get_rect()) 
             pygame.draw.rect(screen, PEN, (image_left, bottom, image.get_width(), image.get_height()), border)
 
@@ -1738,7 +1740,7 @@ class Frame:
         if self.empty():
             return empty_frame().color
         s = self.color.copy()
-        s.blit(self.lines, (0, 0), (0, 0, s.get_width(), s.get_height()))
+        s.blit(self.lines, (0, 0))
         return s
 
     def filenames_png_bmp(self,surface_id):
@@ -1966,27 +1968,33 @@ class Movie:
             return CachedMask().compute_key()
         return cache.fetch(CachedMask())
 
-    def _visible_layers_id2version(self, layers, pos):
-        frames = [layer.frame(pos) for layer in layers if layer.visible]
+    def _visible_layers_id2version(self, layers, pos, include_invisible=False):
+        frames = [layer.frame(pos) for layer in layers if layer.visible or include_invisible]
         return tuple([frame.cache_id_version() for frame in frames if not frame.empty()])
 
-    def get_thumbnail(self, pos, width, height):
+    def get_thumbnail(self, pos, width, height, transparent_single_layer=-1):
+        trans_single = transparent_single_layer >= 0
+        layer_pos = self.layer_pos if not trans_single else transparent_single_layer
+        def id2version(layers): return self._visible_layers_id2version(layers, pos, include_invisible=trans_single)
 
         class CachedThumbnail(CachedItem):
-            def compute_key(_): return self._visible_layers_id2version(self.layers, pos), ('thumbnail', width, height)
+            def compute_key(_): return id2version(self.layers if not trans_single else [self.layers[layer_pos]]), ('thumbnail' if not trans_single else 'transparent-thumbnail', width, height)
             def compute_value(_):
                 h = int(screen.get_height() * 0.15)
                 w = int(h * IWIDTH / IHEIGHT)
                 if w == width and h == height:
                     class CachedBottomThumbnail:
-                        def compute_key(_): return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('thumbnail', width, height)
+                        def compute_key(_): return id2version(self.layers[:layer_pos]), ('thumbnail', width, height)
                         def compute_value(_): return scale_image(self.curr_bottom_layers_surface(pos, highlight=False), width, height)
                     class CachedTopThumbnail: # top layers are transparent so it's a distinct cache category from normal "thumbnails"
-                        def compute_key(_): return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('transparent-thumbnail', width, height)
+                        def compute_key(_): return id2version(self.layers[layer_pos+1:]), ('transparent-thumbnail', width, height)
                         def compute_value(_): return scale_image(self.curr_top_layers_surface(pos, highlight=False), width, height)
                     class CachedMiddleThumbnail:
-                        def compute_key(_): return self._visible_layers_id2version([self.layers[self.layer_pos]], pos), ('transparent-thumbnail', width, height)
-                        def compute_value(_): return scale_image(self.frame(pos).surface(), width, height)
+                        def compute_key(_): return id2version([self.layers[layer_pos]]), ('transparent-thumbnail', width, height)
+                        def compute_value(_): return scale_image(self.layers[layer_pos].frame(pos).surface(), width, height)
+
+                    if trans_single:
+                        return cache.fetch(CachedMiddleThumbnail())
 
                     s = cache.fetch(CachedBottomThumbnail()).copy()
                     if self.layers[self.layer_pos].visible:
@@ -1994,7 +2002,7 @@ class Movie:
                     s.blit(cache.fetch(CachedTopThumbnail()), (0, 0))
                     return s
                 else:
-                    return scale_image(self.get_thumbnail(pos, w, h), width, height)
+                    return scale_image(self.get_thumbnail(pos, w, h, transparent_single_layer=transparent_single_layer), width, height)
 
         return cache.fetch(CachedThumbnail())
 
