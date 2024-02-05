@@ -1555,7 +1555,7 @@ class MovieListArea:
             border = 1 + first*2
             if first and pos == self.clip_pos:
                 try:
-                    image = movie.get_thumbnail(movie.pos, image.get_width(), image.get_height()) 
+                    image = movie.get_thumbnail(movie.pos, image.get_width(), image.get_height(), highlight=False) 
                     self.images[pos] = image # this keeps the image correct when scrolled out of clip_pos
                     # (we don't self.reload() upon scrolling so self.images can go stale when the current
                     # clip is modified)
@@ -1972,25 +1972,31 @@ class Movie:
         frames = [layer.frame(pos) for layer in layers if layer.visible or include_invisible]
         return tuple([frame.cache_id_version() for frame in frames if not frame.empty()])
 
-    def get_thumbnail(self, pos, width, height, transparent_single_layer=-1):
+    def get_thumbnail(self, pos, width, height, highlight=True, transparent_single_layer=-1):
         trans_single = transparent_single_layer >= 0
         layer_pos = self.layer_pos if not trans_single else transparent_single_layer
         def id2version(layers): return self._visible_layers_id2version(layers, pos, include_invisible=trans_single)
 
         class CachedThumbnail(CachedItem):
-            def compute_key(_): return id2version(self.layers if not trans_single else [self.layers[layer_pos]]), ('thumbnail' if not trans_single else 'transparent-thumbnail', width, height)
+            def compute_key(_):
+                if trans_single:
+                    return id2version([self.layers[layer_pos]]), ('transparent-thumbnail', width, height, 'no-highlight')
+                else:
+                    def layer_ids(layers): return tuple([layer.id for layer in layers if not layer.frame(pos).empty()])
+                    hl = ('highlight', layer_ids(self.layers[:layer_pos]), layer_ids([self.layers[layer_pos]]), layer_ids(self.layers[layer_pos+1:])) if highlight else 'no-highlight'
+                    return id2version(self.layers), ('thumbnail', width, height, hl)
             def compute_value(_):
                 h = int(screen.get_height() * 0.15)
                 w = int(h * IWIDTH / IHEIGHT)
                 if w == width and h == height:
                     class CachedBottomThumbnail:
-                        def compute_key(_): return id2version(self.layers[:layer_pos]), ('thumbnail', width, height)
-                        def compute_value(_): return scale_image(self.curr_bottom_layers_surface(pos, highlight=False), width, height)
+                        def compute_key(_): return id2version(self.layers[:layer_pos]), ('thumbnail', width, height, 'highlight-bottom' if highlight else 'no-highlight')
+                        def compute_value(_): return scale_image(self.curr_bottom_layers_surface(pos, highlight=highlight), width, height)
                     class CachedTopThumbnail: # top layers are transparent so it's a distinct cache category from normal "thumbnails"
-                        def compute_key(_): return id2version(self.layers[layer_pos+1:]), ('transparent-thumbnail', width, height)
-                        def compute_value(_): return scale_image(self.curr_top_layers_surface(pos, highlight=False), width, height)
+                        def compute_key(_): return id2version(self.layers[layer_pos+1:]), ('transparent-thumbnail', width, height, 'highlight-top' if highlight else 'no-highlight')
+                        def compute_value(_): return scale_image(self.curr_top_layers_surface(pos, highlight=highlight), width, height)
                     class CachedMiddleThumbnail:
-                        def compute_key(_): return id2version([self.layers[layer_pos]]), ('transparent-thumbnail', width, height)
+                        def compute_key(_): return id2version([self.layers[layer_pos]]), ('transparent-thumbnail', width, height, 'no-highlight')
                         def compute_value(_): return scale_image(self.layers[layer_pos].frame(pos).surface(), width, height)
 
                     if trans_single:
@@ -2002,7 +2008,7 @@ class Movie:
                     s.blit(cache.fetch(CachedTopThumbnail()), (0, 0))
                     return s
                 else:
-                    return scale_image(self.get_thumbnail(pos, w, h, transparent_single_layer=transparent_single_layer), width, height)
+                    return scale_image(self.get_thumbnail(pos, w, h, highlight=highlight, transparent_single_layer=transparent_single_layer), width, height)
 
         return cache.fetch(CachedThumbnail())
 
@@ -2897,7 +2903,8 @@ font = pygame.font.Font(size=screen.get_height()//10)
 while not escape: 
  try:
   for event in pygame.event.get():
-   #print(pg.event.event_name(event.type),tdiff(),event.type,pygame.key.get_mods())
+   #if event.type not in timer_events:
+   #   print(pg.event.event_name(event.type),tdiff(),event.type,pygame.key.get_mods())
 
    if event.type not in interesting_events:
        continue
