@@ -166,8 +166,7 @@ class Frame:
         self.layer_id = layer_id
         if frame_id is not None: # id - load the surfaces from the directory
             self.id = frame_id
-            for surf_id in self.surf_ids():
-                setattr(self,surf_id,None)
+            self.del_pixels()
             if read_pixels:
                 self.read_pixels()
         else:
@@ -197,11 +196,14 @@ class Frame:
 
     def read_pixels(self):
         for surf_id in self.surf_ids():
-            setattr(self,surf_id,None)
             for fname in self.filenames_png_bmp(surf_id):
                 if os.path.exists(fname):
                     setattr(self,surf_id,fit_to_resolution(pygame.image.load(fname)))
                     break
+
+    def del_pixels(self):
+        for surf_id in self.surf_ids():
+            setattr(self,surf_id,None)
 
     def empty(self): return self.color is None
 
@@ -329,8 +331,10 @@ class Layer:
         self.visible = not self.visible
         self.lit = self.visible
 
+def default_progress_callback(done_items, total_items): pass
+
 class MovieData:
-    def __init__(self, dir, read_pixels=True):
+    def __init__(self, dir, read_pixels=True, progress=default_progress_callback):
         self.dir = dir
         if not os.path.isdir(dir): # new clip
             os.makedirs(dir)
@@ -354,6 +358,9 @@ class MovieData:
 
             IWIDTH, IHEIGHT = movie_width, movie_height
 
+            done = 0
+            total = len(layer_ids) * len(frame_ids)
+
             self.layers = []
             for layer_index, layer_id in enumerate(layer_ids):
                 frames = []
@@ -361,6 +368,10 @@ class MovieData:
                     frame = Frame(dir, layer_id, frame_id, read_pixels=read_pixels)
                     frame.hold = holds[layer_index][frame_index]
                     frames.append(frame)
+
+                    done += 1
+                    progress(done, total)
+
                 layer = Layer(frames, dir, layer_id)
                 layer.visible = visible[layer_index]
                 layer.locked = locked[layer_index]
@@ -441,7 +452,7 @@ def check_if_interrupted():
 
 def export(clipdir):
     #print('exporting',clipdir)
-    movie = MovieData(clipdir)
+    movie = MovieData(clipdir, read_pixels=False)
     check_if_interrupted()
 
     assert FRAME_RATE==12
@@ -449,6 +460,9 @@ def export(clipdir):
         with MP4(movie.mp4_path(), IWIDTH, IHEIGHT, fps=24) as mp4_writer:
             for i in range(len(movie.frames)):
                 # TODO: render the PNGs transparently to the exported sequence
+                for layer in movie.layers:
+                    layer.frame(i).read_pixels()
+
                 frame = movie._blit_layers(movie.layers, i)
                 check_if_interrupted()
                 pixels = np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2])
@@ -463,6 +477,10 @@ def export(clipdir):
                 mp4_writer.write_frame(pixels)
                 check_if_interrupted() 
                 imageio.imwrite(movie.png_path(i), pixels)
+                check_if_interrupted()
+
+                for layer in movie.layers:
+                    layer.frame(i).del_pixels() # save memory footprint - we might have several background export processes
                 check_if_interrupted()
 
     #print('done with',clipdir)
@@ -1235,9 +1253,12 @@ class Layout:
 
     def aspect_ratio(self): return self.width/self.height
 
-    def add(self, rect, elem, draw_border=False):
+    def scale_rect(self, rect):
         left, bottom, width, height = rect
-        srect = (round(left*self.width), round(bottom*self.height), round(width*self.width), round(height*self.height))
+        return (round(left*self.width), round(bottom*self.height), round(width*self.width), round(height*self.height))
+
+    def add(self, rect, elem, draw_border=False):
+        srect = self.scale_rect(rect)
         elem.rect = srect
         elem.subsurface = screen.subsurface(srect)
         elem.draw_border = draw_border
@@ -1876,6 +1897,30 @@ def get_last_modified(filenames):
         f2mtime[f] = s.st_mtime
     return list(sorted(f2mtime.keys(), key=lambda f: f2mtime[f]))[-1]
 
+class ProgressBar:
+    def __init__(self):
+        self.done = 0
+        self.total = 1
+        horz_margin = 0.3
+        vert_margin = 0.45
+        self.outer_rect = layout.scale_rect((horz_margin, vert_margin, 1-horz_margin*2, 1-vert_margin*2))
+        horz_margin += 0.02
+        vert_margin += 0.02
+        self.inner_rect = layout.scale_rect((horz_margin, vert_margin, 1-horz_margin*2, 1-vert_margin*2))
+        self.draw()
+    def on_progress(self, done, total):
+        self.done = done
+        self.total = total
+        self.draw()
+    def draw(self):
+        pg.draw.rect(screen, MARGIN, self.outer_rect)
+        pg.draw.rect(screen, PEN, self.outer_rect, 1)
+        pg.draw.rect(screen, BACKGROUND, self.inner_rect)
+        left, bottom, full_width, height = self.inner_rect
+        done_width = int(full_width * (self.done/self.total))
+        pg.draw.rect(screen, (0, 192, 0), (left, bottom, done_width, height))
+        pg.display.flip()
+
 class MovieListArea:
     def __init__(self):
         self.show_pos = None
@@ -1961,7 +2006,8 @@ class MovieListArea:
             return
         global movie
         movie.save_before_closing()
-        movie = Movie(self.clips[clip_pos])
+        progress_bar = ProgressBar()
+        movie = Movie(self.clips[clip_pos], progress=progress_bar.on_progress)
         self.clip_pos = clip_pos
         self.open_history(clip_pos)
         self.interrupt_export()
@@ -2027,9 +2073,9 @@ class TogglePlaybackButton(Button):
 Tool = collections.namedtuple('Tool', ['tool', 'cursor', 'chars'])
 
 class Movie(MovieData):
-    def __init__(self, dir):
+    def __init__(self, dir, progress=default_progress_callback):
         iwidth, iheight = (IWIDTH, IHEIGHT)
-        MovieData.__init__(self, dir)
+        MovieData.__init__(self, dir, progress=progress)
         if (iwidth, iheight) != (IWIDTH, IHEIGHT):
             init_layout()
 
@@ -2767,7 +2813,7 @@ def swap_width_height(from_history=False):
 
 # The history is "global" for all operations within a movie. In some (rare) animation programs
 # there's a history per frame. One problem with this is how to undo timeline
-# operations like frame deletions (do you have a separate undo function for this?)
+# operations like frame deletions or holds (do you have a separate undo function for this?)
 # It's also somewhat less intuitive in that you might have long forgotten
 # what you've done on some frame when you visit it and press undo one time
 # too many
