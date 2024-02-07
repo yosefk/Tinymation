@@ -36,6 +36,7 @@ FRAME_RATE = 12
 CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
 # makes the png the image inside the directory icon displayed in Explorer... which is nice
 FRAME_FMT = 'frame%04d.png'
+CURRENT_FRAME_FILE = 'current_frame.png'
 BACKGROUND = (240, 235, 220)
 PEN = (20, 20, 20)
 
@@ -506,6 +507,52 @@ if len(sys.argv)>1 and sys.argv[1] == 'export':
     finally:
         exit()
 
+def get_last_modified(filenames):
+    f2mtime = {}
+    for f in filenames:
+        s = os.stat(f)
+        f2mtime[f] = s.st_mtime
+    return list(sorted(f2mtime.keys(), key=lambda f: f2mtime[f]))[-1]
+
+def is_exported_png(f): return f.endswith('.png') and f != CURRENT_FRAME_FILE
+
+class ExportProgressStatus:
+    def __init__(self):
+        self.first = True
+    def _init(self, initial_clips):
+        self.clip2frames = {}
+        for clip in initial_clips:
+            movie = MovieData(clip, read_pixels=False)
+            self.clip2frames[clip] = len(movie.frames)
+        self.total = sum(self.clip2frames.values())
+        self.initial_clips = initial_clips
+    def update(self, live_clips):
+        self.done = 0
+        import re
+        fmt = re.compile(r'frame([0-9]+)\.png')
+        for clip in live_clips:
+            pngs = [f for f in os.listdir(clip) if is_exported_png(f)]
+            if pngs:
+                last = get_last_modified([os.path.join(clip, f) for f in pngs])
+                m = fmt.match(os.path.basename(last))
+                self.done += int(m.groups()[0]) + 1 # frame 3 being ready means 4 are done
+
+        if self.first:
+            self._init(live_clips)
+            # don't show that we've already done most of the work if we have
+            # a lot of progress to report the first time - always report progress
+            # "from 0 to 100"
+            self.total -= self.done
+            self.done_before_we_started_looking = self.done
+            self.done = 0
+            self.first = False
+        else:
+            for clip in self.initial_clips: # clips we no longer need to check are still done
+                if clip not in live_clips:
+                    self.done += self.clip2frames[clip]
+            # our "0%" included this amount of done stuff - don't go above 100%
+            self.done -= self.done_before_we_started_looking
+
 _empty_frame = Frame('')
 
 import subprocess
@@ -537,6 +584,7 @@ MARGIN = (220, 215, 190)
 UNDRAWABLE = (220-20, 215-20, 190-20)
 SELECTED = (220-80, 215-80, 190-80)
 UNUSED = SELECTED
+PROGRESS = (192-45, 255-25, 192-45)
 LAYERS_BELOW = (128,192,255)
 LAYERS_ABOVE = (255,192,0)
 WIDTH = 3 # the smallest width where you always have a pure pen color rendered along
@@ -547,7 +595,6 @@ CURSOR_SIZE = int(screen.get_width() * 0.07)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
 MAX_CACHE_BYTE_SIZE = 1*1024**3
 MAX_CACHED_ITEMS = 2000
-CURRENT_FRAME_FILE = 'current_frame.png'
 
 MY_DOCUMENTS = winpath.get_my_documents()
 WD = os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymate')
@@ -1890,35 +1937,31 @@ class LayersArea:
             new_pos = min(max(0, movie.layer_pos + pos_dist), len(movie.layers)-1)
             movie.seek_layer(new_pos)
 
-def get_last_modified(filenames):
-    f2mtime = {}
-    for f in filenames:
-        s = os.stat(f)
-        f2mtime[f] = s.st_mtime
-    return list(sorted(f2mtime.keys(), key=lambda f: f2mtime[f]))[-1]
-
 class ProgressBar:
-    def __init__(self):
+    def __init__(self, title):
+        self.title = title
         self.done = 0
         self.total = 1
-        horz_margin = 0.3
-        vert_margin = 0.45
-        self.outer_rect = layout.scale_rect((horz_margin, vert_margin, 1-horz_margin*2, 1-vert_margin*2))
-        horz_margin += 0.02
-        vert_margin += 0.02
+        horz_margin = 0.32
+        vert_margin = 0.47
         self.inner_rect = layout.scale_rect((horz_margin, vert_margin, 1-horz_margin*2, 1-vert_margin*2))
+        left, bottom, width, height = self.inner_rect
+        margin = WIDTH
+        self.outer_rect = (left-margin, bottom-margin, width+margin*2, height+margin*2)
         self.draw()
     def on_progress(self, done, total):
         self.done = done
         self.total = total
         self.draw()
     def draw(self):
-        pg.draw.rect(screen, MARGIN, self.outer_rect)
-        pg.draw.rect(screen, PEN, self.outer_rect, 1)
+        pg.draw.rect(screen, UNUSED, self.outer_rect)
         pg.draw.rect(screen, BACKGROUND, self.inner_rect)
         left, bottom, full_width, height = self.inner_rect
-        done_width = int(full_width * (self.done/self.total))
-        pg.draw.rect(screen, (0, 192, 0), (left, bottom, done_width, height))
+        done_width = int(full_width * (self.done/max(1,self.total)))
+        pg.draw.rect(screen, PROGRESS, (left, bottom, done_width, height))
+        text_surface = font.render(self.title, True, UNUSED)
+        pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
+        screen.blit(text_surface, pos)
         pg.display.flip()
 
 class MovieListArea:
@@ -2006,7 +2049,7 @@ class MovieListArea:
             return
         global movie
         movie.save_before_closing()
-        progress_bar = ProgressBar()
+        progress_bar = ProgressBar('Loading...')
         movie = Movie(self.clips[clip_pos], progress=progress_bar.on_progress)
         self.clip_pos = clip_pos
         self.open_history(clip_pos)
@@ -2033,8 +2076,20 @@ class MovieListArea:
                 proc.wait()
                 del self.exporting_processes[clip]
     def wait_for_all_exporting_to_finish(self):
-        for proc in self.exporting_processes.values():
-            proc.wait() # TODO: progress?...
+        progress_bar = ProgressBar('Exporting...')
+        progress_status = ExportProgressStatus()
+
+        while True:
+            live_clips = []
+            for clip, proc in self.exporting_processes.items():
+                if proc.poll() is None:
+                    live_clips.append(clip)
+            if not live_clips:
+                break
+            progress_status.update(live_clips)
+            time.sleep(0.3)
+            progress_bar.on_progress(progress_status.done, progress_status.total)
+
         self.exporting_processes = {}
 
 class ToolSelectionButton:
@@ -2400,7 +2455,15 @@ class Movie(MovieData):
         history = History()
         self.frame(self.pos).save()
         self.save_meta()
+
+        # remove old pngs so we don't have stale ones lying around that don't correspond to a valid frame;
+        # also, we use them for getting the status of the export progress...
+        for f in os.listdir(self.dir):
+            if is_exported_png(f):
+                os.unlink(os.path.join(self.dir, f))
+
         layout.movie_list_area().start_export()
+
         layout.movie_list_area().save_history()
         self.render_and_save_current_frame()
         self.garbage_collect_layer_dirs()
@@ -3017,7 +3080,7 @@ def process_keydown_event(event):
 layout.draw()
 pygame.display.flip()
 
-font = pygame.font.Font(size=screen.get_height()//10)
+font = pygame.font.Font(size=screen.get_height()//15)
 
 while not escape: 
  try:
