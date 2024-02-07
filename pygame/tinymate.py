@@ -3,6 +3,10 @@ import imageio.v3
 import numpy as np
 import sys
 import os
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pygame version
+
+# we spawn subprocesses to compress BMPs to PNGs and remove the BMPs
+# every time we save a BMP [which is faster than saving a PNG]
 
 def compress_and_remove(filepairs):
     for infile, outfile in zip(filepairs[0::2], filepairs[1::2]):
@@ -15,19 +19,486 @@ if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
     compress_and_remove(sys.argv[2:])
     exit()
 
+# we spawn subprocesses to export the movie to GIF, MP4 and a PNG sequence
+# every time we close a movie (if we reopen it, we interrupt the exporting
+# process and then restart upon closing; when we exit the application,
+# we wait for all the exporting to finish so the user knows all the exported
+# data is ready upon exiting)
+
+import collections
+import signal
+import uuid
+import json
+
+IWIDTH = 1920
+IHEIGHT = 1080
+FRAME_RATE = 12
+CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
+# makes the png the image inside the directory icon displayed in Explorer... which is nice
+FRAME_FMT = 'frame%04d.png'
+BACKGROUND = (240, 235, 220)
+PEN = (20, 20, 20)
+
+class CachedItem:
+    def compute_key(self):
+        '''a key is a tuple of:
+        1. a list of tuples mapping IDs to versions. a cached item referencing
+        unknown IDs or IDs with old versions is eventually garbage-collected
+        2. any additional info making the key unique.
+        
+        compute_key returns the key computed from the current system state.
+        for example, CachedThumbnail(pos=5) might return a dictionary mapping
+        the IDs of frames making up frame 5 in every layer, and the string
+        "thumbnail." The number 5 is not a part of the key; if frame 6
+        is made of the same frames in every layer, CachedThumbnail(pos=6)
+        will compute the same key. If in the future a CachedThumbnail(pos=5)
+        is created computing a different key because the movie was edited,
+        you'll get a cache miss as expected.
+        '''
+        return {}, None
+
+    def compute_value(self):
+        '''returns the value - used upon cached miss. note that CachedItems
+        are not kept in the cache themselves - only the keys and the values.'''
+        return None
+
+# there are 2 reasons to evict a cached item:
+# * no more room in the cache - evict the least recently used items until there's room
+# * the cached item has no chance to be useful - eg it was computed from a deleted or
+#   since-edited frame - this is done by collect_garbage() and assisted by update_id()
+#   and delete_id()
+class Cache:
+    class Miss:
+        pass
+    MISS = Miss()
+    def __init__(self):
+        self.key2value = collections.OrderedDict()
+        self.id2version = {}
+        self.debug = False
+        self.gc_iter = 0
+        self.last_check = {}
+        # these are per-gc iteration counters
+        self.computed_bytes = 0
+        self.cached_bytes = 0
+        # sum([self.size(value) for value in self.key2value.values()])
+        self.cache_size = 0
+    def size(self,value):
+        try:
+            # surface
+            return value.get_width() * value.get_height() * 4
+        except:
+            try:
+                # numpy array
+                return reduce(lambda x,y: x*y, value.shape)
+            except:
+                return 0
+    def fetch(self, cached_item):
+        key = (cached_item.compute_key(), (IWIDTH, IHEIGHT))
+        value = self.key2value.get(key, Cache.MISS)
+        if value is Cache.MISS:
+            value = cached_item.compute_value()
+            vsize = self.size(value)
+            self.computed_bytes += vsize
+            self.cache_size += vsize
+            self._evict_lru_as_needed()
+            self.key2value[key] = value
+        else:
+            self.key2value.move_to_end(key)
+            self.cached_bytes += self.size(value)
+            if self.debug and self.last_check.get(key, 0) < self.gc_iter:
+                # slow debug mode
+                ref = cached_item.compute_value()
+                if not np.array_equal(pg.surfarray.pixels3d(ref), pg.surfarray.pixels3d(value)) or not np.array_equal(pg.surfarray.pixels_alpha(ref), pg.surfarray.pixels_alpha(value)):
+                    print('HIT BUG!',key)
+                self.last_check[key] = self.gc_iter
+        return value
+
+    def _evict_lru_as_needed(self):
+        while self.cache_size > MAX_CACHE_BYTE_SIZE or len(self.key2value) > MAX_CACHED_ITEMS:
+            key, value = self.key2value.popitem(last=False)
+            self.cache_size -= self.size(value)
+
+    def update_id(self, id, version):
+        self.id2version[id] = version
+    def delete_id(self, id):
+        if id in self.id2version:
+            del self.id2version[id]
+    def stale(self, key):
+        id2version, _ = key[0]
+        for id, version in id2version:
+            current_version = self.id2version.get(id)
+            if current_version is None or version < current_version:
+                #print('stale',id,version,current_version)
+                return True
+        return False
+    def collect_garbage(self):
+        orig = len(self.key2value)
+        orig_size = self.cache_size
+        for key, value in list(self.key2value.items()):
+            if self.stale(key):
+                del self.key2value[key]
+                self.cache_size -= self.size(value)
+        #print('gc',orig,orig_size,'->',len(self.key2value),self.cache_size,'computed',self.computed_bytes,'cached',self.cached_bytes,tdiff())
+        self.gc_iter += 1
+        self.computed_bytes = 0
+        self.cached_bytes = 0
+
+cache = Cache()
+
+def fit_to_resolution(surface):
+    w,h = surface.get_width(), surface.get_height()
+    if w == IWIDTH and h == IHEIGHT:
+        return surface
+    elif w == IHEIGHT and h == IWIDTH:
+        return pg.transform.rotate(surface, 90 * (1 if w>h else -1)) 
+    else:
+        return pg.transform.scale(surface, (w, h))
+
+def new_frame():
+    frame = pygame.Surface((IWIDTH, IHEIGHT), pygame.SRCALPHA)
+    frame.fill(BACKGROUND)
+    pg.surfarray.pixels_alpha(frame)[:] = 0
+    return frame
+
+class Frame:
+    def __init__(self, dir, layer_id=None, frame_id=None, read_pixels=True):
+        self.dir = dir
+        self.layer_id = layer_id
+        if frame_id is not None: # id - load the surfaces from the directory
+            self.id = frame_id
+            for surf_id in self.surf_ids():
+                setattr(self,surf_id,None)
+            if read_pixels:
+                self.read_pixels()
+        else:
+            self.id = str(uuid.uuid1())
+            self.color = None
+            self.lines = None
+
+        # we don't aim to maintain a "perfect" dirty flag such as "doing 5 things and undoing
+        # them should result in dirty==False." The goal is to avoid gratuitous saving when
+        # scrolling thru the timeline, which slows things down and prevents reopening
+        # clips at the last actually-edited frame after exiting the program
+        self.dirty = False
+        # similarly to dirty, version isn't a perfect version number; we're fine with it
+        # going up instead of back down upon undo, or going up by more than 1 upon a single
+        # editing operation. the version number is used for knowing when a cache hit
+        # would produce stale data; if we occasionally evict valid data it's not as bad
+        # as for hits to occasionally return stale data
+        self.version = 0
+        self.hold = False
+
+        cache.update_id(self.cache_id(), self.version)
+
+        self.compression_subprocess = None
+
+    def __del__(self):
+        cache.delete_id(self.cache_id())
+
+    def read_pixels(self):
+        for surf_id in self.surf_ids():
+            setattr(self,surf_id,None)
+            for fname in self.filenames_png_bmp(surf_id):
+                if os.path.exists(fname):
+                    setattr(self,surf_id,fit_to_resolution(pygame.image.load(fname)))
+                    break
+
+    def empty(self): return self.color is None
+
+    def _create_surfaces_if_needed(self):
+        if not self.empty():
+            return
+        self.color = new_frame()
+        self.lines = pg.Surface((self.color.get_width(), self.color.get_height()), pygame.SRCALPHA)
+        self.lines.fill(PEN)
+        pygame.surfarray.pixels_alpha(self.lines)[:] = 0
+
+    def get_content(self): return self.color.copy(), self.lines.copy()
+    def set_content(self, content):
+        color, lines = content
+        self.color = fit_to_resolution(color.copy())
+        self.lines = fit_to_resolution(lines.copy())
+    def clear(self):
+        self.color = None
+        self.lines = None
+
+    def increment_version(self):
+        self._create_surfaces_if_needed()
+        self.dirty = True
+        self.version += 1
+        cache.update_id(self.cache_id(), self.version)
+
+    def surf_ids(self): return ['lines','color']
+    def get_width(self): return IWIDTH
+    def get_height(self): return IHEIGHT
+    def get_rect(self): return empty_frame().color.get_rect()
+
+    def surf_by_id(self, surface_id):
+        s = getattr(self, surface_id)
+        return s if s is not None else empty_frame().surf_by_id(surface_id)
+
+    def surface(self):
+        if self.empty():
+            return empty_frame().color
+        s = self.color.copy()
+        s.blit(self.lines, (0, 0))
+        return s
+
+    def filenames_png_bmp(self,surface_id):
+        fname = f'{self.id}-{surface_id}.'
+        if self.layer_id:
+            fname = os.path.join(f'layer-{self.layer_id}', fname)
+        fname = os.path.join(self.dir, fname)
+        return fname+'png', fname+'bmp'
+    def wait_for_compression_to_finish(self):
+        if self.compression_subprocess:
+            self.compression_subprocess.wait()
+        self.compression_subprocess = None
+    def save(self):
+        if self.dirty:
+            self.wait_for_compression_to_finish()
+            fnames = []
+            for surf_id in self.surf_ids():
+                fname_png, fname_bmp = self.filenames_png_bmp(surf_id)
+                pygame.image.save(self.surf_by_id(surf_id), fname_bmp)
+                fnames += [fname_bmp, fname_png]
+            self.compression_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'compress-and-remove']+fnames)
+            self.dirty = False
+    def delete(self):
+        self.wait_for_compression_to_finish()
+        for surf_id in self.surf_ids():
+            for fname in self.filenames_png_bmp(surf_id):
+                if os.path.exists(fname):
+                    os.unlink(fname)
+
+    def size(self):
+        # a frame is 2 RGBA surfaces
+        return (self.get_width() * self.get_height() * 8) if not self.empty() else 0
+
+    def cache_id(self): return (self.id, self.layer_id) if not self.empty() else None
+    def cache_id_version(self): return self.cache_id(), self.version
+
+    def fit_to_resolution(self):
+        if self.empty():
+            return
+        for surf_id in self.surf_ids():
+            setattr(self, surf_id, fit_to_resolution(self.surf_by_id(surf_id)))
+
+_empty_frame = Frame('')
+def empty_frame():
+    global _empty_frame
+    if not _empty_frame.empty() and (_empty_frame.color.get_width() != IWIDTH or _empty_frame.color.get_height() != IHEIGHT):
+        _empty_frame = Frame('')
+    _empty_frame._create_surfaces_if_needed()
+    return _empty_frame
+
+class Layer:
+    def __init__(self, frames, dir, layer_id=None):
+        self.dir = dir
+        self.frames = frames
+        self.id = layer_id if layer_id else str(uuid.uuid1())
+        self.lit = True
+        self.visible = True
+        self.locked = False
+        for frame in frames:
+            frame.layer_id = self.id
+        subdir = self.subdir()
+        if not os.path.isdir(subdir):
+            os.makedirs(subdir)
+
+    def surface_pos(self, pos):
+        while self.frames[pos].hold:
+            pos -= 1
+        return pos
+
+    def frame(self, pos): # return the closest frame in the past where hold is false
+        return self.frames[self.surface_pos(pos)]
+
+    def subdir(self): return os.path.join(self.dir, f'layer-{self.id}')
+    def deleted_subdir(self): return self.subdir() + '-deleted'
+
+    def delete(self):
+        for frame in self.frames:
+            frame.wait_for_compression_to_finish()
+        os.rename(self.subdir(), self.deleted_subdir())
+    def undelete(self): os.rename(self.deleted_subdir(), self.subdir())
+
+    def toggle_locked(self): self.locked = not self.locked
+    def toggle_lit(self): self.lit = not self.lit
+    def toggle_visible(self):
+        self.visible = not self.visible
+        self.lit = self.visible
+
+class MovieData:
+    def __init__(self, dir, read_pixels=True):
+        self.dir = dir
+        if not os.path.isdir(dir): # new clip
+            os.makedirs(dir)
+            self.frames = [Frame(self.dir)]
+            self.pos = 0
+            self.layers = [Layer(self.frames, dir)]
+            self.layer_pos = 0
+            self.frames[0].save()
+            self.save_meta()
+        else:
+            with open(os.path.join(dir, CLIP_FILE), 'r') as clip_file:
+                clip = json.loads(clip_file.read())
+            global IWIDTH, IHEIGHT
+
+            movie_width, movie_height = clip.get('resolution',(IWIDTH,IHEIGHT))
+            frame_ids = clip['frame_order']
+            layer_ids = clip['layer_order']
+            holds = clip['hold']
+            visible = clip.get('layer_visible', [True]*len(layer_ids))
+            locked = clip.get('layer_locked', [False]*len(layer_ids))
+
+            IWIDTH, IHEIGHT = movie_width, movie_height
+
+            self.layers = []
+            for layer_index, layer_id in enumerate(layer_ids):
+                frames = []
+                for frame_index, frame_id in enumerate(frame_ids):
+                    frame = Frame(dir, layer_id, frame_id, read_pixels=read_pixels)
+                    frame.hold = holds[layer_index][frame_index]
+                    frames.append(frame)
+                layer = Layer(frames, dir, layer_id)
+                layer.visible = visible[layer_index]
+                layer.locked = locked[layer_index]
+                self.layers.append(layer)
+
+            self.pos = clip['frame_pos']
+            self.layer_pos = clip['layer_pos']
+            self.frames = self.layers[self.layer_pos].frames
+
+    def save_meta(self):
+        # TODO: save light table settings
+        clip = {
+            'resolution':[IWIDTH, IHEIGHT],
+            'frame_pos':self.pos,
+            'layer_pos':self.layer_pos,
+            'frame_order':[frame.id for frame in self.frames],
+            'layer_order':[layer.id for layer in self.layers],
+            'layer_visible':[layer.visible for layer in self.layers],
+            'layer_locked':[layer.locked for layer in self.layers],
+            'hold':[[frame.hold for frame in layer.frames] for layer in self.layers],
+        }
+        text = json.dumps(clip,indent=2)
+        with open(os.path.join(self.dir, CLIP_FILE), 'w') as clip_file:
+            clip_file.write(text)
+
+    def gif_path(self): return os.path.realpath(self.dir)+'-GIF.gif'
+    def mp4_path(self): return os.path.realpath(self.dir)+'-MP4.mp4'
+    def png_path(self, i): return os.path.join(self.dir, FRAME_FMT%i)
+
+    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False):
+        s = pygame.Surface((IWIDTH, IHEIGHT), pygame.SRCALPHA)
+        if not transparent:
+            s.fill(BACKGROUND)
+        surfaces = []
+        for layer in layers:
+            if not layer.visible and not include_invisible:
+                continue
+            f = layer.frame(pos)
+            surfaces.append(f.surf_by_id('color'))
+            surfaces.append(f.surf_by_id('lines'))
+        s.blits([(surface, (0, 0), (0, 0, surface.get_width(), surface.get_height())) for surface in surfaces])
+        return s
+
+
+# a supposed advantage of this verbose method of writing MP4s using PyUV over "just" using imageio
+# is that `pip install av` installs ffmpeg libraries so you don't need to worry
+# separately about installing ffmpeg. imageio also fails in a "TiffWriter" at the
+# time of writing, or if the "fps" parameter is removed, creates a giant .mp4
+# output file that nothing seems to be able to play.
+class MP4:
+    def __init__(self, fname, width, height, fps):
+        self.output = av.open(fname, 'w', format='mp4')
+        self.stream = self.output.add_stream('h264', str(fps))
+        self.stream.width = width
+        self.stream.height = height
+        self.stream.pix_fmt = 'yuv420p' # Windows Media Player eats this up unlike yuv444p
+        self.stream.options = {'crf': '17'} # quite bad quality with smaller file sizes without this
+    def write_frame(self, pixels):
+        frame = av.VideoFrame.from_ndarray(pixels, format='rgb24')
+        packet = self.stream.encode(frame)
+        self.output.mux(packet)
+    def close(self):
+        packet = self.stream.encode(None)
+        self.output.mux(packet)
+        self.output.close()
+    def __enter__(self): return self
+    def __exit__(self, *args): self.close()
+
+interrupted = False
+def signal_handler(signum, stack):
+    global interrupted
+    interrupted = True
+
+def check_if_interrupted():
+    if interrupted:
+        #print('interrupted',sys.argv[2])
+        raise KeyboardInterrupt
+
+def export(clipdir):
+    #print('exporting',clipdir)
+    movie = MovieData(clipdir)
+    check_if_interrupted()
+
+    assert FRAME_RATE==12
+    with imageio.get_writer(movie.gif_path(), fps=FRAME_RATE, loop=0) as gif_writer:
+        with MP4(movie.mp4_path(), IWIDTH, IHEIGHT, fps=24) as mp4_writer:
+            for i in range(len(movie.frames)):
+                # TODO: render the PNGs transparently to the exported sequence
+                frame = movie._blit_layers(movie.layers, i)
+                check_if_interrupted()
+                pixels = np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2])
+                check_if_interrupted()
+                gif_writer.append_data(pixels)
+                # append each frame twice at MP4 to get a standard 24 fps frame rate
+                # (for GIFs there's less likelihood that something has a problem with
+                # "non-standard 12 fps" (?))
+                check_if_interrupted() 
+                mp4_writer.write_frame(pixels)
+                check_if_interrupted() 
+                mp4_writer.write_frame(pixels)
+                check_if_interrupted() 
+                imageio.imwrite(movie.png_path(i), pixels)
+                check_if_interrupted()
+
+    #print('done with',clipdir)
+
+if len(sys.argv)>1 and sys.argv[1] == 'export':
+    signal.signal(signal.SIGBREAK, signal_handler)
+
+    try:
+        import pygame
+        pg = pygame
+        _empty_frame = Frame('')
+        check_if_interrupted()
+
+        import av
+        check_if_interrupted()
+
+        export(sys.argv[2])
+    except KeyboardInterrupt:
+        pass # not an error
+    except:
+        import traceback
+        traceback.print_exc()
+    finally:
+        exit()
+
+_empty_frame = Frame('')
+
 import subprocess
-import pygame
 import pygame.gfxdraw
 import winpath
-import collections
-import uuid
 import math
 import datetime
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('agg')  # turn off interactive backend
 import io
-import json
 import shutil
 from scipy.interpolate import splprep, splev
 
@@ -43,12 +514,7 @@ pg.init()
 screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
 pygame.display.set_caption("Tinymate")
 
-IWIDTH = 1920
-IHEIGHT = 1080
-FRAME_RATE = 12
 FADING_RATE = 3
-PEN = (20, 20, 20)
-BACKGROUND = (240, 235, 220)
 MARGIN = (220, 215, 190)
 UNDRAWABLE = (220-20, 215-20, 190-20)
 SELECTED = (220-80, 215-80, 190-80)
@@ -63,10 +529,7 @@ CURSOR_SIZE = int(screen.get_width() * 0.07)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
 MAX_CACHE_BYTE_SIZE = 1*1024**3
 MAX_CACHED_ITEMS = 2000
-FRAME_FMT = 'frame%04d.png'
-CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
-# makes the png the image inside the directory icon displayed in Explorer... which is very nice
-FRAME_ORDER_FILE = 'frame_order.json'
+CURRENT_FRAME_FILE = 'current_frame.png'
 
 MY_DOCUMENTS = winpath.get_my_documents()
 WD = os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymate')
@@ -309,112 +772,6 @@ def try_set_cursor(c):
         pass
 try_set_cursor(pencil_cursor[0])
 
-class CachedItem:
-    def compute_key(self):
-        '''a key is a tuple of:
-        1. a list of tuples mapping IDs to versions. a cached item referencing
-        unknown IDs or IDs with old versions is eventually garbage-collected
-        2. any additional info making the key unique.
-        
-        compute_key returns the key computed from the current system state.
-        for example, CachedThumbnail(pos=5) might return a dictionary mapping
-        the IDs of frames making up frame 5 in every layer, and the string
-        "thumbnail." The number 5 is not a part of the key; if frame 6
-        is made of the same frames in every layer, CachedThumbnail(pos=6)
-        will compute the same key. If in the future a CachedThumbnail(pos=5)
-        is created computing a different key because the movie was edited,
-        you'll get a cache miss as expected.
-        '''
-        return {}, None
-
-    def compute_value(self):
-        '''returns the value - used upon cached miss. note that CachedItems
-        are not kept in the cache themselves - only the keys and the values.'''
-        return None
-
-# there are 2 reasons to evict a cached item:
-# * no more room in the cache - evict the least recently used items until there's room
-# * the cached item has no chance to be useful - eg it was computed from a deleted or
-#   since-edited frame - this is done by collect_garbage() and assisted by update_id()
-#   and delete_id()
-class Cache:
-    class Miss:
-        pass
-    MISS = Miss()
-    def __init__(self):
-        self.key2value = collections.OrderedDict()
-        self.id2version = {}
-        self.debug = False
-        self.gc_iter = 0
-        self.last_check = {}
-        # these are per-gc iteration counters
-        self.computed_bytes = 0
-        self.cached_bytes = 0
-        # sum([self.size(value) for value in self.key2value.values()])
-        self.cache_size = 0
-    def size(self,value):
-        try:
-            # surface
-            return value.get_width() * value.get_height() * 4
-        except:
-            try:
-                # numpy array
-                return reduce(lambda x,y: x*y, value.shape)
-            except:
-                return 0
-    def fetch(self, cached_item):
-        key = (cached_item.compute_key(), (IWIDTH, IHEIGHT))
-        value = self.key2value.get(key, Cache.MISS)
-        if value is Cache.MISS:
-            value = cached_item.compute_value()
-            vsize = self.size(value)
-            self.computed_bytes += vsize
-            self.cache_size += vsize
-            self._evict_lru_as_needed()
-            self.key2value[key] = value
-        else:
-            self.key2value.move_to_end(key)
-            self.cached_bytes += self.size(value)
-            if self.debug and self.last_check.get(key, 0) < self.gc_iter:
-                # slow debug mode
-                ref = cached_item.compute_value()
-                if not np.array_equal(pg.surfarray.pixels3d(ref), pg.surfarray.pixels3d(value)) or not np.array_equal(pg.surfarray.pixels_alpha(ref), pg.surfarray.pixels_alpha(value)):
-                    print('HIT BUG!',key)
-                self.last_check[key] = self.gc_iter
-        return value
-
-    def _evict_lru_as_needed(self):
-        while self.cache_size > MAX_CACHE_BYTE_SIZE or len(self.key2value) > MAX_CACHED_ITEMS:
-            key, value = self.key2value.popitem(last=False)
-            self.cache_size -= self.size(value)
-
-    def update_id(self, id, version):
-        self.id2version[id] = version
-    def delete_id(self, id):
-        if id in self.id2version:
-            del self.id2version[id]
-    def stale(self, key):
-        id2version, _ = key[0]
-        for id, version in id2version:
-            current_version = self.id2version.get(id)
-            if current_version is None or version < current_version:
-                #print('stale',id,version,current_version)
-                return True
-        return False
-    def collect_garbage(self):
-        orig = len(self.key2value)
-        orig_size = self.cache_size
-        for key, value in list(self.key2value.items()):
-            if self.stale(key):
-                del self.key2value[key]
-                self.cache_size -= self.size(value)
-        #print('gc',orig,orig_size,'->',len(self.key2value),self.cache_size,'computed',self.computed_bytes,'cached',self.cached_bytes,tdiff())
-        self.gc_iter += 1
-        self.computed_bytes = 0
-        self.cached_bytes = 0
-
-cache = Cache()
-
 def bounding_rectangle_of_a_boolean_mask(mask):
     # Sum along the vertical and horizontal axes
     vertical_sum = np.sum(mask, axis=1)
@@ -529,12 +886,6 @@ class Button:
             surface = scale_image(cursor_surface, scaled_width, scaled_height)
             self.button_surface = surface
         screen.blit(self.button_surface, (left+(width-scaled_width)/2, bottom+height-scaled_height))
-
-def new_frame():
-    frame = pygame.Surface((IWIDTH, IHEIGHT), pygame.SRCALPHA)
-    frame.fill(BACKGROUND)
-    pg.surfarray.pixels_alpha(frame)[:] = 0
-    return frame
 
 locked_image = pg.image.load('locked.png')
 invisible_image = pg.image.load('eye_shut.png')
@@ -900,8 +1251,8 @@ class Layout:
         for elem in self.elems:
             if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
                 elem.draw()
-            if elem.draw_border:
-                pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
+                if elem.draw_border:
+                    pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
 
     # note that pygame seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
@@ -1531,6 +1882,7 @@ class MovieListArea:
         self.prevx = None
         self.reload()
         self.histories = {}
+        self.exporting_processes = {}
     def delete_current_history(self):
         del self.histories[self.clips[self.clip_pos]]
     def reload(self):
@@ -1539,10 +1891,7 @@ class MovieListArea:
         single_image_height = screen.get_height() * MOVIES_Y_SHARE
         for clipdir in get_clip_dirs():
             fulldir = os.path.join(WD, clipdir)
-            with open(os.path.join(fulldir, CLIP_FILE), 'r') as clipfile:
-                clip = json.loads(clipfile.read())
-            curr_frame = clip['frame_pos']
-            frame_file = os.path.join(fulldir, FRAME_FMT % curr_frame)
+            frame_file = os.path.join(fulldir, CURRENT_FRAME_FILE)
             image = pg.image.load(frame_file) if os.path.exists(frame_file) else new_frame()
             self.images.append(scale_image(image, height=single_image_height))
             self.clips.append(fulldir)
@@ -1615,12 +1964,32 @@ class MovieListArea:
         movie = Movie(self.clips[clip_pos])
         self.clip_pos = clip_pos
         self.open_history(clip_pos)
+        self.interrupt_export()
     def open_history(self, clip_pos):
         global history
         history = self.histories.get(self.clips[clip_pos], History())
     def save_history(self):
         if self.clips:
             self.histories[self.clips[self.clip_pos]] = history
+    def start_export(self):
+        self.interrupt_export()
+        if self.clips:
+            clip = self.clips[self.clip_pos]
+            # TODO: this is Windows-specific
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            self.exporting_processes[clip] = subprocess.Popen([sys.executable, sys.argv[0], 'export', clip], creationflags=CREATE_NEW_PROCESS_GROUP)
+    def interrupt_export(self):
+        if self.clips:
+            clip = self.clips[self.clip_pos]
+            if clip in self.exporting_processes:
+                proc = self.exporting_processes[clip]
+                os.kill(proc.pid, signal.CTRL_BREAK_EVENT) # TODO: SIGINT on Linux?
+                proc.wait()
+                del self.exporting_processes[clip]
+    def wait_for_all_exporting_to_finish(self):
+        for proc in self.exporting_processes.values():
+            proc.wait() # TODO: progress?...
+        self.exporting_processes = {}
 
 class ToolSelectionButton:
     def __init__(self, tool):
@@ -1657,219 +2026,12 @@ class TogglePlaybackButton(Button):
 
 Tool = collections.namedtuple('Tool', ['tool', 'cursor', 'chars'])
 
-def fit_to_resolution(surface):
-    w,h = surface.get_width(), surface.get_height()
-    if w == IWIDTH and h == IHEIGHT:
-        return surface
-    elif w == IHEIGHT and h == IWIDTH:
-        return pg.transform.rotate(surface, 90 * (1 if w>h else -1)) 
-    else:
-        return pg.transform.scale(surface, (w, h))
-
-class Frame:
-    def __init__(self, dir, layer_id=None, frame_id=None):
-        self.dir = dir
-        self.layer_id = layer_id
-        if frame_id is not None: # id - load the surfaces from the directory
-            self.id = frame_id
-            for surf_id in self.surf_ids():
-                setattr(self,surf_id,None)
-                for fname in self.filenames_png_bmp(surf_id):
-                    if os.path.exists(fname):
-                        setattr(self,surf_id,fit_to_resolution(pygame.image.load(fname)))
-                        break
-        else:
-            self.id = str(uuid.uuid1())
-            self.color = None
-            self.lines = None
-
-        # we don't aim to maintain a "perfect" dirty flag such as "doing 5 things and undoing
-        # them should result in dirty==False." The goal is to avoid gratuitous saving when
-        # scrolling thru the timeline, which slows things down and prevents reopening
-        # clips at the last actually-edited frame after exiting the program
-        self.dirty = False
-        # similarly to dirty, version isn't a perfect version number; we're fine with it
-        # going up instead of back down upon undo, or going up by more than 1 upon a single
-        # editing operation. the version number is used for knowing when a cache hit
-        # would produce stale data; if we occasionally evict valid data it's not as bad
-        # as for hits to occasionally return stale data
-        self.version = 0
-        self.hold = False
-
-        cache.update_id(self.cache_id(), self.version)
-
-        self.compression_subprocess = None
-
-    def __del__(self):
-        cache.delete_id(self.cache_id())
-
-    def empty(self): return self.color is None
-
-    def _create_surfaces_if_needed(self):
-        if not self.empty():
-            return
-        self.color = new_frame()
-        self.lines = pg.Surface((self.color.get_width(), self.color.get_height()), pygame.SRCALPHA)
-        self.lines.fill(PEN)
-        pygame.surfarray.pixels_alpha(self.lines)[:] = 0
-
-    def get_content(self): return self.color.copy(), self.lines.copy()
-    def set_content(self, content):
-        color, lines = content
-        self.color = fit_to_resolution(color.copy())
-        self.lines = fit_to_resolution(lines.copy())
-    def clear(self):
-        self.color = None
-        self.lines = None
-
-    def increment_version(self):
-        self._create_surfaces_if_needed()
-        self.dirty = True
-        self.version += 1
-        cache.update_id(self.cache_id(), self.version)
-
-    def surf_ids(self): return ['lines','color']
-    def get_width(self): return IWIDTH
-    def get_height(self): return IHEIGHT
-    def get_rect(self): return empty_frame().color.get_rect()
-
-    def surf_by_id(self, surface_id):
-        s = getattr(self, surface_id)
-        return s if s is not None else empty_frame().surf_by_id(surface_id)
-
-    def surface(self):
-        if self.empty():
-            return empty_frame().color
-        s = self.color.copy()
-        s.blit(self.lines, (0, 0))
-        return s
-
-    def filenames_png_bmp(self,surface_id):
-        fname = f'{self.id}-{surface_id}.'
-        if self.layer_id:
-            fname = os.path.join(f'layer-{self.layer_id}', fname)
-        fname = os.path.join(self.dir, fname)
-        return fname+'png', fname+'bmp'
-    def wait_for_compression_to_finish(self):
-        if self.compression_subprocess:
-            self.compression_subprocess.wait()
-        self.compression_subprocess = None
-    def save(self):
-        if self.dirty:
-            self.wait_for_compression_to_finish()
-            fnames = []
-            for surf_id in self.surf_ids():
-                fname_png, fname_bmp = self.filenames_png_bmp(surf_id)
-                pygame.image.save(self.surf_by_id(surf_id), fname_bmp)
-                fnames += [fname_bmp, fname_png]
-            self.compression_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'compress-and-remove']+fnames)
-            self.dirty = False
-    def delete(self):
-        self.wait_for_compression_to_finish()
-        for surf_id in self.surf_ids():
-            for fname in self.filenames_png_bmp(surf_id):
-                if os.path.exists(fname):
-                    os.unlink(fname)
-
-    def size(self):
-        # a frame is 2 RGBA surfaces
-        return (self.get_width() * self.get_height() * 8) if not self.empty() else 0
-
-    def cache_id(self): return (self.id, self.layer_id) if not self.empty() else None
-    def cache_id_version(self): return self.cache_id(), self.version
-
-    def fit_to_resolution(self):
-        if self.empty():
-            return
-        for surf_id in self.surf_ids():
-            setattr(self, surf_id, fit_to_resolution(self.surf_by_id(surf_id)))
-
-_empty_frame = Frame('')
-def empty_frame():
-    global _empty_frame
-    if not _empty_frame.empty() and (_empty_frame.color.get_width() != IWIDTH or _empty_frame.color.get_height() != IHEIGHT):
-        _empty_frame = Frame('')
-    _empty_frame._create_surfaces_if_needed()
-    return _empty_frame
-
-class Layer:
-    def __init__(self, frames, dir, layer_id=None):
-        self.dir = dir
-        self.frames = frames
-        self.id = layer_id if layer_id else str(uuid.uuid1())
-        self.lit = True
-        self.visible = True
-        self.locked = False
-        for frame in frames:
-            frame.layer_id = self.id
-        subdir = self.subdir()
-        if not os.path.isdir(subdir):
-            os.makedirs(subdir)
-
-    def surface_pos(self, pos):
-        while self.frames[pos].hold:
-            pos -= 1
-        return pos
-
-    def frame(self, pos): # return the closest frame in the past where hold is false
-        return self.frames[self.surface_pos(pos)]
-
-    def subdir(self): return os.path.join(self.dir, f'layer-{self.id}')
-    def deleted_subdir(self): return self.subdir() + '-deleted'
-
-    def delete(self):
-        for frame in self.frames:
-            frame.wait_for_compression_to_finish()
-        os.rename(self.subdir(), self.deleted_subdir())
-    def undelete(self): os.rename(self.deleted_subdir(), self.subdir())
-
-    def toggle_locked(self): self.locked = not self.locked
-    def toggle_lit(self): self.lit = not self.lit
-    def toggle_visible(self):
-        self.visible = not self.visible
-        self.lit = self.visible
-
-class Movie:
+class Movie(MovieData):
     def __init__(self, dir):
-        self.dir = dir
-        if not os.path.isdir(dir): # new clip
-            os.makedirs(dir)
-            self.frames = [Frame(self.dir)]
-            self.pos = 0
-            self.layers = [Layer(self.frames, dir)]
-            self.layer_pos = 0
-            self.frames[0].save()
-            self.save_meta()
-        else:
-            with open(os.path.join(dir, CLIP_FILE), 'r') as clip_file:
-                clip = json.loads(clip_file.read())
-            global IWIDTH, IHEIGHT
-            movie_width, movie_height = clip.get('resolution',(IWIDTH,IHEIGHT))
-            frame_ids = clip['frame_order']
-            layer_ids = clip['layer_order']
-            holds = clip['hold']
-            visible = clip.get('layer_visible', [True]*len(layer_ids))
-            locked = clip.get('layer_locked', [False]*len(layer_ids))
-
-            if (movie_width, movie_height) != (IWIDTH, IHEIGHT):
-                IWIDTH, IHEIGHT = movie_width, movie_height
-                init_layout()
-
-            self.layers = []
-            for layer_index, layer_id in enumerate(layer_ids):
-                frames = []
-                for frame_index, frame_id in enumerate(frame_ids):
-                    frame = Frame(dir, layer_id, frame_id)
-                    frame.hold = holds[layer_index][frame_index]
-                    frames.append(frame)
-                layer = Layer(frames, dir, layer_id)
-                layer.visible = visible[layer_index]
-                layer.locked = locked[layer_index]
-                self.layers.append(layer)
-
-            self.pos = clip['frame_pos']
-            self.layer_pos = clip['layer_pos']
-            self.frames = self.layers[self.layer_pos].frames
+        iwidth, iheight = (IWIDTH, IHEIGHT)
+        MovieData.__init__(self, dir)
+        if (iwidth, iheight) != (IWIDTH, IHEIGHT):
+            init_layout()
 
     def toggle_hold(self):
         pos = self.pos
@@ -1883,22 +2045,6 @@ class Movie:
         self.frames[pos].hold = not self.frames[pos].hold
         self.clear_cache()
         self.save_meta()
-
-    def save_meta(self):
-        # TODO: save light table settings
-        clip = {
-            'resolution':[IWIDTH, IHEIGHT],
-            'frame_pos':self.pos,
-            'layer_pos':self.layer_pos,
-            'frame_order':[frame.id for frame in self.frames],
-            'layer_order':[layer.id for layer in self.layers],
-            'layer_visible':[layer.visible for layer in self.layers],
-            'layer_locked':[layer.locked for layer in self.layers],
-            'hold':[[frame.hold for frame in layer.frames] for layer in self.layers],
-        }
-        text = json.dumps(clip,indent=2)
-        with open(os.path.join(self.dir, CLIP_FILE), 'w') as clip_file:
-            clip_file.write(text)
 
     def frame(self, pos):
         return self.layers[self.layer_pos].frame(pos)
@@ -2130,23 +2276,6 @@ class Movie:
         f.increment_version()
         return f
 
-    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False):
-        f = self.curr_frame()
-        if transparent:
-            s = pg.Surface((f.get_width(), f.get_height()), pg.SRCALPHA)
-        else:
-            s = make_surface(f.get_width(), f.get_height())
-            s.fill(BACKGROUND)
-        surfaces = []
-        for layer in layers:
-            if not layer.visible and not include_invisible:
-                continue
-            f = layer.frame(pos)
-            surfaces.append(f.surf_by_id('color'))
-            surfaces.append(f.surf_by_id('lines'))
-        s.blits([(surface, (0, 0), (0, 0, surface.get_width(), surface.get_height())) for surface in surfaces])
-        return s
-
     def _set_undrawable_layers_grid(self, s):
         alpha = pg.surfarray.pixels3d(s)
         alpha[::WIDTH*3, ::WIDTH*3, :] = 0
@@ -2208,13 +2337,8 @@ class Movie:
 
         return cache.fetch(CachedTopLayers())
 
-    def save_gif_and_pngs(self):
-        with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, loop=0) as writer:
-            for i in range(len(self.frames)):
-                frame = self._blit_layers(self.layers, i)
-                pixels = np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2])
-                writer.append_data(pixels)
-                imageio.imwrite(os.path.join(self.dir, FRAME_FMT%i), pixels) 
+    def render_and_save_current_frame(self):
+        pg.image.save(self._blit_layers(self.layers, self.pos), os.path.join(self.dir, CURRENT_FRAME_FILE))
 
     def garbage_collect_layer_dirs(self):
         # we don't remove deleted layers from the disk when they're deleted since if there are a lot
@@ -2226,12 +2350,13 @@ class Movie:
                 shutil.rmtree(full)
 
     def save_before_closing(self):
-        layout.movie_list_area().save_history()
         global history
         history = History()
         self.frame(self.pos).save()
         self.save_meta()
-        self.save_gif_and_pngs()
+        layout.movie_list_area().start_export()
+        layout.movie_list_area().save_history()
+        self.render_and_save_current_frame()
         self.garbage_collect_layer_dirs()
         for layer in self.layers:
             for frame in layer.frames:
@@ -2362,7 +2487,7 @@ def insert_clip():
     global movie
     movie.save_before_closing()
     movie = Movie(new_movie_clip_dir())
-    movie.save_gif_and_pngs() # write out FRAME_FMT % 0 for MovieListArea.reload...
+    movie.render_and_save_current_frame() # write out CURRENT_FRAME_FILE for MovieListArea.reload...
     layout.movie_list_area().reload()
 
 def remove_clip():
@@ -2378,7 +2503,9 @@ def remove_clip():
 
     new_clip_pos = 0
     movie = Movie(movie_list_area.clips[new_clip_pos])
+    movie_list_area.clip_pos = new_clip_pos
     movie_list_area.open_history(new_clip_pos)
+    movie_list_area.interrupt_export()
 
 def toggle_playing(): layout.toggle_playing()
 
@@ -2894,6 +3021,7 @@ while not escape:
   break
       
 movie.save_before_closing()
+layout.movie_list_area().wait_for_all_exporting_to_finish()
 
 pygame.display.quit()
 pygame.quit()
