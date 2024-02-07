@@ -30,7 +30,6 @@ import io
 import json
 import shutil
 from scipy.interpolate import splprep, splev
-import av
 
 # this requires numpy to be installed in addition to scikit-image
 from skimage.morphology import flood_fill, binary_dilation, skeletonize
@@ -65,7 +64,6 @@ MAX_HISTORY_BYTE_SIZE = 1*1024**3
 MAX_CACHE_BYTE_SIZE = 1*1024**3
 MAX_CACHED_ITEMS = 2000
 FRAME_FMT = 'frame%04d.png'
-CURRENT_FRAME_FILE = 'current_frame.png'
 CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
 # makes the png the image inside the directory icon displayed in Explorer... which is very nice
 FRAME_ORDER_FILE = 'frame_order.json'
@@ -903,7 +901,7 @@ class Layout:
             if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
                 elem.draw()
             if elem.draw_border:
-                pygame.draw.rect(screen, UNUSED, elem.rect, 1, 1)
+                pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
 
     # note that pygame seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
@@ -1541,7 +1539,10 @@ class MovieListArea:
         single_image_height = screen.get_height() * MOVIES_Y_SHARE
         for clipdir in get_clip_dirs():
             fulldir = os.path.join(WD, clipdir)
-            frame_file = os.path.join(fulldir, CURRENT_FRAME_FILE)
+            with open(os.path.join(fulldir, CLIP_FILE), 'r') as clipfile:
+                clip = json.loads(clipfile.read())
+            curr_frame = clip['frame_pos']
+            frame_file = os.path.join(fulldir, FRAME_FMT % curr_frame)
             image = pg.image.load(frame_file) if os.path.exists(frame_file) else new_frame()
             self.images.append(scale_image(image, height=single_image_height))
             self.clips.append(fulldir)
@@ -1828,36 +1829,9 @@ class Layer:
         self.visible = not self.visible
         self.lit = self.visible
 
-# a supposed advantage of this verbose method using PyUV over "just" using imageio
-# is that `pip install av` installs ffmpeg libraries so you don't need to worry
-# separately about installing ffmpeg. imageio also fails in a "TiffWriter" at the
-# time of writing, or if the "fps" parameter is removed, creates a giant .mp4
-# output file that nothing seems to be able to play.
-class MP4:
-    def __init__(self, fname, width, height, fps):
-        self.output = av.open(fname, 'w', format='mp4')
-        self.stream = self.output.add_stream('h264', str(fps))
-        self.stream.width = width
-        self.stream.height = height
-        self.stream.pix_fmt = 'yuv420p' # Windows Media Player eats this up unlike yuv444p
-        self.stream.options = {'crf': '17'} # quite bad quality with smaller file sizes without this
-    def write_frame(self, pixels):
-        frame = av.VideoFrame.from_ndarray(pixels, format='rgb24')
-        packet = self.stream.encode(frame)
-        self.output.mux(packet)
-    def close(self):
-        packet = self.stream.encode(None)
-        self.output.mux(packet)
-        self.output.close()
-    def __enter__(self): return self
-    def __exit__(self, *args): self.close()
-
 class Movie:
     def __init__(self, dir):
-        self.basedir = dir
-        self.dir = os.path.join(dir, 'internal')
-        self.exported = os.path.join(dir, 'exported')
-        dir = self.dir
+        self.dir = dir
         if not os.path.isdir(dir): # new clip
             os.makedirs(dir)
             self.frames = [Frame(self.dir)]
@@ -2234,33 +2208,13 @@ class Movie:
 
         return cache.fetch(CachedTopLayers())
 
-    def gif_path(self): return os.path.join(self.exported, os.path.basename(self.basedir)+'-GIF.gif')
-    def mp4_path(self): return os.path.join(self.exported, os.path.basename(self.basedir)+'-MP4.mp4')
-
-    def export(self):
-        seq = os.path.join(self.exported, 'image_sequence')
-        if os.path.isdir(seq):
-            shutil.rmtree(seq) # the number of frames could have changed - we don't want stale files
-        os.makedirs(seq)
-        for f in os.listdir(self.exported):
-            if f.endswith('-GIF.gif') or f.endswith('-MP4.mp4'): # the name of the movie could have changed
-                os.unlink(os.path.join(self.exported, f))
-        assert FRAME_RATE==12
-        with imageio.get_writer(self.gif_path(), fps=FRAME_RATE, loop=0) as gif_writer:
-            with MP4(self.mp4_path(), IWIDTH, IHEIGHT, fps=24) as mp4_writer:
-                for i in range(len(self.frames)):
-                    frame = self._blit_layers(self.layers, i)
-                    pixels = np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2])
-                    gif_writer.append_data(pixels)
-                    # append each frame twice at MP4 to get a standard 24 fps frame rate
-                    # (for GIFs there's less likelihood that something has a problem with
-                    # "non-standard 12 fps" (?))
-                    mp4_writer.write_frame(pixels)
-                    mp4_writer.write_frame(pixels)
-                    imageio.imwrite(os.path.join(seq, FRAME_FMT%i), pixels)
-
-    def render_and_save_current_frame(self):
-        pg.image.save(self._blit_layers(self.layers, self.pos), os.path.join(self.basedir, CURRENT_FRAME_FILE))
+    def save_gif_and_pngs(self):
+        with imageio.get_writer(self.dir + '.gif', fps=FRAME_RATE, loop=0) as writer:
+            for i in range(len(self.frames)):
+                frame = self._blit_layers(self.layers, i)
+                pixels = np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2])
+                writer.append_data(pixels)
+                imageio.imwrite(os.path.join(self.dir, FRAME_FMT%i), pixels) 
 
     def garbage_collect_layer_dirs(self):
         # we don't remove deleted layers from the disk when they're deleted since if there are a lot
@@ -2277,7 +2231,7 @@ class Movie:
         history = History()
         self.frame(self.pos).save()
         self.save_meta()
-        self.render_and_save_current_frame()
+        self.save_gif_and_pngs()
         self.garbage_collect_layer_dirs()
         for layer in self.layers:
             for frame in layer.frames:
@@ -2408,7 +2362,7 @@ def insert_clip():
     global movie
     movie.save_before_closing()
     movie = Movie(new_movie_clip_dir())
-    movie.render_and_save_current_frame() # write out current_frame.png for MovieListArea.reload...
+    movie.save_gif_and_pngs() # write out FRAME_FMT % 0 for MovieListArea.reload...
     layout.movie_list_area().reload()
 
 def remove_clip():
@@ -2552,7 +2506,7 @@ def get_clip_dirs():
         try:
             if d.endswith('-deleted'):
                 continue
-            frame_order_file = os.path.join(os.path.join(WD, d), 'internal', CLIP_FILE)
+            frame_order_file = os.path.join(os.path.join(WD, d), CLIP_FILE)
             s = os.stat(frame_order_file)
             clipdirs[d] = s.st_mtime
         except:
@@ -2844,10 +2798,6 @@ def paste_frame():
     history_item.optimize()
     history.append_item(history_item)
 
-def export_and_open_explorer():
-    movie.export()
-    subprocess.Popen('explorer /select,'+movie.gif_path())
-
 def process_keydown_event(event):
     ctrl = pg.key.get_mods() & pg.KMOD_CTRL
     shift = pg.key.get_mods() & pg.KMOD_SHIFT
@@ -2874,10 +2824,6 @@ def process_keydown_event(event):
     # Ctrl-R: rotate
     if ctrl and event.key == pg.K_r:
         swap_width_height()
-
-    # Ctrl-E: export
-    if ctrl and event.key == pg.K_e:
-        export_and_open_explorer()
 
     # other keyboard shortcuts are enabled/disabled by Ctrl-A
     global keyboard_shortcuts_enabled
