@@ -1375,10 +1375,6 @@ class Layout:
         assert isinstance(self.elems[1], TimelineArea)
         return self.elems[1]
 
-    def movie_list_area(self):
-        assert isinstance(self.elems[2], MovieListArea)
-        return self.elems[2]
-
     def toggle_playing(self):
         self.is_playing = not self.is_playing
         self.playing_index = 0
@@ -1964,10 +1960,8 @@ class ProgressBar:
         screen.blit(text_surface, pos)
         pg.display.flip()
 
-class MovieListArea:
+class MovieList:
     def __init__(self):
-        self.show_pos = None
-        self.prevx = None
         self.reload()
         self.histories = {}
         self.exporting_processes = {}
@@ -1984,70 +1978,11 @@ class MovieListArea:
             self.images.append(scale_image(image, height=single_image_height))
             self.clips.append(fulldir)
         self.clip_pos = 0 
-    def draw(self):
-        _, _, width, _ = self.rect
-        left = 0
-        first = True
-        pos = self.show_pos if self.show_pos is not None else self.clip_pos
-        for image in self.images[pos:]:
-            border = 1 + first*2
-            if first and pos == self.clip_pos:
-                try:
-                    image = movie.get_thumbnail(movie.pos, image.get_width(), image.get_height(), highlight=False) 
-                    self.images[pos] = image # this keeps the image correct when scrolled out of clip_pos
-                    # (we don't self.reload() upon scrolling so self.images can go stale when the current
-                    # clip is modified)
-                except:
-                    pass
-            first = False
-            self.subsurface.blit(image, (left, 0), image.get_rect()) 
-            pygame.draw.rect(self.subsurface, PEN, (left, 0, image.get_width(), image.get_height()), border)
-            left += image.get_width()
-            if left >= width:
-                break
-    def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
-    def x2frame(self, x):
-        if not self.images or x is None:
-            return None
-        left, _, _, _ = self.rect
-        return (x-left) // self.images[0].get_width()
-    def on_mouse_down(self,x,y):
-        if self.new_delete_tool():
-            if self.x2frame(x) == 0:
-                layout.tool.clip_func()
-                restore_tool()
-            return
-        self.prevx = x
-        self.show_pos = self.clip_pos
-    def on_mouse_move(self,x,y):
-        if self.prevx is None:
-            self.prevx = x # this happens eg when a new_delete_tool is used upon mouse down
-            # and then the original tool is restored
-            self.show_pos = self.clip_pos
-        if self.new_delete_tool():
-            return
-        prev_pos = self.x2frame(self.prevx)
-        curr_pos = self.x2frame(x)
-        if prev_pos is None and curr_pos is None:
-            self.prevx = x
-            return
-        if curr_pos is not None and prev_pos is not None:
-            pos_dist = prev_pos - curr_pos
-        else:
-            pos_dist = -1 if x > self.prevx else 1
-        self.prevx = x
-        self.show_pos = min(max(0, self.show_pos + pos_dist), len(self.clips)-1) 
-    def on_mouse_up(self,x,y):
-        self.on_mouse_move(x,y)
-        # opening a movie is a slow operation so we don't want it to be "too interactive"
-        # (like timeline scrolling) - we wait for the mouse-up event to actually open the clip
-        self.open_clip(self.show_pos)
-        self.prevx = None
-        self.show_pos = None
     def open_clip(self, clip_pos):
         if clip_pos == self.clip_pos:
             return
         global movie
+        assert movie.dir == self.clips[self.clip_pos]
         movie.save_before_closing()
         progress_bar = ProgressBar('Loading...')
         movie = Movie(self.clips[clip_pos], progress=progress_bar.on_progress)
@@ -2091,6 +2026,71 @@ class MovieListArea:
             progress_bar.on_progress(progress_status.done, progress_status.total)
 
         self.exporting_processes = {}
+
+class MovieListArea:
+    def __init__(self):
+        self.show_pos = None
+        self.prevx = None
+    def draw(self):
+        _, _, width, _ = self.rect
+        left = 0
+        first = True
+        pos = self.show_pos if self.show_pos is not None else movie_list.clip_pos
+        for image in movie_list.images[pos:]:
+            border = 1 + first*2
+            if first and pos == movie_list.clip_pos:
+                try:
+                    image = movie.get_thumbnail(movie.pos, image.get_width(), image.get_height(), highlight=False) 
+                    self.images[pos] = image # this keeps the image correct when scrolled out of clip_pos
+                    # (we don't self.reload() upon scrolling so self.images can go stale when the current
+                    # clip is modified)
+                except:
+                    pass
+            first = False
+            self.subsurface.blit(image, (left, 0), image.get_rect()) 
+            pygame.draw.rect(self.subsurface, PEN, (left, 0, image.get_width(), image.get_height()), border)
+            left += image.get_width()
+            if left >= width:
+                break
+    def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
+    def x2frame(self, x):
+        if not movie_list.images or x is None:
+            return None
+        left, _, _, _ = self.rect
+        return (x-left) // movie_list.images[0].get_width()
+    def on_mouse_down(self,x,y):
+        if self.new_delete_tool():
+            if self.x2frame(x) == 0:
+                layout.tool.clip_func()
+                restore_tool()
+            return
+        self.prevx = x
+        self.show_pos = movie_list.clip_pos
+    def on_mouse_move(self,x,y):
+        if self.prevx is None:
+            self.prevx = x # this happens eg when a new_delete_tool is used upon mouse down
+            # and then the original tool is restored
+            self.show_pos = movie_list.clip_pos
+        if self.new_delete_tool():
+            return
+        prev_pos = self.x2frame(self.prevx)
+        curr_pos = self.x2frame(x)
+        if prev_pos is None and curr_pos is None:
+            self.prevx = x
+            return
+        if curr_pos is not None and prev_pos is not None:
+            pos_dist = prev_pos - curr_pos
+        else:
+            pos_dist = -1 if x > self.prevx else 1
+        self.prevx = x
+        self.show_pos = min(max(0, self.show_pos + pos_dist), len(movie_list.clips)-1) 
+    def on_mouse_up(self,x,y):
+        self.on_mouse_move(x,y)
+        # opening a movie is a slow operation so we don't want it to be "too interactive"
+        # (like timeline scrolling) - we wait for the mouse-up event to actually open the clip
+        movie_list.open_clip(self.show_pos)
+        self.prevx = None
+        self.show_pos = None
 
 class ToolSelectionButton:
     def __init__(self, tool):
@@ -2462,9 +2462,9 @@ class Movie(MovieData):
             if is_exported_png(f):
                 os.unlink(os.path.join(self.dir, f))
 
-        layout.movie_list_area().start_export()
+        movie_list.start_export()
 
-        layout.movie_list_area().save_history()
+        movie_list.save_history()
         self.render_and_save_current_frame()
         self.garbage_collect_layer_dirs()
         for layer in self.layers:
@@ -2597,24 +2597,23 @@ def insert_clip():
     movie.save_before_closing()
     movie = Movie(new_movie_clip_dir())
     movie.render_and_save_current_frame() # write out CURRENT_FRAME_FILE for MovieListArea.reload...
-    layout.movie_list_area().reload()
+    movie_list.reload()
 
 def remove_clip():
-    movie_list_area = layout.movie_list_area()
-    if len(movie_list_area.clips) <= 1:
+    if len(movie_list.clips) <= 1:
         return # we don't remove the last clip - if we did we'd need to create a blank one,
         # which is a bit confusing. [we can't remove the last frame in a timeline, either]
     global movie
     movie.save_before_closing()
     os.rename(movie.dir, movie.dir + '-deleted')
-    movie_list_area.delete_current_history()
-    movie_list_area.reload()
+    movie_list.delete_current_history()
+    movie_list.reload()
 
     new_clip_pos = 0
-    movie = Movie(movie_list_area.clips[new_clip_pos])
-    movie_list_area.clip_pos = new_clip_pos
-    movie_list_area.open_history(new_clip_pos)
-    movie_list_area.interrupt_export()
+    movie = Movie(movie_list.clips[new_clip_pos])
+    movie_list.clip_pos = new_clip_pos
+    movie_list.open_history(new_clip_pos)
+    movie_list.interrupt_export()
 
 def toggle_playing(): layout.toggle_playing()
 
@@ -2767,6 +2766,9 @@ def init_layout():
     TOOLBAR_X_SHARE = 0.15
     LAYERS_Y_SHARE = 1-TIMELINE_Y_SHARE
     LAYERS_X_SHARE = LAYERS_Y_SHARE / MAX_LAYERS
+    
+    # needs to be the same in all layouts or we need to adjust thumbnails in movie_list.images
+    MOVIES_Y_SHARE = TOOLBAR_X_SHARE + LAYERS_X_SHARE - TIMELINE_Y_SHARE
 
     if vertical_movie_on_horizontal_screen:
         DRAWING_AREA_Y_SHARE = 1
@@ -2774,8 +2776,7 @@ def init_layout():
         DRAWING_AREA_X_START = 0
         DRAWING_AREA_Y_START = 0
         timeline_rect = (DRAWING_AREA_X_SHARE, 0, 1-DRAWING_AREA_X_SHARE, TIMELINE_Y_SHARE)
-        MOVIES_Y_SHARE = 0.10
-        MOVIES_X_START = TOOLBAR_X_SHARE + DRAWING_AREA_X_SHARE + LAYERS_X_SHARE
+        MOVIES_X_START = TOOLBAR_X_SHARE + DRAWING_AREA_X_SHARE
         MOVIES_X_SHARE = 1-TOOLBAR_X_SHARE-DRAWING_AREA_X_SHARE-LAYERS_X_SHARE
         TOOLBAR_X_START = DRAWING_AREA_X_SHARE
     else:
@@ -2784,13 +2785,14 @@ def init_layout():
         DRAWING_AREA_X_START = TOOLBAR_X_SHARE
         DRAWING_AREA_Y_START = TIMELINE_Y_SHARE
         timeline_rect = (0, 0, 1, TIMELINE_Y_SHARE)
-        MOVIES_Y_SHARE = 1-DRAWING_AREA_Y_SHARE-TIMELINE_Y_SHARE
+        # this is what MOVIES_Y_SHARE is in horizontal layouts; vertical just inherit it
+        #MOVIES_Y_SHARE = 1-DRAWING_AREA_Y_SHARE-TIMELINE_Y_SHARE
         MOVIES_X_START = TOOLBAR_X_SHARE
         MOVIES_X_SHARE = 1-TOOLBAR_X_SHARE-LAYERS_X_SHARE
         TOOLBAR_X_START = 0
 
     MOVIES_Y_START = 1 - MOVIES_Y_SHARE
-    LAYERS_X_START = TOOLBAR_X_SHARE+DRAWING_AREA_X_SHARE
+    LAYERS_X_START = 1 - LAYERS_X_SHARE
     LAYERS_Y_START = TIMELINE_Y_SHARE
 
     last_tool = layout.full_tool if layout else None
@@ -2798,9 +2800,9 @@ def init_layout():
     layout = Layout()
     layout.add((DRAWING_AREA_X_START, DRAWING_AREA_Y_START, DRAWING_AREA_X_SHARE, DRAWING_AREA_Y_SHARE), DrawingArea())
 
-    layout.add(timeline_rect, TimelineArea(), draw_border=vertical_movie_on_horizontal_screen)
-    layout.add((MOVIES_X_START, MOVIES_Y_START, MOVIES_X_SHARE, MOVIES_Y_SHARE), MovieListArea(), draw_border=vertical_movie_on_horizontal_screen)
-    layout.add((LAYERS_X_START, LAYERS_Y_START, LAYERS_X_SHARE, LAYERS_Y_SHARE), LayersArea(), draw_border=vertical_movie_on_horizontal_screen)
+    layout.add(timeline_rect, TimelineArea())
+    layout.add((MOVIES_X_START, MOVIES_Y_START, MOVIES_X_SHARE, MOVIES_Y_SHARE), MovieListArea())
+    layout.add((LAYERS_X_START, LAYERS_Y_START, LAYERS_X_SHARE, LAYERS_Y_SHARE), LayersArea())
 
     if vertical_movie_on_horizontal_screen:
         layout.add((MOVIES_X_START, TIMELINE_Y_SHARE, 1-LAYERS_X_SHARE-DRAWING_AREA_X_SHARE-TOOLBAR_X_SHARE, 1-TIMELINE_Y_SHARE-MOVIES_Y_SHARE), EmptyElem())
@@ -2859,6 +2861,8 @@ def default_clip_dir():
 movie = Movie(default_clip_dir())
 
 init_layout()
+
+movie_list = MovieList()
 
 class SwapWidthHeightHistoryItem:
     def undo(self):
@@ -3130,7 +3134,7 @@ while not escape:
   break
       
 movie.save_before_closing()
-layout.movie_list_area().wait_for_all_exporting_to_finish()
+movie_list.wait_for_all_exporting_to_finish()
 
 pygame.display.quit()
 pygame.quit()
