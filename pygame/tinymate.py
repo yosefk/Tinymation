@@ -19,6 +19,24 @@ if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
     compress_and_remove(sys.argv[2:])
     exit()
 
+# we use a subprocess for an open file dialog since using tkinter together with pygame
+# causes issues for the latter after the first use of the former
+
+def dir_path_dialog():
+    import tkinter
+    import tkinter.filedialog
+
+    tk_root = tkinter.Tk()
+    tk_root.withdraw()  # Hide the main window
+
+    file_path = tkinter.filedialog.askdirectory(title="Select a Tinymate clips directory")
+    if file_path:
+        sys.stdout.write(repr(file_path.encode()))
+
+if len(sys.argv)>1 and sys.argv[1] == 'dir-path-dialog':
+    dir_path_dialog()
+    exit()
+
 # we spawn subprocesses to export the movie to GIF, MP4 and a PNG sequence
 # every time we close a movie (if we reopen it, we interrupt the exporting
 # process and then restart upon closing; when we exit the application,
@@ -396,9 +414,12 @@ class MovieData:
         }
         fname = os.path.join(self.dir, CLIP_FILE)
         text = json.dumps(clip,indent=2)
-        with open(fname) as clip_file:
-            if text == clip_file.read():
-                return # no changes
+        try:
+            with open(fname) as clip_file:
+                if text == clip_file.read():
+                    return # no changes
+        except FileNotFoundError:
+            pass
         self.edited_since_export = True
         with open(fname, 'w') as clip_file:
             clip_file.write(text)
@@ -582,7 +603,11 @@ pg.init()
 #screen = pygame.display.set_mode((350, 800), pygame.RESIZABLE)
 #screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
 screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+screen.fill(BACKGROUND)
+pygame.display.flip()
 pygame.display.set_caption("Tinymate")
+
+font = pygame.font.Font(size=screen.get_height()//15)
 
 FADING_RATE = 3
 MARGIN = (220, 215, 190)
@@ -1292,6 +1317,12 @@ class FlashlightTool(Button):
 # - the element sizes are relative to the screen size. [within its element area, the drawing area
 #   and the timeline images use a 16:9 subset]
 
+def scale_rect(rect):
+    left, bottom, width, height = rect
+    sw = screen.get_width()
+    sh = screen.get_height()
+    return (round(left*sw), round(bottom*sh), round(width*sw), round(height*sh))
+
 class Layout:
     def __init__(self):
         self.elems = []
@@ -1305,12 +1336,8 @@ class Layout:
 
     def aspect_ratio(self): return self.width/self.height
 
-    def scale_rect(self, rect):
-        left, bottom, width, height = rect
-        return (round(left*self.width), round(bottom*self.height), round(width*self.width), round(height*self.height))
-
     def add(self, rect, elem, draw_border=False):
-        srect = self.scale_rect(rect)
+        srect = scale_rect(rect)
         elem.rect = srect
         elem.subsurface = screen.subsurface(srect)
         elem.draw_border = draw_border
@@ -1945,7 +1972,7 @@ class ProgressBar:
         self.total = 1
         horz_margin = 0.32
         vert_margin = 0.47
-        self.inner_rect = layout.scale_rect((horz_margin, vert_margin, 1-horz_margin*2, 1-vert_margin*2))
+        self.inner_rect = scale_rect((horz_margin, vert_margin, 1-horz_margin*2, 1-vert_margin*2))
         left, bottom, width, height = self.inner_rect
         margin = WIDTH
         self.outer_rect = (left-margin, bottom-margin, width+margin*2, height+margin*2)
@@ -1964,6 +1991,10 @@ class ProgressBar:
         pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
         screen.blit(text_surface, pos)
         pg.display.flip()
+
+def open_movie_with_progress_bar(clipdir):
+    progress_bar = ProgressBar('Loading...')
+    return Movie(clipdir, progress=progress_bar.on_progress)
 
 class MovieList:
     def __init__(self):
@@ -1989,9 +2020,8 @@ class MovieList:
         global movie
         assert movie.dir == self.clips[self.clip_pos]
         movie.save_before_closing()
-        progress_bar = ProgressBar('Loading...')
         self.clip_pos = clip_pos
-        movie = Movie(self.clips[clip_pos], progress=progress_bar.on_progress)
+        movie = open_movie_with_progress_bar(self.clips[clip_pos])
         movie.edited_since_export = self.export_in_progress() # if we haven't finished
         # exporting [meaning that we'll interrupt the exporting process], treat the movie as
         # "edited since export"
@@ -2631,7 +2661,7 @@ def remove_clip():
     movie_list.reload()
 
     new_clip_pos = 0
-    movie = Movie(movie_list.clips[new_clip_pos])
+    movie = open_movie_with_progress_bar(movie_list.clips[new_clip_pos])
     movie_list.clip_pos = new_clip_pos
     movie.edited_since_export = movie_list.export_in_progress()
     movie_list.open_history(new_clip_pos)
@@ -2777,6 +2807,9 @@ layout = None
 
 class EmptyElem:
     def draw(self): pg.draw.rect(screen, UNUSED, self.rect)
+    def on_mouse_down(self,x,y): pass
+    def on_mouse_up(self,x,y): pass
+    def on_mouse_move(self,x,y): pass
 
 def init_layout():
     global layout
@@ -2880,13 +2913,18 @@ def default_clip_dir():
     else:
         return os.path.join(WD, clip_dirs[0]), False
 
-movie_dir, is_new_dir = default_clip_dir()
-movie = Movie(movie_dir)
-movie.edited_since_export = is_new_dir
+def load_clips_dir():
+    movie_dir, is_new_dir = default_clip_dir()
+    global movie
+    movie = Movie(movie_dir) if is_new_dir else open_movie_with_progress_bar(movie_dir)
+    movie.edited_since_export = is_new_dir
 
-init_layout()
+    init_layout()
 
-movie_list = MovieList()
+    global movie_list
+    movie_list = MovieList()
+
+load_clips_dir()
 
 class SwapWidthHeightHistoryItem:
     def undo(self):
@@ -3068,6 +3106,22 @@ def export_and_open_explorer():
     # were still exporting them - so that when we open explorer all the exported data is up to date
     subprocess.Popen('explorer /select,'+movie.gif_path())
 
+def open_clip_dir():
+    import tkinter
+    import tkinter.filedialog
+
+    dialog_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'dir-path-dialog'], stdout=subprocess.PIPE)
+    output, _ = dialog_subprocess.communicate()
+    # we use repr/eval because writing Unicode to sys.stdout fails
+    # and so does writing the binary output of encode() without repr()
+    file_path = eval(output).decode() if output.strip() else None
+    global WD
+    if file_path and os.path.realpath(file_path) != os.path.realpath(WD):
+        movie.save_before_closing()
+        movie_list.wait_for_all_exporting_to_finish()
+        WD = file_path
+        load_clips_dir()
+
 def process_keydown_event(event):
     ctrl = pg.key.get_mods() & pg.KMOD_CTRL
     shift = pg.key.get_mods() & pg.KMOD_SHIFT
@@ -3085,6 +3139,10 @@ def process_keydown_event(event):
     # Ctrl-E: export
     if ctrl and event.key == pg.K_e:
         export_and_open_explorer()
+
+    # Ctrl-O: open a directory
+    if ctrl and event.key == pg.K_o:
+        open_clip_dir()
 
     # Ctrl-C/X/V
     if ctrl:
@@ -3117,8 +3175,6 @@ def process_keydown_event(event):
 
 layout.draw()
 pygame.display.flip()
-
-font = pygame.font.Font(size=screen.get_height()//15)
 
 while not escape: 
  try:
