@@ -2450,9 +2450,7 @@ class Movie(MovieData):
             if f.endswith('-deleted') and f.startswith('layer-') and os.path.isdir(full):
                 shutil.rmtree(full)
 
-    def save_before_closing(self):
-        global history
-        history = History()
+    def save_and_start_export(self):
         self.frame(self.pos).save()
         self.save_meta()
 
@@ -2464,7 +2462,13 @@ class Movie(MovieData):
 
         movie_list.start_export()
 
+    def save_before_closing(self):
+        self.save_and_start_export()
+
         movie_list.save_history()
+        global history
+        history = History()
+
         self.render_and_save_current_frame()
         self.garbage_collect_layer_dirs()
         for layer in self.layers:
@@ -3038,6 +3042,12 @@ def paste_frame():
     history_item.optimize()
     history.append_item(history_item)
 
+def export_and_open_explorer():
+    movie.save_and_start_export()
+    movie_list.wait_for_all_exporting_to_finish() # wait for this movie and others if we
+    # were still exporting them - so that when we open explorer all the exported data is up to date
+    subprocess.Popen('explorer /select,'+movie.gif_path())
+
 def process_keydown_event(event):
     ctrl = pg.key.get_mods() & pg.KMOD_CTRL
     shift = pg.key.get_mods() & pg.KMOD_SHIFT
@@ -3051,6 +3061,10 @@ def process_keydown_event(event):
     # Ctrl+Shift+Delete
     if event.key == pg.K_DELETE and ctrl and shift:
         clear_history()
+
+    # Ctrl-E: export
+    if ctrl and event.key == pg.K_e:
+        export_and_open_explorer()
 
     # Ctrl-C/X/V
     if ctrl:
