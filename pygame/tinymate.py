@@ -394,8 +394,13 @@ class MovieData:
             'layer_locked':[layer.locked for layer in self.layers],
             'hold':[[frame.hold for frame in layer.frames] for layer in self.layers],
         }
+        fname = os.path.join(self.dir, CLIP_FILE)
         text = json.dumps(clip,indent=2)
-        with open(os.path.join(self.dir, CLIP_FILE), 'w') as clip_file:
+        with open(fname) as clip_file:
+            if text == clip_file.read():
+                return # no changes
+        self.edited_since_export = True
+        with open(fname, 'w') as clip_file:
             clip_file.write(text)
 
     def gif_path(self): return os.path.realpath(self.dir)+'-GIF.gif'
@@ -1985,8 +1990,11 @@ class MovieList:
         assert movie.dir == self.clips[self.clip_pos]
         movie.save_before_closing()
         progress_bar = ProgressBar('Loading...')
-        movie = Movie(self.clips[clip_pos], progress=progress_bar.on_progress)
         self.clip_pos = clip_pos
+        movie = Movie(self.clips[clip_pos], progress=progress_bar.on_progress)
+        movie.edited_since_export = self.export_in_progress() # if we haven't finished
+        # exporting [meaning that we'll interrupt the exporting process], treat the movie as
+        # "edited since export"
         self.open_history(clip_pos)
         self.interrupt_export()
     def open_history(self, clip_pos):
@@ -1995,6 +2003,12 @@ class MovieList:
     def save_history(self):
         if self.clips:
             self.histories[self.clips[self.clip_pos]] = history
+    def export_in_progress(self):
+        if self.clips:
+            clip = self.clips[self.clip_pos]
+            if clip in self.exporting_processes:
+                proc = self.exporting_processes[clip]
+                return proc.poll() is None
     def start_export(self):
         self.interrupt_export()
         if self.clips:
@@ -2003,13 +2017,12 @@ class MovieList:
             CREATE_NEW_PROCESS_GROUP = 0x00000200
             self.exporting_processes[clip] = subprocess.Popen([sys.executable, sys.argv[0], 'export', clip], creationflags=CREATE_NEW_PROCESS_GROUP)
     def interrupt_export(self):
-        if self.clips:
+        if self.export_in_progress():
             clip = self.clips[self.clip_pos]
-            if clip in self.exporting_processes:
-                proc = self.exporting_processes[clip]
-                os.kill(proc.pid, signal.CTRL_BREAK_EVENT) # TODO: SIGINT on Linux?
-                proc.wait()
-                del self.exporting_processes[clip]
+            proc = self.exporting_processes[clip]
+            os.kill(proc.pid, signal.CTRL_BREAK_EVENT) # TODO: SIGINT on Linux?
+            proc.wait()
+            del self.exporting_processes[clip]
     def wait_for_all_exporting_to_finish(self):
         progress_bar = ProgressBar('Exporting...')
         progress_status = ExportProgressStatus()
@@ -2133,6 +2146,8 @@ class Movie(MovieData):
         MovieData.__init__(self, dir, progress=progress)
         if (iwidth, iheight) != (IWIDTH, IHEIGHT):
             init_layout()
+        self.edited_since_export = True # MovieList can set it safely to false - we don't know
+        # if the last exporting process is done or not
 
     def toggle_hold(self):
         pos = self.pos
@@ -2322,7 +2337,7 @@ class Movie(MovieData):
             del layer.frames[self.pos]
             removed.delete()
             removed.dirty = True # otherwise reinsert_frame_at_pos() calling frame.save() will not save the frame to disk,
-            # which would be bad we just called frame.delete() to delete it from the disk
+            # which would be bad since we just called frame.delete() to delete it from the disk
 
             removed_frames.append(removed)
             first_holds.append(layer.frames[0].hold)
@@ -2375,6 +2390,7 @@ class Movie(MovieData):
     def edit_curr_frame(self):
         f = self.frame(self.pos)
         f.increment_version()
+        self.edited_since_export = True
         return f
 
     def _set_undrawable_layers_grid(self, s):
@@ -2460,7 +2476,8 @@ class Movie(MovieData):
             if is_exported_png(f):
                 os.unlink(os.path.join(self.dir, f))
 
-        movie_list.start_export()
+        if self.edited_since_export:
+            movie_list.start_export()
 
     def save_before_closing(self):
         self.save_and_start_export()
@@ -2616,6 +2633,7 @@ def remove_clip():
     new_clip_pos = 0
     movie = Movie(movie_list.clips[new_clip_pos])
     movie_list.clip_pos = new_clip_pos
+    movie.edited_since_export = movie_list.export_in_progress()
     movie_list.open_history(new_clip_pos)
     movie_list.interrupt_export()
 
@@ -2858,11 +2876,13 @@ def default_clip_dir():
     clip_dirs = get_clip_dirs() 
     if not clip_dirs:
         # first clip - create a new directory
-        return new_movie_clip_dir()
+        return new_movie_clip_dir(), True
     else:
-        return os.path.join(WD, clip_dirs[0])
+        return os.path.join(WD, clip_dirs[0]), False
 
-movie = Movie(default_clip_dir())
+movie_dir, is_new_dir = default_clip_dir()
+movie = Movie(movie_dir)
+movie.edited_since_export = is_new_dir
 
 init_layout()
 
