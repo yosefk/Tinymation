@@ -428,18 +428,23 @@ class MovieData:
     def mp4_path(self): return os.path.realpath(self.dir)+'-MP4.mp4'
     def png_path(self, i): return os.path.join(self.dir, FRAME_FMT%i)
 
-    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False):
-        s = pygame.Surface((IWIDTH, IHEIGHT), pygame.SRCALPHA)
+    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False, width=None, height=None):
+        if not width: width=IWIDTH
+        if not height: height=IHEIGHT
+        s = pygame.Surface((width, height), pygame.SRCALPHA)
         if not transparent:
             s.fill(BACKGROUND)
         surfaces = []
         for layer in layers:
             if not layer.visible and not include_invisible:
                 continue
-            f = layer.frame(pos)
-            surfaces.append(f.surf_by_id('color'))
-            surfaces.append(f.surf_by_id('lines'))
-        s.blits([(surface, (0, 0), (0, 0, surface.get_width(), surface.get_height())) for surface in surfaces])
+            if width==IWIDTH and height==IHEIGHT:
+                f = layer.frame(pos)
+                surfaces.append(f.surf_by_id('color'))
+                surfaces.append(f.surf_by_id('lines'))
+            else:
+                surfaces.append(movie.get_thumbnail(pos, width, height, transparent_single_layer=self.layers.index(layer)))
+        s.blits([(surface, (0, 0), (0, 0, width, height)) for surface in surfaces])
         return s
 
 
@@ -477,6 +482,9 @@ def check_if_interrupted():
         #print('interrupted',sys.argv[2])
         raise KeyboardInterrupt
 
+def transpose_xy(image):
+    return np.transpose(image, [1,0,2]) if len(image.shape)==3 else np.transpose(image, [1,0])
+
 def export(clipdir):
     #print('exporting',clipdir)
     movie = MovieData(clipdir, read_pixels=False)
@@ -492,7 +500,7 @@ def export(clipdir):
 
                 frame = movie._blit_layers(movie.layers, i)
                 check_if_interrupted()
-                pixels = np.transpose(pygame.surfarray.pixels3d(frame), [1,0,2])
+                pixels = transpose_xy(pygame.surfarray.pixels3d(frame))
                 check_if_interrupted()
                 gif_writer.append_data(pixels)
                 # append each frame twice at MP4 to get a standard 24 fps frame rate
@@ -808,12 +816,16 @@ def make_surface(width, height):
     return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
 
 def scale_image(surface, width=None, height=None):
+    now = time.time_ns()
     assert width or height
     if not height:
         height = int(surface.get_height() * width / surface.get_width())
     if not width:
         width = int(surface.get_width() * height / surface.get_height())
-    return pg.transform.smoothscale(surface, (width, height))
+    ret = pg.transform.smoothscale(surface, (width, height))
+    elapsed = time.time_ns() - now
+    #print('scale_image',f'{surface.get_width()}x{surface.get_height()} -> {width}x{height} ({elapsed/10**6} ms)')
+    return ret
 
 def minmax(v, minv, maxv):
     return min(maxv,max(minv,v))
@@ -1121,8 +1133,8 @@ class PenTool(Button):
                 salpha = pg.surfarray.pixels_alpha(s)
                 salpha[left:right+1, bottom:top+1] = orig_alpha
 
-            render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True))
-            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True))
+            render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True, width=drawing_area.iwidth, height=drawing_area.iheight))
+            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True, width=drawing_area.iwidth, height=drawing_area.iheight))
             render_surface(layout.timeline_area().combined_light_table_mask())
 
         self.prev_drawn = (x,y) 
@@ -1447,11 +1459,11 @@ class DrawingArea:
         pos = layout.playing_index if layout.is_playing else movie.pos
         highlight = not layout.is_playing and not movie.curr_layer().locked
         starting_point = (self.xmargin, self.ymargin)
-        self.subsurface.blit(movie.curr_bottom_layers_surface(pos, highlight=highlight), starting_point)
+        self.subsurface.blit(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight), starting_point)
         if movie.layers[movie.layer_pos].visible:
-            frame = movie.frame(pos).surface()
-            self.subsurface.blit(self.scale(frame), starting_point)
-        self.subsurface.blit(movie.curr_top_layers_surface(pos, highlight=highlight), starting_point)
+            scaled_layer = movie.get_thumbnail(pos, self.iwidth, self.iheight, transparent_single_layer=movie.layer_pos)
+            self.subsurface.blit(scaled_layer, starting_point)
+        self.subsurface.blit(movie.curr_top_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight), starting_point)
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
@@ -1463,7 +1475,6 @@ class DrawingArea:
     def update_fading_mask(self):
         if not self.fading_mask:
             return
-        now = time.time_ns()
         ignore_event = (now - self.last_update_time) // 10**6 < (1000 / (FRAME_RATE*2))
         self.last_update_time = now
 
@@ -1836,7 +1847,7 @@ class LayersArea:
                 s.color = color
             def compute_key(s):
                 frame = layer.frame(movie.pos) # note that we compute the thumbnail even if the layer is invisible
-                return (frame.cache_id_version(),), ('single-layer-thumbnail', self.width, s.color)
+                return (frame.cache_id_version(),), ('colored-layer-thumbnail', self.width, s.color)
             def compute_value(se):
                 if se.color is None:
                     return movie.get_thumbnail(movie.pos, self.width, self.thumbnail_height, transparent_single_layer=layer_pos)
@@ -2246,7 +2257,7 @@ class Movie(MovieData):
         class CachedThumbnail(CachedItem):
             def compute_key(_):
                 if trans_single:
-                    return id2version([self.layers[layer_pos]]), ('transparent-thumbnail', width, height, 'no-highlight')
+                    return id2version([self.layers[layer_pos]]), ('transparent-layer-thumbnail', width, height)
                 else:
                     def layer_ids(layers): return tuple([layer.id for layer in layers if not layer.frame(pos).empty()])
                     hl = ('highlight', layer_ids(self.layers[:layer_pos]), layer_ids([self.layers[layer_pos]]), layer_ids(self.layers[layer_pos+1:])) if highlight else 'no-highlight'
@@ -2254,24 +2265,14 @@ class Movie(MovieData):
             def compute_value(_):
                 h = int(screen.get_height() * 0.15)
                 w = int(h * IWIDTH / IHEIGHT)
-                if w == width and h == height:
-                    class CachedBottomThumbnail:
-                        def compute_key(_): return id2version(self.layers[:layer_pos]), ('thumbnail', width, height, 'highlight-bottom' if highlight else 'no-highlight')
-                        def compute_value(_): return scale_image(self.curr_bottom_layers_surface(pos, highlight=highlight), width, height)
-                    class CachedTopThumbnail: # top layers are transparent so it's a distinct cache category from normal "thumbnails"
-                        def compute_key(_): return id2version(self.layers[layer_pos+1:]), ('transparent-thumbnail', width, height, 'highlight-top' if highlight else 'no-highlight')
-                        def compute_value(_): return scale_image(self.curr_top_layers_surface(pos, highlight=highlight), width, height)
-                    class CachedMiddleThumbnail:
-                        def compute_key(_): return id2version([self.layers[layer_pos]]), ('transparent-thumbnail', width, height, 'no-highlight')
-                        def compute_value(_): return scale_image(self.layers[layer_pos].frame(pos).surface(), width, height)
-
+                if w <= width and h <= height:
                     if trans_single:
-                        return cache.fetch(CachedMiddleThumbnail())
+                        return scale_image(self.layers[layer_pos].frame(pos).surface(), width, height)
 
-                    s = cache.fetch(CachedBottomThumbnail()).copy()
+                    s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height).copy()
                     if self.layers[self.layer_pos].visible:
-                        s.blit(cache.fetch(CachedMiddleThumbnail()), (0, 0))
-                    s.blit(cache.fetch(CachedTopThumbnail()), (0, 0))
+                        s.blit(self.get_thumbnail(pos, width, height, transparent_single_layer=layer_pos), (0, 0))
+                    s.blit(self.curr_top_layers_surface(pos, highlight=highlight, width=width, height=height), (0, 0))
                     return s
                 else:
                     return scale_image(self.get_thumbnail(pos, w, h, highlight=highlight, transparent_single_layer=transparent_single_layer), width, height)
@@ -2430,22 +2431,24 @@ class Movie(MovieData):
         alpha[:1:WIDTH*3, ::WIDTH*3, :] = 0
         alpha[1:1:WIDTH*3, ::WIDTH*3, :] = 0
 
-    def curr_bottom_layers_surface(self, pos, highlight):
+    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None):
+        if not width: width=IWIDTH
+        if not height: height=IHEIGHT
+
         class CachedBottomLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), 'blit-bottom-layers' if not highlight else 'bottom-layers-highlighted'
+                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True)
-                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height)
+                s = pg.Surface((width, height), pg.SRCALPHA)
                 s.fill(BACKGROUND)
-                scale = layout.drawing_area().scale
                 if self.layer_pos == 0:
-                    return scale(s)
+                    return s
                 if not highlight:
                     s.blit(layers, (0, 0))
-                    return scale(s)
+                    return s
                 layers.set_alpha(128)
-                below_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                below_image = pg.Surface((width, height), pg.SRCALPHA)
                 below_image.set_alpha(128)
                 below_image.fill(LAYERS_BELOW)
                 alpha = pg.surfarray.array_alpha(layers)
@@ -2454,23 +2457,25 @@ class Movie(MovieData):
                 self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
 
-                return scale(s)
+                return s
 
         return cache.fetch(CachedBottomLayers())
 
-    def curr_top_layers_surface(self, pos, highlight):
+    def curr_top_layers_surface(self, pos, highlight, width=None, height=None):
+        if not width: width=IWIDTH
+        if not height: height=IHEIGHT
+
         class CachedTopLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), 'blit-top-layers' if not highlight else 'top-layers-highlighted'
+                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True)
-                scale = layout.drawing_area().scale
+                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height)
                 if not highlight or self.layer_pos == len(self.layers)-1:
-                    return scale(layers)
+                    return layers
                 layers.set_alpha(128)
-                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                s = pg.Surface((width, height), pg.SRCALPHA)
                 s.fill(BACKGROUND)
-                above_image = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                above_image = pg.Surface((width, height), pg.SRCALPHA)
                 above_image.set_alpha(128)
                 above_image.fill(LAYERS_ABOVE)
                 alpha = pg.surfarray.array_alpha(layers)
@@ -2480,7 +2485,7 @@ class Movie(MovieData):
                 pg.surfarray.pixels_alpha(s)[:] = alpha
                 s.set_alpha(192)
 
-                return scale(s)
+                return s
 
         return cache.fetch(CachedTopLayers())
 
@@ -3179,11 +3184,11 @@ pygame.display.flip()
 while not escape: 
  try:
   for event in pygame.event.get():
+   if event.type not in interesting_events:
+       continue
    #if event.type not in timer_events:
    #   print(pg.event.event_name(event.type),tdiff(),event.type,pygame.key.get_mods())
 
-   if event.type not in interesting_events:
-       continue
    try:
       if event.type == pygame.KEYDOWN:
 
