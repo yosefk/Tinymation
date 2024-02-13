@@ -1,9 +1,10 @@
-import imageio
 import imageio.v3
 import numpy as np
 import sys
 import os
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pygame version
+
+on_windows = os.name == 'nt'
 
 # we spawn subprocesses to compress BMPs to PNGs and remove the BMPs
 # every time we save a BMP [which is faster than saving a PNG]
@@ -521,7 +522,7 @@ def export(clipdir):
     #print('done with',clipdir)
 
 if len(sys.argv)>1 and sys.argv[1] == 'export':
-    signal.signal(signal.SIGBREAK, signal_handler)
+    signal.signal(signal.SIGBREAK if on_windows else signal.SIGINT, signal_handler)
 
     try:
         import pygame
@@ -591,7 +592,8 @@ _empty_frame = Frame('')
 
 import subprocess
 import pygame.gfxdraw
-import winpath
+if on_windows:
+    import winpath
 import math
 import datetime
 import matplotlib.pyplot as plt
@@ -635,10 +637,18 @@ MAX_HISTORY_BYTE_SIZE = 1*1024**3
 MAX_CACHE_BYTE_SIZE = 1*1024**3
 MAX_CACHED_ITEMS = 2000
 
-MY_DOCUMENTS = winpath.get_my_documents()
-WD = os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymate')
-if not os.path.exists(WD):
-    os.makedirs(WD)
+if on_windows:
+    MY_DOCUMENTS = winpath.get_my_documents()
+else:
+    MY_DOCUMENTS = os.path.expanduser('~')
+
+def set_wd(wd):
+    global WD
+    WD = wd
+    if not os.path.exists(WD):
+        os.makedirs(WD)
+    
+set_wd(os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymate'))
 print('clips read from, and saved to',WD)
 
 import time
@@ -712,6 +722,8 @@ pen_draw_lines_timer = timers.add('drawLines', indent=1)
 fit_curve_timer = timers.add('bspline_interp', indent=2)
 pen_suggestions_timer = timers.add('suggestions', indent=1)
 pen_fading_mask_timer = timers.add('fading_mask', indent=1)
+timeline_down_timer = timers.add('TimelineArea.on_mouse_down')
+timeline_move_timer = timers.add('TimelineArea.on_mouse_move')
 
 fig = None
 ax = None
@@ -800,20 +812,26 @@ def bspline_interp(points, suggest_options, existing_lines):
     fit_curve_timer.stop()
     return results
 
-def plotLines(points, ax, width, suggest_options, existing_lines):
+def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height):
     results = []
     def add_results(px, py):
+        minx = math.floor(max(0, np.min(px) - pwidth - 1))
+        miny = math.floor(max(0, np.min(py) - pwidth - 1))
+        maxx = math.ceil(min(image_height-1, np.max(px) + pwidth + 1))
+        maxy = math.ceil(min(image_width-1, np.max(py) + pwidth + 1))
+
         line, = ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False, solid_capstyle='round', aa=True)
-        # Get the renderer and draw the figure
+
         canvas = FigureCanvas(fig)
-        background = canvas.copy_from_bbox(ax.bbox)
         fig.draw_artist(line)
         canvas.flush_events()
 
         pixel_data = canvas.buffer_rgba()
-        results.append(255-np.array(pixel_data)[:,:,3])
 
-        canvas.restore_region(background)
+        # TODO: it would be nice to slice before converting to numpy array rather than first
+        # convert and then slice which costs ~3 ms... but doing that gives a "memoryview: invalid slice key."
+        # perhaps canvas.copy_from_bbox() instead of buffer_rgba() could be helpful?..
+        results.append(((np.array(pixel_data)[minx:maxx+1,miny:maxy+1,3]), (minx, miny, maxx, maxy)))
 
     if len(set(points)) == 1:
         x,y = points[0]
@@ -857,9 +875,10 @@ def drawLines(image_height, image_width, points, width, suggest_options, existin
         fig = fig_dict[res]
         ax = ax_dict[res]
 
+    pwidth = width
     width *= 72 / fig.get_dpi()
 
-    return plotLines(points, ax, width, suggest_options, existing_lines)
+    return plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height)
 
 def drawCircle( screen, x, y, color, width):
     pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -947,18 +966,30 @@ def bounding_rectangle_of_a_boolean_mask(mask):
     return minx, maxx, miny, maxy
 
 class HistoryItem:
-    def __init__(self, surface_id):
+    def __init__(self, surface_id, bbox=None):
         self.surface_id = surface_id
-        surface = self.curr_surface().copy()
+        if not bbox:
+            surface = self.curr_surface().copy()
+            self.minx = 10**9
+            self.miny = 10**9
+            self.maxx = -10**9
+            self.maxy = -10**9
+        else:
+            surface = self.curr_surface()        
+            self.minx, self.miny, self.maxx, self.maxy = bbox
+
         self.saved_alpha = pg.surfarray.pixels_alpha(surface)
         self.saved_rgb = pg.surfarray.pixels3d(surface) if surface_id == 'color' else None
         self.pos = movie.pos
         self.layer_pos = movie.layer_pos
-        self.minx = 10**9
-        self.miny = 10**9
-        self.maxx = -10**9
-        self.maxy = -10**9
         self.optimized = False
+
+        if bbox:
+            self.saved_alpha = self.saved_alpha[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
+            if self.saved_rgb is not None:
+                self.saved_rgb = self.saved_rgb[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
+            self.optimized = True
+
     def curr_surface(self):
         return movie.edit_curr_frame().surf_by_id(self.surface_id)
     def nop(self):
@@ -987,6 +1018,9 @@ class HistoryItem:
         redo.optimize()
         return redo
     def optimize(self):
+        if self.optimized:
+            return
+
         mask = self.saved_alpha != pg.surfarray.pixels_alpha(self.curr_surface())
         if self.saved_rgb is not None:
             mask |= np.any(self.saved_rgb != pg.surfarray.pixels3d(self.curr_surface()), axis=2)
@@ -1109,14 +1143,17 @@ class PenTool(Button):
         pen_draw_lines_timer.stop()
         pen_suggestions_timer.start()
         items = []
-        for new_lines in line_options:
-            history_item = HistoryItem('lines')
+        for new_lines,(minx,miny,maxx,maxy) in line_options:
+            bbox = (minx, miny, maxx, maxy)
+            if prev_history_item:
+                bbox = (min(prev_history_item.minx,minx), min(prev_history_item.miny,miny), max(prev_history_item.maxx,maxx), max(prev_history_item.maxy,maxy))
+            history_item = HistoryItem('lines', bbox)
             if prev_history_item:
                 prev_history_item.undo()
             if self.eraser:
-                lines[:] = np.minimum(new_lines, lines)
+                lines[minx:maxx+1, miny:maxy+1] = np.minimum(255-new_lines, lines[minx:maxx+1, miny:maxy+1])
             else:
-                lines[:] = np.maximum(255-new_lines, lines)
+                lines[minx:maxx+1, miny:maxy+1] = np.maximum(new_lines, lines[minx:maxx+1, miny:maxy+1])
 
             if self.eraser:
                 color_history_item = HistoryItem('color')
@@ -1139,8 +1176,10 @@ class PenTool(Button):
             if self.suggestion_mask is None or (self.suggestion_mask.get_width() != IWIDTH or self.suggestion_mask.get_height() != IHEIGHT):
                 self.suggestion_mask = pg.Surface((IWIDTH, IHEIGHT), pg.SRCALPHA)
                 self.suggestion_mask.fill((0,255,0))
-            alt_option = line_options[-2]
-            pg.surfarray.pixels_alpha(self.suggestion_mask)[:] = 255-alt_option
+            alt_option, (minx,miny,maxx,maxy) = line_options[-2]
+            alpha = pg.surfarray.pixels_alpha(self.suggestion_mask)
+            alpha[:] = 0
+            alpha[minx:maxx+1,miny:maxy+1] = alt_option
             self.suggestion_mask.set_alpha(10)
             drawing_area.set_fading_mask(self.suggestion_mask)
             class Fading:
@@ -1455,7 +1494,7 @@ class Layout:
         if event.type not in [pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION]:
             return
 
-        x, y = pygame.mouse.get_pos()
+        x, y = event.pos
 
         dispatched = False
         for elem in self.elems:
@@ -1862,6 +1901,10 @@ class TimelineArea:
         left, _, _, _ = self.rect
         return x-left
     def on_mouse_down(self,x,y):
+        timeline_down_timer.start()
+        self._on_mouse_down(x,y)
+        timeline_down_timer.stop()
+    def _on_mouse_down(self,x,y):
         x = self.fix_x(x)
         self.prevx = None
         if self.new_delete_tool():
@@ -1879,6 +1922,10 @@ class TimelineArea:
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
     def on_mouse_move(self,x,y):
+        timeline_move_timer.start()
+        self._on_mouse_move(x,y)
+        timeline_move_timer.stop()
+    def _on_mouse_move(self,x,y):
         x = self.fix_x(x)
         if self.prevx is None:
             return
@@ -2140,14 +2187,14 @@ class MovieList:
         self.interrupt_export()
         if self.clips:
             clip = self.clips[self.clip_pos]
-            # TODO: this is Windows-specific
             CREATE_NEW_PROCESS_GROUP = 0x00000200
-            self.exporting_processes[clip] = subprocess.Popen([sys.executable, sys.argv[0], 'export', clip], creationflags=CREATE_NEW_PROCESS_GROUP)
+            kwargs = dict(creationflags=CREATE_NEW_PROCESS_GROUP) if on_windows else {}
+            self.exporting_processes[clip] = subprocess.Popen([sys.executable, sys.argv[0], 'export', clip], *kwargs)
     def interrupt_export(self):
         if self.export_in_progress():
             clip = self.clips[self.clip_pos]
             proc = self.exporting_processes[clip]
-            os.kill(proc.pid, signal.CTRL_BREAK_EVENT) # TODO: SIGINT on Linux?
+            os.kill(proc.pid, signal.CTRL_BREAK_EVENT if on_windows else signal.SIGINT)
             proc.wait()
             del self.exporting_processes[clip]
     def wait_for_all_exporting_to_finish(self):
@@ -2595,6 +2642,11 @@ class Movie(MovieData):
         self.frame(self.pos).save()
         self.save_meta()
 
+        # we need this to start exporting or .pngs might not be ready
+        for layer in self.layers:
+            for frame in layer.frames:
+                frame.wait_for_compression_to_finish()
+
         # remove old pngs so we don't have stale ones lying around that don't correspond to a valid frame;
         # also, we use them for getting the status of the export progress...
         for f in os.listdir(self.dir):
@@ -2613,9 +2665,6 @@ class Movie(MovieData):
 
         self.render_and_save_current_frame()
         self.garbage_collect_layer_dirs()
-        for layer in self.layers:
-            for frame in layer.frames:
-                frame.wait_for_compression_to_finish()
 
     def fit_to_resolution(self):
         for layer in self.layers:
@@ -3214,12 +3263,13 @@ def open_clip_dir():
     if file_path and os.path.realpath(file_path) != os.path.realpath(WD):
         movie.save_before_closing()
         movie_list.wait_for_all_exporting_to_finish()
-        WD = file_path
+        set_wd(file_path)
         load_clips_dir()
 
 def process_keydown_event(event):
-    ctrl = pg.key.get_mods() & pg.KMOD_CTRL
-    shift = pg.key.get_mods() & pg.KMOD_SHIFT
+    ctrl = event.mod & pg.KMOD_CTRL
+    shift = event.mod & pg.KMOD_SHIFT
+
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
     if event.key == pg.K_SPACE:
         if ctrl:
@@ -3273,54 +3323,57 @@ pygame.display.flip()
 
 export_on_exit = True
 
-while not escape: 
- try:
-  for event in pygame.event.get():
-   if event.type not in interesting_events:
-       continue
-   #if event.type not in timer_events:
-   #   print(pg.event.event_name(event.type),tdiff(),event.type,pygame.key.get_mods())
+try:
+    while not escape: 
+        for event in pygame.event.get():
+            if event.type not in interesting_events:
+                continue
+            #if event.type not in timer_events:
+            #   print(pg.event.event_name(event.type),tdiff(),event.type,pygame.key.get_mods())
 
-   try:
-      if event.type == pygame.KEYDOWN:
+            if event.type == pygame.QUIT:
+                escape = True
+                break
 
-        if event.key == pygame.K_ESCAPE: # ESC pressed
-            escape = True
-            shift = pg.key.get_mods() & pg.KMOD_SHIFT
-            export_on_exit = not shift # don't export upon Shift+ESC [for faster development cycles]
-            break
+            try:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE: # ESC pressed
+                        escape = True
+                        shift = event.mod & pg.KMOD_SHIFT
+                        export_on_exit = not shift # don't export upon Shift+ESC [for faster development cycles]
+                        break
 
-        if layout.is_pressed:
-            continue # ignore keystrokes (except ESC) when a mouse tool is being used
+                    if layout.is_pressed:
+                        continue # ignore keystrokes (except ESC) when a mouse tool is being used
 
-        process_keydown_event(event)
+                    process_keydown_event(event)
         
-      else:
-          layout.on_event(event)
+                else:
+                    layout.on_event(event)
 
-      # TODO: might be good to optimize repainting beyond "just repaint everything
-      # upon every event"
-      if layout.is_playing or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events:
-        # don't repaint upon depressed mouse movement. this is important to avoid the pen
-        # lagging upon "first contact" when a mouse motion event is sent before a mouse down
-        # event at the same coordinate; repainting upon that mouse motion event loses time
-        # when we should have been receiving the next x,y coordinates
-        if event.type != pygame.MOUSEMOTION or layout.is_pressed:
-            layout.draw()
-            if not layout.is_playing:
-                cache.collect_garbage()
-        pygame.display.flip()
-   except KeyboardInterrupt:
+                # TODO: might be good to optimize repainting beyond "just repaint everything
+                # upon every event"
+                if layout.is_playing or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events:
+                    # don't repaint upon depressed mouse movement. this is important to avoid the pen
+                    # lagging upon "first contact" when a mouse motion event is sent before a mouse down
+                    # event at the same coordinate; repainting upon that mouse motion event loses time
+                    # when we should have been receiving the next x,y coordinates
+                    if event.type != pygame.MOUSEMOTION or layout.is_pressed:
+                        layout.draw()
+                        if not layout.is_playing:
+                            cache.collect_garbage()
+                    pygame.display.flip()
+
+            except KeyboardInterrupt:
+                print('Ctrl-C - exiting')
+                escape = True
+                break
+            except:
+                print('INTERNAL ERROR (printing and continuing)')
+                import traceback
+                traceback.print_exc()
+except KeyboardInterrupt:
     print('Ctrl-C - exiting')
-    escape = True
-    break
-   except:
-    print('INTERNAL ERROR (printing and continuing)')
-    import traceback
-    traceback.print_exc()
- except KeyboardInterrupt:
-  print('Ctrl-C - exiting')
-  break
       
 timers.show()
 
