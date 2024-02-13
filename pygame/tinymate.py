@@ -595,6 +595,7 @@ import winpath
 import math
 import datetime
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib
 matplotlib.use('agg')  # turn off interactive backend
 import io
@@ -650,14 +651,67 @@ def tdiff():
     prevts = now
     return diff
 
-def image_from_fig(fig):
-    with io.BytesIO() as buff:
-        fig.savefig(buff, format='raw')
-        buff.seek(0)
-        data = np.frombuffer(buff.getvalue(), dtype=np.uint8)
-    w, h = fig.canvas.get_width_height()
-    im = data.reshape((int(h), int(w), -1))
-    return im
+class Timer:
+    CALL_HISTORY = 30
+    def __init__(self,name):
+        self.name = name
+        self.total = 0
+        self.calls = 0
+        self.min = 2**60
+        self.max = 0
+        self.history = []
+    def start(self):
+        self.start_ns = time.time_ns()
+    def stop(self):
+        took = time.time_ns() - self.start_ns
+        self.calls += 1
+        self.total += took
+        self.min = min(self.min, took)
+        self.max = max(self.max, took)
+        self.history.append(took)
+        if len(self.history) > Timer.CALL_HISTORY:
+            del self.history[0]
+    def show(self):
+        scale = 1/10**6
+        if self.calls>1:
+            history = ' '.join([str(round(scale*h)) for h in self.history])
+            return f'{self.name}: {round(scale*self.total/self.calls)} ms [{round(scale*self.min)}, {round(scale*self.max)}] in {self.calls} calls {history}'
+        elif self.calls==1:
+            return f'{self.name}: {round(scale*self.total)} ms'
+        else:
+            return f'{self.name}: never called'
+    def __enter__(self):
+        self.start()
+    def __exit__(self, *args):
+        self.stop()
+        print(self.show())
+
+class Timers:
+    def __init__(self):
+        self.timers = []
+        self.timer2children = {}
+    def add(self, name, indent=0):
+        timer = Timer(name)
+        timer.indent = indent
+        self.timers.append(timer)
+        return timer
+    def show(self):
+        for timer in self.timers:
+            print(timer.indent*'  '+timer.show())
+
+timers = Timers()
+layout_draw_timer = timers.add('Layout.draw')
+drawing_area_draw_timer = timers.add('DrawingArea.draw', indent=1)
+timeline_area_draw_timer = timers.add('TimelineArea.draw', indent=1)
+layers_area_draw_timer = timers.add('LayersArea.draw', indent=1)
+movie_list_area_draw_timer = timers.add('MovieListArea.draw', indent=1)
+pen_down_timer = timers.add('PenTool.on_mouse_down')
+pen_move_timer = timers.add('PenTool.on_mouse_move')
+pen_up_timer = timers.add('PenTool.on_mouse_up')
+pen_draw_lines_timer = timers.add('drawLines', indent=1)
+fit_curve_timer = timers.add('bspline_interp', indent=2)
+pen_suggestions_timer = timers.add('suggestions', indent=1)
+pen_fading_mask_timer = timers.add('fading_mask', indent=1)
 
 fig = None
 ax = None
@@ -672,6 +726,7 @@ def should_make_closed(curve_length, bbox_length, endpoints_dist):
         return endpoints_dist / bbox_length < 0.1
 
 def bspline_interp(points, suggest_options, existing_lines):
+    fit_curve_timer.start()
     x = np.array([1.*p[0] for p in points])
     y = np.array([1.*p[1] for p in points])
 
@@ -695,6 +750,7 @@ def bspline_interp(points, suggest_options, existing_lines):
     add_result(tck, u[0], u[-1])
 
     if not suggest_options:
+        fit_curve_timer.stop()
         return results
 
     # check for intersections, throw out short segments between the endpoints and first/last intersection
@@ -741,14 +797,23 @@ def bspline_interp(points, suggest_options, existing_lines):
         add_result(tck, u[0], u[-1])
         return reversed(results)
 
+    fit_curve_timer.stop()
     return results
 
-def plotLines(points, ax, width, suggest_options, plot_reset, existing_lines):
+def plotLines(points, ax, width, suggest_options, existing_lines):
     results = []
     def add_results(px, py):
-        plot_reset()
-        ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False, solid_capstyle='round')
-        results.append(image_from_fig(fig)[:,:,0])
+        line, = ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False, solid_capstyle='round', aa=True)
+        # Get the renderer and draw the figure
+        canvas = FigureCanvas(fig)
+        background = canvas.copy_from_bbox(ax.bbox)
+        fig.draw_artist(line)
+        canvas.flush_events()
+
+        pixel_data = canvas.buffer_rgba()
+        results.append(255-np.array(pixel_data)[:,:,3])
+
+        canvas.restore_region(background)
 
     if len(set(points)) == 1:
         x,y = points[0]
@@ -775,36 +840,26 @@ def drawLines(image_height, image_width, points, width, suggest_options, existin
         fig, ax = plt.subplots()
         ax.axis('off')
         fig.set_size_inches(image_width/fig.get_dpi(), image_height/fig.get_dpi())
-        ok = False
-        # not sure why it's needed, but for some w x h it is
-        for epsx in np.arange(-0.01,0.02,0.01):
-            for epsy in np.arange(-0.01,0.02,0.01):
-                iff = image_from_fig(fig)
-                if iff.shape == (image_height, image_width, 4):
-                    ok = True
-                    break
-                fig.set_size_inches(image_width/fig.get_dpi()+epsx, image_height/fig.get_dpi()+epsy)
-            if ok:
-                break
-        assert ok
         fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
         fig_dict[res] = fig
         ax_dict[res] = ax
+    
+        def plot_reset():
+            plt.cla()
+            plt.xlim(0, image_width)
+            plt.ylim(0, image_height)
+            ax.invert_yaxis()
+            ax.spines[['left', 'right', 'bottom', 'top']].set_visible(False)
+            ax.tick_params(left=False, right=False, bottom=False, top=False)
+
+        plot_reset()
     else:
         fig = fig_dict[res]
         ax = ax_dict[res]
 
     width *= 72 / fig.get_dpi()
 
-    def plot_reset():
-        plt.cla()
-        plt.xlim(0, image_width)
-        plt.ylim(0, image_height)
-        ax.invert_yaxis()
-        ax.spines[['left', 'right', 'bottom', 'top']].set_visible(False)
-        ax.tick_params(left=False, right=False, bottom=False, top=False)
-
-    return plotLines(points, ax, width, suggest_options, plot_reset, existing_lines)
+    return plotLines(points, ax, width, suggest_options, existing_lines)
 
 def drawCircle( screen, x, y, color, width):
     pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -1024,6 +1079,7 @@ class PenTool(Button):
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
             return
+        pen_down_timer.start()
         self.points = []
         self.bucket_color = None
         self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
@@ -1032,10 +1088,12 @@ class PenTool(Button):
                 self.alpha_surface = new_frame()
             pg.surfarray.pixels_red(self.alpha_surface)[:] = 0
         self.on_mouse_move(x,y)
+        pen_down_timer.stop()
 
     def on_mouse_up(self, x, y):
         if curr_layer_locked():
             return
+        pen_up_timer.start()
         self.lines_array = None
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
@@ -1046,7 +1104,10 @@ class PenTool(Button):
 
         prev_history_item = None
         line_width = self.width * (1 if self.width == WIDTH else drawing_area.xscale)
+        pen_draw_lines_timer.start()
         line_options = drawLines(frame.get_width(), frame.get_height(), self.points, line_width, suggest_options=not self.eraser, existing_lines=lines)
+        pen_draw_lines_timer.stop()
+        pen_suggestions_timer.start()
         items = []
         for new_lines in line_options:
             history_item = HistoryItem('lines')
@@ -1071,8 +1132,10 @@ class PenTool(Button):
                 prev_history_item = history_item
 
         history.append_suggestions(items)
+        pen_suggestions_timer.stop()
         
         if len(line_options)>1:
+            pen_fading_mask_timer.start()
             if self.suggestion_mask is None or (self.suggestion_mask.get_width() != IWIDTH or self.suggestion_mask.get_height() != IHEIGHT):
                 self.suggestion_mask = pg.Surface((IWIDTH, IHEIGHT), pg.SRCALPHA)
                 self.suggestion_mask.fill((0,255,0))
@@ -1092,10 +1155,14 @@ class PenTool(Button):
                     else:
                         return 110-self.i*10
             drawing_area.fading_func = Fading().fade
+            pen_fading_mask_timer.stop()
+
+        pen_up_timer.stop()
 
     def on_mouse_move(self, x, y):
         if curr_layer_locked():
             return
+        pen_move_timer.start()
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
         if self.eraser and self.bucket_color is None:
@@ -1138,6 +1205,7 @@ class PenTool(Button):
             render_surface(layout.timeline_area().combined_light_table_mask())
 
         self.prev_drawn = (x,y) 
+        pen_move_timer.stop()
 
 class NewDeleteTool(PenTool):
     def __init__(self, frame_func, clip_func, layer_func):
@@ -1359,12 +1427,17 @@ class Layout:
     def draw(self):
         if self.is_pressed and self.focus_elem is self.drawing_area():
             return
+
+        layout_draw_timer.start()
+
         screen.fill(MARGIN if self.is_playing else UNDRAWABLE)
         for elem in self.elems:
             if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
                 elem.draw()
                 if elem.draw_border:
                     pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
+
+        layout_draw_timer.stop()
 
     # note that pygame seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
@@ -1448,6 +1521,8 @@ class DrawingArea:
     def scale(self, surface): return scale_image(surface, self.iwidth, self.iheight)
     def set_fading_mask(self, fading_mask): self.fading_mask = self.scale(fading_mask)
     def draw(self):
+        drawing_area_draw_timer.start()
+
         self._internal_layout()
         left, bottom, width, height = self.rect
         if not layout.is_playing:
@@ -1472,9 +1547,12 @@ class DrawingArea:
             if self.fading_mask:
                 self.subsurface.blit(self.fading_mask, starting_point)
 
+        drawing_area_draw_timer.stop()
+
     def update_fading_mask(self):
         if not self.fading_mask:
             return
+        now = time.time_ns()
         ignore_event = (now - self.last_update_time) // 10**6 < (1000 / (FRAME_RATE*2))
         self.last_update_time = now
 
@@ -1659,6 +1737,8 @@ class TimelineArea:
             if x >= left and x <= right:
                 return pos
     def draw(self):
+        timeline_area_draw_timer.start()
+
         left, bottom, width, height = self.rect
         left = 0
         frame_width = movie.curr_frame().get_width()
@@ -1735,6 +1815,8 @@ class TimelineArea:
             i += 1
 
         self.draw_hold()
+
+        timeline_area_draw_timer.stop()
 
     def draw_hold(self):
         left, bottom, width, height = self.rect
@@ -1878,6 +1960,8 @@ class LayersArea:
         return cache.fetch(CachedLayerThumbnail(color))
 
     def draw(self):
+        layers_area_draw_timer.start()
+
         self.eye_boundaries = []
         self.lit_boundaries = []
         self.lock_boundaries = []
@@ -1908,6 +1992,8 @@ class LayersArea:
             self.lock_boundaries.append((left, lock_start, left+lock.get_width(), lock_start+lock.get_height(), layer_pos))
 
             bottom += image.get_height()
+
+        layers_area_draw_timer.stop()
 
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool)
 
@@ -2086,6 +2172,8 @@ class MovieListArea:
         self.show_pos = None
         self.prevx = None
     def draw(self):
+        movie_list_area_draw_timer.start()
+
         _, _, width, _ = self.rect
         left = 0
         first = True
@@ -2106,6 +2194,8 @@ class MovieListArea:
             left += image.get_width()
             if left >= width:
                 break
+
+        movie_list_area_draw_timer.stop()
     def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
     def x2frame(self, x):
         if not movie_list.images or x is None:
@@ -3181,6 +3271,8 @@ def process_keydown_event(event):
 layout.draw()
 pygame.display.flip()
 
+export_on_exit = True
+
 while not escape: 
  try:
   for event in pygame.event.get():
@@ -3194,6 +3286,8 @@ while not escape:
 
         if event.key == pygame.K_ESCAPE: # ESC pressed
             escape = True
+            shift = pg.key.get_mods() & pg.KMOD_SHIFT
+            export_on_exit = not shift # don't export upon Shift+ESC [for faster development cycles]
             break
 
         if layout.is_pressed:
@@ -3228,8 +3322,13 @@ while not escape:
   print('Ctrl-C - exiting')
   break
       
+timers.show()
+
 movie.save_before_closing()
-movie_list.wait_for_all_exporting_to_finish()
+if export_on_exit:
+    movie_list.wait_for_all_exporting_to_finish()
+else:
+    print('Shift-Escape pressed - skipping export to GIF and MP4!')
 
 pygame.display.quit()
 pygame.quit()
