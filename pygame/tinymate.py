@@ -604,7 +604,8 @@ import io
 import shutil
 from scipy.interpolate import splprep, splev
 
-# this requires numpy to be installed in addition to scikit-image
+import cv2
+
 from skimage.morphology import flood_fill, binary_dilation, skeletonize
 from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closing
 pg = pygame
@@ -720,8 +721,10 @@ pen_move_timer = timers.add('PenTool.on_mouse_move')
 pen_up_timer = timers.add('PenTool.on_mouse_up')
 pen_draw_lines_timer = timers.add('drawLines', indent=1)
 fit_curve_timer = timers.add('bspline_interp', indent=2)
-pen_suggestions_timer = timers.add('suggestions', indent=1)
+pen_suggestions_timer = timers.add('pen suggestions', indent=1)
+eraser_timer = timers.add('eraser',indent=1)
 pen_fading_mask_timer = timers.add('fading_mask', indent=1)
+paint_bucket_timer = timers.add('PaintBucketTool.on_mouse_down')
 timeline_down_timer = timers.add('TimelineArea.on_mouse_down')
 timeline_move_timer = timers.add('TimelineArea.on_mouse_move')
 
@@ -1136,40 +1139,55 @@ class PenTool(Button):
         frame = movie.edit_curr_frame().surf_by_id('lines')
         lines = pygame.surfarray.pixels_alpha(frame)
 
-        prev_history_item = None
         line_width = self.width * (1 if self.width == WIDTH else drawing_area.xscale)
         pen_draw_lines_timer.start()
         line_options = drawLines(frame.get_width(), frame.get_height(), self.points, line_width, suggest_options=not self.eraser, existing_lines=lines)
         pen_draw_lines_timer.stop()
-        pen_suggestions_timer.start()
-        items = []
-        for new_lines,(minx,miny,maxx,maxy) in line_options:
+
+        if self.eraser:
+            eraser_timer.start()
+
+            new_lines,(minx,miny,maxx,maxy) = line_options[0]
             bbox = (minx, miny, maxx, maxy)
-            if prev_history_item:
-                bbox = (min(prev_history_item.minx,minx), min(prev_history_item.miny,miny), max(prev_history_item.maxx,maxx), max(prev_history_item.maxy,maxy))
-            history_item = HistoryItem('lines', bbox)
-            if prev_history_item:
-                prev_history_item.undo()
-            if self.eraser:
-                lines[minx:maxx+1, miny:maxy+1] = np.minimum(255-new_lines, lines[minx:maxx+1, miny:maxy+1])
-            else:
+            lines_history_item = HistoryItem('lines', bbox)
+            lines[minx:maxx+1, miny:maxy+1] = np.minimum(255-new_lines, lines[minx:maxx+1, miny:maxy+1])
+
+            def make_color_history_item(bbox):
+                return HistoryItem('color', bbox)
+
+            color = movie.edit_curr_frame().surf_by_id('color')
+            color_rgb = pg.surfarray.pixels3d(color)
+            color_alpha = pg.surfarray.pixels_alpha(color)
+            bucket_color = self.bucket_color if self.bucket_color else BACKGROUND+(0,) 
+            color_history_item = flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, round(cx), round(cy), bucket_color, make_color_history_item)
+            history_item = HistoryItemSet([lines_history_item, color_history_item])
+
+            history.append_item(history_item)
+
+            eraser_timer.stop()
+        else:
+            pen_suggestions_timer.start()
+
+            prev_history_item = None
+            items = []
+
+            for new_lines,(minx,miny,maxx,maxy) in line_options:
+                bbox = (minx, miny, maxx, maxy)
+                if prev_history_item:
+                    bbox = (min(prev_history_item.minx,minx), min(prev_history_item.miny,miny), max(prev_history_item.maxx,maxx), max(prev_history_item.maxy,maxy))
+                history_item = HistoryItem('lines', bbox)
+                if prev_history_item:
+                    prev_history_item.undo()
+
                 lines[minx:maxx+1, miny:maxy+1] = np.maximum(new_lines, lines[minx:maxx+1, miny:maxy+1])
 
-            if self.eraser:
-                color_history_item = HistoryItem('color')
-                color = movie.edit_curr_frame().surf_by_id('color')
-                color_rgb = pg.surfarray.pixels3d(color)
-                color_alpha = pg.surfarray.pixels_alpha(color)
-                flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, round(cx), round(cy), self.bucket_color if self.bucket_color else BACKGROUND+(0,))
-                history_item = HistoryItemSet([history_item, color_history_item])
+                items.append(history_item)
+                if not prev_history_item:
+                    prev_history_item = history_item
 
-            history_item.optimize()
-            items.append(history_item)
-            if not prev_history_item:
-                prev_history_item = history_item
+            history.append_suggestions(items)
 
-        history.append_suggestions(items)
-        pen_suggestions_timer.stop()
+            pen_suggestions_timer.stop()
         
         if len(line_options)>1:
             pen_fading_mask_timer.start()
@@ -1257,19 +1275,35 @@ class NewDeleteTool(PenTool):
     def on_mouse_up(self, x, y): pass
     def on_mouse_move(self, x, y): pass
 
-def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_color):
-    pen_mask = lines == 255
+def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_color, bbox_callback=None):
     flood_code = 2
-    flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
-    for ch in range(3):
-         color_rgb[:,:,ch] = color_rgb[:,:,ch]*(1-flood_mask) + bucket_color[ch]*flood_mask
-    color_alpha[:] = color_alpha*(1-flood_mask) + bucket_color[3]*flood_mask
+    pen_mask = np.ascontiguousarray(lines == 255, dtype=np.uint8)
+
+    _,_,_,rect = cv2.floodFill(pen_mask, None, (y,x), flood_code)
+
+    ystart, xstart, ylen, xlen = rect
+    xs = slice(xstart, xstart+xlen)
+    ys = slice(ystart, ystart+ylen)
+    bbox_retval = (xstart, ystart, xstart+xlen-1, ystart+ylen-1)
+    if bbox_callback:
+        bbox_retval = bbox_callback(bbox_retval)
+
+    flood_mask = (pen_mask == flood_code)[xs,ys]
+    
+    color_rgb[xs,ys,:][flood_mask] = np.array(bucket_color[:3])
+    color_alpha[xs,ys][flood_mask] = bucket_color[3]
+
+    return bbox_retval
 
 class PaintBucketTool(Button):
     def __init__(self,color):
         Button.__init__(self)
         self.color = color
     def on_mouse_down(self, x, y):
+        paint_bucket_timer.start()
+        self._on_mouse_down(x, y)
+        paint_bucket_timer.stop()
+    def _on_mouse_down(self, x, y):
         if curr_layer_locked():
             return
         x, y = layout.drawing_area().xy2frame(x,y)
@@ -1286,11 +1320,10 @@ class PaintBucketTool(Button):
             return # we never flood the lines themselves - they keep the PEN color in a separate layer;
             # and there's no point in flooding with the color the pixel already has
 
-        history_item = HistoryItem('color')
+        def make_history_item(bbox):
+            return HistoryItem('color', bbox)
 
-        flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, self.color)
-
-        history_item.optimize()
+        history_item = flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, self.color, make_history_item)
         history.append_item(history_item)
         
     def on_mouse_up(self, x, y):
