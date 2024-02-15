@@ -664,6 +664,7 @@ def tdiff():
 
 class Timer:
     CALL_HISTORY = 30
+    SCALE = 1/10**6
     def __init__(self,name):
         self.name = name
         self.total = 0
@@ -682,8 +683,9 @@ class Timer:
         self.history.append(took)
         if len(self.history) > Timer.CALL_HISTORY:
             del self.history[0]
+        return took * Timer.SCALE
     def show(self):
-        scale = 1/10**6
+        scale = Timer.SCALE
         if self.calls>1:
             history = ' '.join([str(round(scale*h)) for h in self.history])
             return f'{self.name}: {round(scale*self.total/self.calls)} ms [{round(scale*self.min)}, {round(scale*self.max)}] in {self.calls} calls {history}'
@@ -1404,11 +1406,10 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
         skeleton = last_skeleton
     else: 
         skeleton = skeletonize(flood_mask)
-        last_flood_mask = flood_mask
-        last_skeleton = skeleton
 
     fmb = binary_dilation(binary_dilation(skeleton))
     fading_mask = pg.Surface((flood_mask.shape[0], flood_mask.shape[1]), pg.SRCALPHA)
+
     fm = pg.surfarray.pixels3d(fading_mask)
     yg, xg = np.meshgrid(np.arange(flood_mask.shape[1]), np.arange(flood_mask.shape[0]))
 
@@ -1497,8 +1498,11 @@ class Layout:
         self.elems.append(elem)
 
     def draw(self):
-        if self.is_pressed and self.focus_elem is self.drawing_area():
-            return
+        if self.is_pressed:
+            if self.focus_elem is self.drawing_area():
+                return
+            if not getattr(self.focus_elem,'redraw',True):
+                return
 
         layout_draw_timer.start()
 
@@ -1551,7 +1555,6 @@ class Layout:
             self.is_pressed = False
             if self.focus_elem:
                 self.focus_elem.on_mouse_up(x,y)
-            self.focus_elem = None
         elif event.type == pygame.MOUSEMOTION and self.is_pressed:
             if self.focus_elem:
                 self.focus_elem.on_mouse_move(x,y)
@@ -1959,6 +1962,7 @@ class TimelineArea:
         self._on_mouse_move(x,y)
         timeline_move_timer.stop()
     def _on_mouse_move(self,x,y):
+        self.redraw = False
         x = self.fix_x(x)
         if self.prevx is None:
             return
@@ -1975,6 +1979,7 @@ class TimelineArea:
             pos_dist = -1 if x > self.prevx else 1
         self.prevx = x
         if pos_dist != 0:
+            self.redraw = True
             append_seek_frame_history_item_if_frame_is_dirty()
             if self.loop_mode:
                 new_pos = (movie.pos + pos_dist) % len(movie.frames)
@@ -2127,6 +2132,7 @@ class LayersArea:
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
     def on_mouse_move(self,x,y):
+        self.redraw = False
         if self.prevy is None:
             return
         if self.new_delete_tool():
@@ -2138,6 +2144,7 @@ class LayersArea:
         self.prevy = y
         pos_dist = curr_pos - prev_pos
         if pos_dist != 0:
+            self.redraw = True
             append_seek_frame_history_item_if_frame_is_dirty()
             new_pos = min(max(0, movie.layer_pos + pos_dist), len(movie.layers)-1)
             movie.seek_layer(new_pos)
@@ -2291,6 +2298,7 @@ class MovieListArea:
         self.prevx = x
         self.show_pos = movie_list.clip_pos
     def on_mouse_move(self,x,y):
+        self.redraw = False
         if self.prevx is None:
             self.prevx = x # this happens eg when a new_delete_tool is used upon mouse down
             # and then the original tool is restored
@@ -2306,6 +2314,7 @@ class MovieListArea:
             pos_dist = prev_pos - curr_pos
         else:
             pos_dist = -1 if x > self.prevx else 1
+        self.redraw = pos_dist != 0
         self.prevx = x
         self.show_pos = min(max(0, self.show_pos + pos_dist), len(movie_list.clips)-1) 
     def on_mouse_up(self,x,y):
@@ -3246,6 +3255,11 @@ interesting_events = [
     pygame.MOUSEBUTTONUP,
 ] + timer_events
 
+event2timer = {}
+event_names = 'KEY MOVE DOWN UP PLAYBACK SAVING FADING'.split()
+for i,event in enumerate(interesting_events):
+    event2timer[event] = timers.add(event_names[i])
+
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard
 
@@ -3281,7 +3295,10 @@ def export_and_open_explorer():
     movie.save_and_start_export()
     movie_list.wait_for_all_exporting_to_finish() # wait for this movie and others if we
     # were still exporting them - so that when we open explorer all the exported data is up to date
-    subprocess.Popen('explorer /select,'+movie.gif_path())
+    if on_windows:
+        subprocess.Popen('explorer /select,'+movie.gif_path())
+    else:
+        subprocess.Popen(['nautilus', '-s', movie.gif_path()])
 
 def open_clip_dir():
     import tkinter
@@ -3361,6 +3378,8 @@ try:
         for event in pygame.event.get():
             if event.type not in interesting_events:
                 continue
+
+            timer = event2timer[event.type]
             #if event.type not in timer_events:
             #   print(pg.event.event_name(event.type),tdiff(),event.type,pygame.key.get_mods())
 
@@ -3379,9 +3398,11 @@ try:
                     if layout.is_pressed:
                         continue # ignore keystrokes (except ESC) when a mouse tool is being used
 
+                    timer.start()
                     process_keydown_event(event)
         
                 else:
+                    timer.start()
                     layout.on_event(event)
 
                 # TODO: might be good to optimize repainting beyond "just repaint everything
@@ -3396,6 +3417,12 @@ try:
                         if not layout.is_playing:
                             cache.collect_garbage()
                     pygame.display.flip()
+
+                took = timer.stop()
+                if took > 70:
+                    print(f'Slow event ({timer.name}: {took} ms, {layout.focus_elem.__class__.__name__} in focus) - printing timing data:')
+                    timers.show()
+                    print()
 
             except KeyboardInterrupt:
                 print('Ctrl-C - exiting')
