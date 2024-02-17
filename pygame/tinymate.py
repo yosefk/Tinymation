@@ -604,8 +604,6 @@ import io
 import shutil
 from scipy.interpolate import splprep, splev
 
-import cv2
-
 from skimage.morphology import flood_fill, binary_dilation, skeletonize
 from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closing
 pg = pygame
@@ -729,6 +727,48 @@ pen_fading_mask_timer = timers.add('fading_mask', indent=1)
 paint_bucket_timer = timers.add('PaintBucketTool.on_mouse_down')
 timeline_down_timer = timers.add('TimelineArea.on_mouse_down')
 timeline_move_timer = timers.add('TimelineArea.on_mouse_move')
+
+# interface with tinylib
+
+def arr_base_ptr(arr): return arr.ctypes.data_as(ctypes.c_void_p)
+
+def color_c_params(rgb):
+    width, height, depth = rgb.shape
+    assert depth == 3
+    xstride, ystride, zstride = rgb.strides
+    oft = 0
+    bgr = 0
+    if zstride == -1: # BGR image - walk back 2 bytes to get to the first blue pixel...
+        # (many functions don't care about which channel is which and it's better to not
+        # have to pass another stride argument to them)
+        oft = -2
+        zstride = 1
+        bgr = 1
+    assert xstride == 4 and zstride == 1, f'xstride={xstride}, ystride={ystride}, zstride={zstride}'
+    ptr = ctypes.c_void_p(arr_base_ptr(rgb).value + oft)
+    return ptr, ystride, width, height, bgr
+
+def greyscale_c_params(grey, is_alpha=True):
+    width, height = grey.shape
+    xstride, ystride = grey.strides
+    assert (xstride == 4 and is_alpha) or (xstride == 1 and not is_alpha), f'xstride={xstride} is_alpha={is_alpha}'
+    ptr = arr_base_ptr(grey)
+    return ptr, ystride, width, height
+
+def make_color_int(rgba, is_bgr):
+    r,g,b,a = rgba
+    if is_bgr:
+        return b | (g<<8) | (r<<16) | (a<<24)
+    else:
+        return r | (g<<8) | (b<<16) | (a<<24)
+
+import numpy.ctypeslib as npct
+import ctypes
+tinylib = npct.load_library('tinylib','.')
+
+# these are simple functions to test the assumptions regarding Surface numpy array layout
+def meshgrid_color(rgb): tinylib.meshgrid_color(*color_c_params(rgb))
+def meshgrid_alpha(alpha): tinylib.meshgrid_alpha(*greyscale_c_params(alpha))
 
 fig = None
 ax = None
@@ -1277,25 +1317,26 @@ class NewDeleteTool(PenTool):
     def on_mouse_up(self, x, y): pass
     def on_mouse_move(self, x, y): pass
 
+# note that we don't actually use color_alpha, rather we assume that color_rgb is actually color_rgba...
+# we assert that this is the case in color_c_params()
 def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_color, bbox_callback=None):
     flood_code = 2
-    pen_mask = np.ascontiguousarray(lines == 255, dtype=np.uint8)
+    pen_mask = lines==255
 
-    _,_,_,rect = cv2.floodFill(pen_mask, None, (y,x), flood_code)
-
+    rect = np.zeros(4, dtype=np.int32)
+    region = arr_base_ptr(rect)
+    mask_ptr, mask_stride, width, height = greyscale_c_params(pen_mask, is_alpha=False)
+    tinylib.flood_fill_mask(mask_ptr, mask_stride, width, height, x, y, flood_code, region, 0)
+    
     ystart, xstart, ylen, xlen = rect
-    xs = slice(xstart, xstart+xlen)
-    ys = slice(ystart, ystart+ylen)
     bbox_retval = (xstart, ystart, xstart+xlen-1, ystart+ylen-1)
     if bbox_callback:
         bbox_retval = bbox_callback(bbox_retval)
 
-    flood_mask = (pen_mask == flood_code)[xs,ys]
-    
-    color_rgb[xs,ys,:][flood_mask] = np.array(bucket_color[:3])
-    color_alpha[xs,ys][flood_mask] = bucket_color[3]
-
-    return bbox_retval
+    color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color_rgb)
+    assert color_width == width and color_height == height
+    new_color_value = make_color_int(bucket_color, bgr)
+    tinylib.fill_color_based_on_mask(color_ptr, mask_ptr, color_stride, mask_stride, width, height, region, new_color_value, flood_code)
 
 class PaintBucketTool(Button):
     def __init__(self,color):
@@ -1445,7 +1486,7 @@ class FlashlightTool(Button):
         x, y = round(x), round(y)
         color = pygame.surfarray.pixels3d(movie.curr_frame().surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
-        if x >= color.shape[0] or y >= color.shape[1]:
+        if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1]:
             return
         fading_mask = skeletonize_color_based_on_lines(color, lines, x, y)
         if not fading_mask:

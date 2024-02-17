@@ -6,7 +6,7 @@
 // while the rows and the pixels stay contiguous.)
 //
 // an annoying detail is that pygame.Surface can be both RGBA and BGRA; in particular, pygame.image.load()
-// returns RGBA surfaces while pygame.Surface returns RGBA surfaces.
+// returns RGBA surfaces while pygame.Surface returns BGRA surfaces.
 //
 // note that pixels3d() as well as pixels_alpha() return arrays with a stride of 4 between
 // the pixels, and treating a pixels3d() array as a 4D RGBA array "does the job" (=you appear
@@ -18,7 +18,7 @@
 
 #include <stdio.h>
 
-void meshgrid_color(unsigned char* color, int stride, int width, int height, int bgr)
+extern "C" void meshgrid_color(unsigned char* color, int stride, int width, int height, int bgr)
 {
 	//printf("color=%p stride=%d width=%d height=%d width*4=%d bgr=%d\n", color, stride, width, height, width*4, bgr);
 	int r = bgr ? 2 : 0;
@@ -42,7 +42,7 @@ void meshgrid_color(unsigned char* color, int stride, int width, int height, int
 	}
 }
 
-void meshgrid_alpha(unsigned char* alpha, int stride, int width, int height)
+extern "C" void meshgrid_alpha(unsigned char* alpha, int stride, int width, int height)
 {
 	for(int y=0; y<height; ++y) {
 		unsigned char* row = alpha + y*stride;
