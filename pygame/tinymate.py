@@ -602,7 +602,7 @@ import matplotlib
 matplotlib.use('agg')  # turn off interactive backend
 import io
 import shutil
-from scipy.interpolate import splprep, splev
+from scipy.interpolate import splprep
 
 from skimage.morphology import flood_fill, binary_dilation, skeletonize
 from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closing
@@ -774,6 +774,23 @@ fig = None
 ax = None
 fig_dict = {}
 ax_dict = {}
+
+def splev(x, tck):
+    t, c, k = tck
+    try:
+        c[0][0]
+        parametric = True
+    except Exception:
+        parametric = False
+    if parametric:
+        return list(map(lambda c, x=x, t=t, k=k: splev(x, [t, c, k]), c))
+
+    x = np.asarray(x)
+    xshape = x.shape
+    x = x.ravel()
+    y = np.zeros(x.shape, float)
+    tinylib.splev(arr_base_ptr(t), t.shape[0], arr_base_ptr(c), k, arr_base_ptr(x), arr_base_ptr(y), y.shape[0])
+    return y.reshape(xshape)
 
 def should_make_closed(curve_length, bbox_length, endpoints_dist):
     if curve_length < bbox_length*0.85:
@@ -1321,6 +1338,7 @@ class NewDeleteTool(PenTool):
 # we assert that this is the case in color_c_params()
 def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_color, bbox_callback=None):
     flood_code = 2
+    global pen_mask
     pen_mask = lines==255
 
     rect = np.zeros(4, dtype=np.int32)
@@ -1328,7 +1346,7 @@ def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_
     mask_ptr, mask_stride, width, height = greyscale_c_params(pen_mask, is_alpha=False)
     tinylib.flood_fill_mask(mask_ptr, mask_stride, width, height, x, y, flood_code, region, 0)
     
-    ystart, xstart, ylen, xlen = rect
+    xstart, ystart, xlen, ylen = rect
     bbox_retval = (xstart, ystart, xstart+xlen-1, ystart+ylen-1)
     if bbox_callback:
         bbox_retval = bbox_callback(bbox_retval)
@@ -1337,6 +1355,11 @@ def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_
     assert color_width == width and color_height == height
     new_color_value = make_color_int(bucket_color, bgr)
     tinylib.fill_color_based_on_mask(color_ptr, mask_ptr, color_stride, mask_stride, width, height, region, new_color_value, flood_code)
+
+    del pen_mask
+    pen_mask = None
+
+    return bbox_retval
 
 class PaintBucketTool(Button):
     def __init__(self,color):
