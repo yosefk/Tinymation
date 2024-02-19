@@ -19,11 +19,11 @@ enum
 
 #define ICV_PUSH( Y, L, R, PREV_L, PREV_R, DIR )  \
 {                                                 \
-    tail->y = (ushort)(Y);                        \
-    tail->l = (ushort)(L);                        \
-    tail->r = (ushort)(R);                        \
-    tail->prevl = (ushort)(PREV_L);               \
-    tail->prevr = (ushort)(PREV_R);               \
+    tail->y = (unsigned short)(Y);                        \
+    tail->l = (unsigned short)(L);                        \
+    tail->r = (unsigned short)(R);                        \
+    tail->prevl = (unsigned short)(PREV_L);               \
+    tail->prevr = (unsigned short)(PREV_R);               \
     tail->dir = (short)(DIR);                     \
     if( ++tail == buffer_end )                    \
     {                                             \

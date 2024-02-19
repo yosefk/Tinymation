@@ -1,3 +1,6 @@
 *~
 *.kra
 __pycache__
+*.obj
+*.dll
+*.so

@@ -2293,7 +2293,7 @@ class MovieList:
             clip = self.clips[self.clip_pos]
             CREATE_NEW_PROCESS_GROUP = 0x00000200
             kwargs = dict(creationflags=CREATE_NEW_PROCESS_GROUP) if on_windows else {}
-            self.exporting_processes[clip] = subprocess.Popen([sys.executable, sys.argv[0], 'export', clip], *kwargs)
+            self.exporting_processes[clip] = subprocess.Popen([sys.executable, sys.argv[0], 'export', clip], **kwargs)
     def interrupt_export(self):
         if self.export_in_progress():
             clip = self.clips[self.clip_pos]
