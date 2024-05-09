@@ -1091,6 +1091,7 @@ class HistoryItem:
                 self.saved_rgb = self.saved_rgb[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
             self.optimized = True
 
+    def is_drawing_change(self): return True
     def curr_surface(self):
         return movie.edit_curr_frame().surf_by_id(self.surface_id)
     def nop(self):
@@ -1149,6 +1150,11 @@ class HistoryItem:
 class HistoryItemSet:
     def __init__(self, items):
         self.items = [item for item in items if item is not None]
+    def is_drawing_change(self):
+        for item in self.items:
+            if not is_drawing_change(item):
+                return False
+        return True
     def nop(self):
         for item in self.items:
             if not item.nop():
@@ -3244,6 +3250,9 @@ def byte_size(history_item):
 def nop(history_item):
     return getattr(history_item, 'nop', lambda: False)()
 
+def is_drawing_change(history_item):
+    return getattr(history_item, 'is_drawing_change', lambda: False)()
+
 class History:
     # a history is kept per movie. the size of the history is global - we don't
     # want to exceed a certain memory threshold for the history
@@ -3295,7 +3304,7 @@ class History:
 
         layout.drawing_area().fading_mask = None # new operations invalidate old skeletons
 
-    def undo_item(self):
+    def undo_item(self, drawing_changes_only):
         if self.suggestions:
             s = self.suggestions
             self.suggestions = None
@@ -3304,6 +3313,9 @@ class History:
 
         if self.undo:
             last_op = self.undo[-1]
+            if drawing_changes_only and not is_drawing_change(last_op):
+                return
+
             redo = last_op.undo()
             History.byte_size += byte_size(redo) - byte_size(last_op)
             self.redo.append(redo)
@@ -3430,7 +3442,12 @@ def process_keydown_event(event):
         if ctrl:
             history.redo_item()
         else:
-            history.undo_item()
+            history.undo_item(drawing_changes_only=True)
+
+    # Ctrl-Z: undo any change (space only undoes drawing changes and does nothing if the latest change in the history
+    # isn't a drawing change)
+    if event.key == pg.K_z and ctrl:
+        history.undo_item(drawing_changes_only=False)
 
     # Ctrl+Shift+Delete
     if event.key == pg.K_DELETE and ctrl and shift:
