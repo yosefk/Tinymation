@@ -635,8 +635,8 @@ pygame.display.set_caption("Tinymate")
 font = pygame.font.Font(size=screen.get_height()//15)
 
 FADING_RATE = 3
-MARGIN = (220, 215, 190)
-UNDRAWABLE = (220-20, 215-20, 190-20)
+UNDRAWABLE = (220, 215, 190)
+MARGIN = (220-40, 215-40, 190-40)
 SELECTED = (220-80, 215-80, 190-80)
 UNUSED = SELECTED
 PROGRESS = (192-45, 255-25, 192-45)
@@ -1188,7 +1188,20 @@ class Button:
         if not self.button_surface:
             surface = scale_image(cursor_surface, scaled_width, scaled_height)
             self.button_surface = surface
-        screen.blit(self.button_surface, (left+(width-scaled_width)/2, bottom+height-scaled_height))
+        self.screen_left = int(left+(width-scaled_width)/2)
+        self.screen_bottom = int(bottom+height-scaled_height)
+        screen.blit(self.button_surface, (self.screen_left, self.screen_bottom))
+    def hit(self, x, y, rect=None):
+        if rect is None:
+            rect = self.rect
+        if not self.button_surface:
+            return False
+        left, bottom, width, height = rect
+        try:
+            alpha = self.button_surface.get_at((x-self.screen_left, y-self.screen_bottom))[3]
+        except:
+            return False
+        return alpha > 0
 
 locked_image = load_image('locked.png')
 invisible_image = load_image('eye_shut.png')
@@ -1615,7 +1628,7 @@ class Layout:
 
         layout_draw_timer.start()
 
-        screen.fill(MARGIN if self.is_playing else UNDRAWABLE)
+        screen.fill(UNDRAWABLE)
         for elem in self.elems:
             if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
                 elem.draw()
@@ -1647,9 +1660,10 @@ class Layout:
             left, bottom, width, height = elem.rect
             if x>=left and x<left+width and y>=bottom and y<bottom+height:
                 if not self.is_playing or isinstance(elem, TogglePlaybackButton):
-                    self._dispatch_event(elem, event, x, y)
-                    dispatched = True
-                    break
+                    if getattr(elem, 'hit', lambda x,y: True)(x,y):
+                        self._dispatch_event(elem, event, x, y)
+                        dispatched = True
+                        break
 
         if not dispatched and self.focus_elem:
             self._dispatch_event(None, event, x, y)
@@ -1659,7 +1673,8 @@ class Layout:
         if event.type == pygame.MOUSEBUTTONDOWN:
             self.is_pressed = True
             self.focus_elem = elem
-            self.focus_elem.on_mouse_down(x,y)
+            if elem is not None:
+                elem.on_mouse_down(x,y)
         elif event.type == pygame.MOUSEBUTTONUP:
             self.is_pressed = False
             if self.focus_elem:
@@ -1945,12 +1960,12 @@ class TimelineArea:
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
                 eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
-                eye_x = x + 2 if pos_dist > 0 else x+thumb_width-eye.get_width() - 2
+                eye_x = x + 2 if pos_dist < 0 else x+thumb_width-eye.get_width() - 2
                 self.subsurface.blit(eye, (eye_x, bottom), eye.get_rect())
                 self.eye_boundaries.append((eye_x, bottom, eye_x+eye.get_width(), bottom+eye.get_height(), pos_dist))
             elif len(movie.frames)>1:
-                mode_x = x + 2
                 mode = self.loop_icon if self.loop_mode else self.arrow_icon
+                mode_x = x + thumb_width - mode.get_width() - 2
                 self.subsurface.blit(mode, (mode_x, bottom), mode.get_rect())
                 self.loop_boundaries = (mode_x, bottom, mode_x+mode.get_width(), bottom+mode.get_height())
 
@@ -2017,7 +2032,7 @@ class TimelineArea:
             else:
                 continue
             hold_left = left-hold.get_width()/2
-            hold_bottom = bottom+height-hold.get_height()
+            hold_bottom = bottom if pos == movie.pos else bottom+height-hold.get_height()
             self.subsurface.blit(hold, (hold_left, hold_bottom), hold.get_rect())
             if pos == movie.pos:
                 self.toggle_hold_boundaries = (hold_left, hold_bottom, hold_left+hold.get_width(), hold_bottom+hold.get_height())
@@ -2442,6 +2457,7 @@ class ToolSelectionButton:
     def draw(self):
         pg.draw.rect(screen, SELECTED if self.tool is layout.full_tool else UNDRAWABLE, self.rect)
         self.tool.tool.draw(self.rect,self.tool.cursor[1])
+    def hit(self,x,y): return self.tool.tool.hit(x,y,self.rect)
     def on_mouse_down(self,x,y):
         set_tool(self.tool)
     def on_mouse_up(self,x,y): pass
@@ -2451,19 +2467,11 @@ class TogglePlaybackButton(Button):
     def __init__(self, play_icon, pause_icon):
         self.play = play_icon
         self.pause = pause_icon
-        self.scaled = False
+        Button.__init__(self)
     def draw(self):
-        left, bottom, width, height = self.rect
-        if not self.scaled:
-            def scale(image):
-                scaled_width, scaled_height = scale_and_preserve_aspect_ratio(image.get_width(), image.get_height(), width, height)
-                return scale_image(image, scaled_width, scaled_height)
-            self.play = scale(self.play)
-            self.pause = scale(self.pause)
-            self.scaled = True
-            
         icon = self.pause if layout.is_playing else self.play
-        screen.blit(icon, (left + (width-icon.get_width())/2, bottom + height - icon.get_height()))
+        self.button_surface = None
+        Button.draw(self, self.rect, icon)
     def on_mouse_down(self,x,y):
         toggle_playing()
     def on_mouse_up(self,x,y): pass
