@@ -1671,10 +1671,13 @@ class Layout:
 
     def _dispatch_event(self, elem, event, x, y):
         if event.type == pygame.MOUSEBUTTONDOWN:
+            change = tool_change
             self.is_pressed = True
             self.focus_elem = elem
-            if elem is not None:
+            if self.focus_elem:
                 elem.on_mouse_down(x,y)
+            if change == tool_change and self.new_delete_tool():
+                restore_tool()
         elif event.type == pygame.MOUSEBUTTONUP:
             self.is_pressed = False
             if self.focus_elem:
@@ -1690,6 +1693,8 @@ class Layout:
     def timeline_area(self):
         assert isinstance(self.elems[1], TimelineArea)
         return self.elems[1]
+
+    def new_delete_tool(self): return isinstance(self.tool, NewDeleteTool) 
 
     def toggle_playing(self):
         self.is_playing = not self.is_playing
@@ -2057,8 +2062,6 @@ class TimelineArea:
             toggle_frame_hold()
             return True
 
-    def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
-
     def fix_x(self,x):
         left, _, _, _ = self.rect
         return x-left
@@ -2069,10 +2072,9 @@ class TimelineArea:
     def _on_mouse_down(self,x,y):
         x = self.fix_x(x)
         self.prevx = None
-        if self.new_delete_tool():
+        if layout.new_delete_tool():
             if self.x2frame(x) == movie.pos:
                 layout.tool.frame_func()
-                restore_tool() # we don't want multiple clicks in a row to delete lots of frames etc
             return
         if self.update_on_light_table(x,y):
             return
@@ -2092,7 +2094,7 @@ class TimelineArea:
         x = self.fix_x(x)
         if self.prevx is None:
             return
-        if self.new_delete_tool():
+        if layout.new_delete_tool():
             return
         prev_pos = self.x2frame(self.prevx)
         curr_pos = self.x2frame(x)
@@ -2206,8 +2208,6 @@ class LayersArea:
 
         layers_area_draw_timer.stop()
 
-    def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool)
-
     def y2frame(self, y):
         if not self.thumbnail_height:
             return None
@@ -2241,10 +2241,9 @@ class LayersArea:
 
     def on_mouse_down(self,x,y):
         self.prevy = None
-        if self.new_delete_tool():
+        if layout.new_delete_tool():
             if self.y2frame(y) == movie.layer_pos:
                 layout.tool.layer_func()
-                restore_tool() # we don't want multiple clicks in a row to delete lots of layers
             return
         if self.update_on_light_table(x,y):
             return
@@ -2261,7 +2260,7 @@ class LayersArea:
         self.redraw = False
         if self.prevy is None:
             return
-        if self.new_delete_tool():
+        if layout.new_delete_tool():
             return
         prev_pos = self.y2frame(self.prevy)
         curr_pos = self.y2frame(y)
@@ -2409,17 +2408,15 @@ class MovieListArea:
                 break
 
         movie_list_area_draw_timer.stop()
-    def new_delete_tool(self): return isinstance(layout.tool, NewDeleteTool) 
     def x2frame(self, x):
         if not movie_list.images or x is None:
             return None
         left, _, _, _ = self.rect
         return (x-left) // movie_list.images[0].get_width()
     def on_mouse_down(self,x,y):
-        if self.new_delete_tool():
+        if layout.new_delete_tool():
             if self.x2frame(x) == 0:
                 layout.tool.clip_func()
-                restore_tool()
             return
         self.prevx = x
         self.show_pos = movie_list.clip_pos
@@ -2429,7 +2426,7 @@ class MovieListArea:
             self.prevx = x # this happens eg when a new_delete_tool is used upon mouse down
             # and then the original tool is restored
             self.show_pos = movie_list.clip_pos
-        if self.new_delete_tool():
+        if layout.new_delete_tool():
             return
         prev_pos = self.x2frame(self.prevx)
         curr_pos = self.x2frame(x)
@@ -3017,9 +3014,11 @@ FUNCTIONS = {
     'toggle-layer-lock': (toggle_layer_lock, 'l', None),
 }
 
+tool_change = 0
 prev_tool = None
 def set_tool(tool):
     global prev_tool
+    global tool_change
     prev = layout.full_tool
     layout.tool = tool.tool
     layout.full_tool = tool
@@ -3027,6 +3026,7 @@ def set_tool(tool):
         prev_tool = prev
     if tool.cursor:
         try_set_cursor(tool.cursor[0])
+    tool_change += 1
 
 def restore_tool():
     set_tool(prev_tool)
