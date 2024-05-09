@@ -180,6 +180,14 @@ def new_frame():
     pg.surfarray.pixels_alpha(frame)[:] = 0
     return frame
 
+def load_image(fname):
+    s = pg.image.load(fname)
+    # surfaces loaded from file have a different RGB/BGR layout - normalize it
+    ret = pg.Surface((s.get_width(), s.get_height()), pg.SRCALPHA)
+    pg.surfarray.pixels3d(ret)[:] = pg.surfarray.pixels3d(s)
+    pg.surfarray.pixels_alpha(ret)[:] = pg.surfarray.pixels_alpha(s)
+    return ret
+
 class Frame:
     def __init__(self, dir, layer_id=None, frame_id=None, read_pixels=True):
         self.dir = dir
@@ -218,7 +226,7 @@ class Frame:
         for surf_id in self.surf_ids():
             for fname in self.filenames_png_bmp(surf_id):
                 if os.path.exists(fname):
-                    setattr(self,surf_id,fit_to_resolution(pygame.image.load(fname)))
+                    setattr(self,surf_id,fit_to_resolution(load_image(fname)))
                     break
 
     def del_pixels(self):
@@ -264,6 +272,13 @@ class Frame:
             return empty_frame().color
         s = self.color.copy()
         s.blit(self.lines, (0, 0))
+        return s
+
+    def thumbnail(self, width, height):
+        if self.empty():
+            return scale_image(self.surface(), width, height)
+        s = scale_image(self.color, width, height)
+        s.blit(scale_image(self.lines, width, height), (0, 0))
         return s
 
     def filenames_png_bmp(self,surface_id):
@@ -951,23 +966,47 @@ def drawLine(screen, pos1, pos2, color, width):
 def make_surface(width, height):
     return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
 
+import cv2
+def cv2_resize_surface(src, dst):
+    iptr, _, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
+    optr, _, owidth, oheight, obgr = color_c_params(pg.surfarray.pixels3d(dst))
+    assert ibgr == obgr
+
+    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iwidth * iheight * 4))).contents
+
+    # reinterpret the array as RGBA height x width (this "transposes" the image and flips R and B channels,
+    # in order to fit the data into the layout cv2 expects)
+    #
+    # the default strides are height*4, 4, 1
+    iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer)
+
+    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (owidth * oheight * 4))).contents
+
+    oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer)
+
+    cv2.resize(iattached, (owidth,oheight), oattached)
+
 def scale_image(surface, width=None, height=None):
-    now = time.time_ns()
     assert width or height
     if not height:
         height = int(surface.get_height() * width / surface.get_width())
     if not width:
         width = int(surface.get_width() * height / surface.get_height())
-    ret = pg.transform.smoothscale(surface, (width, height))
-    elapsed = time.time_ns() - now
-    #print('scale_image',f'{surface.get_width()}x{surface.get_height()} -> {width}x{height} ({elapsed/10**6} ms)')
+
+    if width < surface.get_width()//2 and height < surface.get_height()//2:
+        return scale_image(scale_image(surface, surface.get_width()//2, surface.get_height()//2), width, height)
+
+    ret = pg.Surface((width, height), pg.SRCALPHA)
+    cv2_resize_surface(surface, ret)
+    ret.set_alpha(surface.get_alpha())
+
     return ret
 
 def minmax(v, minv, maxv):
     return min(maxv,max(minv,v))
 
 def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=192, edit=lambda x: x, hot_spot_offset=(0,0)):
-  surface = pg.image.load(file)
+  surface = load_image(file)
   surface = scale_image(surface, size, size*surface.get_height()/surface.get_width())#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
       surface = pg.transform.flip(surface, True, True)
@@ -991,16 +1030,16 @@ def add_circle(image, radius, color=(255,0,0,128), outline_color=(0,0,0,128)):
     return result
 
 pencil_cursor = load_cursor('pen.png')
-pencil_cursor = (pencil_cursor[0], pg.image.load('pen-tool.png'))
+pencil_cursor = (pencil_cursor[0], load_image('pen-tool.png'))
 eraser_cursor = load_cursor('eraser.png')
-eraser_cursor = (eraser_cursor[0], pg.image.load('eraser-tool.png'))
+eraser_cursor = (eraser_cursor[0], load_image('eraser-tool.png'))
 eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5), edit=lambda s: add_circle(s, MEDIUM_ERASER_WIDTH//2), hot_spot_offset=(MEDIUM_ERASER_WIDTH//2,-MEDIUM_ERASER_WIDTH//2))
 eraser_medium_cursor = (eraser_medium_cursor[0], eraser_cursor[1])
 eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2), edit=lambda s: add_circle(s, BIG_ERASER_WIDTH//2), hot_spot_offset=(BIG_ERASER_WIDTH//2,-BIG_ERASER_WIDTH//2))
 eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
 flashlight_cursor = load_cursor('flashlight.png')
-flashlight_cursor = (flashlight_cursor[0], pg.image.load('flashlight-tool.png')) 
-paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], pg.image.load('bucket-tool.png'))
+flashlight_cursor = (flashlight_cursor[0], load_image('flashlight-tool.png')) 
+paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], load_image('bucket-tool.png'))
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 # set_cursor can fail on some machines so we don't count on it to work.
@@ -1145,8 +1184,8 @@ class Button:
             self.button_surface = surface
         screen.blit(self.button_surface, (left+(width-scaled_width)/2, bottom+height-scaled_height))
 
-locked_image = pg.image.load('locked.png')
-invisible_image = pg.image.load('eye_shut.png')
+locked_image = load_image('locked.png')
+invisible_image = load_image('eye_shut.png')
 def curr_layer_locked():
     effectively_locked = movie.curr_layer().locked or not movie.curr_layer().visible
     if effectively_locked: # invisible layers are effectively locked but we show it differently
@@ -1673,19 +1712,21 @@ class DrawingArea:
         pos = layout.playing_index if layout.is_playing else movie.pos
         highlight = not layout.is_playing and not movie.curr_layer().locked
         starting_point = (self.xmargin, self.ymargin)
-        self.subsurface.blit(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight), starting_point)
+        surfaces = []
+        surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight))
         if movie.layers[movie.layer_pos].visible:
             scaled_layer = movie.get_thumbnail(pos, self.iwidth, self.iheight, transparent_single_layer=movie.layer_pos)
-            self.subsurface.blit(scaled_layer, starting_point)
-        self.subsurface.blit(movie.curr_top_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight), starting_point)
+            surfaces.append(scaled_layer)
+        surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight))
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
             if mask:
-                self.subsurface.blit(mask, starting_point)
+                surfaces.append(mask)
             if self.fading_mask:
-                self.subsurface.blit(self.fading_mask, starting_point)
+                surfaces.append(self.fading_mask)
 
+        self.subsurface.blits([(surface, starting_point) for surface in surfaces])
         drawing_area_draw_timer.stop()
 
     def update_fading_mask(self):
@@ -1775,15 +1816,15 @@ class TimelineArea:
         self._calc_factors()
 
         eye_icon_size = int(screen.get_width() * 0.15*0.14)
-        self.eye_open = scale_image(pg.image.load('light_on.png'), eye_icon_size)
-        self.eye_shut = scale_image(pg.image.load('light_off.png'), eye_icon_size)
+        self.eye_open = scale_image(load_image('light_on.png'), eye_icon_size)
+        self.eye_shut = scale_image(load_image('light_off.png'), eye_icon_size)
 
-        self.loop_icon = scale_image(pg.image.load('loop.png'), int(screen.get_width()*0.15*0.14))
-        self.arrow_icon = scale_image(pg.image.load('arrow.png'), int(screen.get_width()*0.15*0.2))
+        self.loop_icon = scale_image(load_image('loop.png'), int(screen.get_width()*0.15*0.14))
+        self.arrow_icon = scale_image(load_image('arrow.png'), int(screen.get_width()*0.15*0.2))
 
-        self.no_hold = scale_image(pg.image.load('no_hold.png'), int(screen.get_width()*0.15*0.25))
-        self.hold_active = scale_image(pg.image.load('hold_yellow.png'), int(screen.get_width()*0.15*0.25))
-        self.hold_inactive = scale_image(pg.image.load('hold_grey.png'), int(screen.get_width()*0.15*0.25))
+        self.no_hold = scale_image(load_image('no_hold.png'), int(screen.get_width()*0.15*0.25))
+        self.hold_active = scale_image(load_image('hold_yellow.png'), int(screen.get_width()*0.15*0.25))
+        self.hold_inactive = scale_image(load_image('hold_grey.png'), int(screen.get_width()*0.15*0.25))
 
         # stuff for light table [what positions are enabled and what the resulting
         # mask to be rendered together with the current frame is]
@@ -2062,12 +2103,12 @@ class LayersArea:
         self.prevy = None
         self.color_images = {}
         icon_height = min(int(screen.get_width() * 0.15*0.14), self.thumbnail_height / 2)
-        self.eye_open = scale_image(pg.image.load('eye_open.png'), height=icon_height)
-        self.eye_shut = scale_image(pg.image.load('eye_shut.png'), height=icon_height)
-        self.light_on = scale_image(pg.image.load('light_on.png'), height=icon_height)
-        self.light_off = scale_image(pg.image.load('light_off.png'), height=icon_height)
-        self.locked = scale_image(pg.image.load('locked.png'), height=icon_height)
-        self.unlocked = scale_image(pg.image.load('unlocked.png'), height=icon_height)
+        self.eye_open = scale_image(load_image('eye_open.png'), height=icon_height)
+        self.eye_shut = scale_image(load_image('eye_shut.png'), height=icon_height)
+        self.light_on = scale_image(load_image('light_on.png'), height=icon_height)
+        self.light_off = scale_image(load_image('light_off.png'), height=icon_height)
+        self.locked = scale_image(load_image('locked.png'), height=icon_height)
+        self.unlocked = scale_image(load_image('unlocked.png'), height=icon_height)
         self.eye_boundaries = []
         self.lit_boundaries = []
         self.lock_boundaries = []
@@ -2258,7 +2299,7 @@ class MovieList:
         for clipdir in get_clip_dirs():
             fulldir = os.path.join(WD, clipdir)
             frame_file = os.path.join(fulldir, CURRENT_FRAME_FILE)
-            image = pg.image.load(frame_file) if os.path.exists(frame_file) else new_frame()
+            image = load_image(frame_file) if os.path.exists(frame_file) else new_frame()
             self.images.append(scale_image(image, height=single_image_height))
             self.clips.append(fulldir)
         self.clip_pos = 0 
@@ -2510,7 +2551,7 @@ class Movie(MovieData):
                 w = int(h * IWIDTH / IHEIGHT)
                 if w <= width and h <= height:
                     if trans_single:
-                        return scale_image(self.layers[layer_pos].frame(pos).surface(), width, height)
+                        return self.layers[layer_pos].frame(pos).thumbnail(width, height)
 
                     s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height).copy()
                     if self.layers[self.layer_pos].visible:
@@ -2952,8 +2993,8 @@ TOOLS = {
 }
 
 FUNCTIONS = {
-    'insert-frame': (insert_frame, '=+', pg.image.load('sheets.png')),
-    'remove-frame': (remove_frame, '-_', pg.image.load('garbage.png')),
+    'insert-frame': (insert_frame, '=+', load_image('sheets.png')),
+    'remove-frame': (remove_frame, '-_', load_image('garbage.png')),
     'next-frame': (next_frame, '.<', None),
     'prev-frame': (prev_frame, ',>', None),
     'toggle-playing': (toggle_playing, '\r', None),
@@ -2988,7 +3029,7 @@ def color_image(s, rgba):
 
 class Palette:
     def __init__(self, filename, rows=12, columns=3):
-        s = pg.image.load(filename)
+        s = load_image(filename)
         color_hist = {}
         first_color_hit = {}
         white = (255,255,255)
@@ -3030,7 +3071,7 @@ class Palette:
                 sc = color_image(s, self.colors[row][col])
                 self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), color_image(paint_bucket_cursor[1], self.colors[row][col]))
                 if self.colors[row][col][-1] == 0: # water tool
-                    self.cursors[row][col] = (self.cursors[row][col][0], scale_image(pg.image.load('water-tool.png'), self.cursors[row][col][1].get_width()))
+                    self.cursors[row][col] = (self.cursors[row][col][0], scale_image(load_image('water-tool.png'), self.cursors[row][col][1].get_width()))
 
 
 palette = Palette('palette.png')
@@ -3143,7 +3184,7 @@ def init_layout():
     offset = 0
     for func, width in funcs_width:
         if func == 'play':
-            button = TogglePlaybackButton(pg.image.load('play.png'), pg.image.load('pause.png'))
+            button = TogglePlaybackButton(load_image('play.png'), load_image('pause.png'))
         else:
             button = ToolSelectionButton(TOOLS[func])
         layout.add((TOOLBAR_X_START+offset*0.15,0.15,width*0.15, 0.1), button)
