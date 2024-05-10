@@ -668,6 +668,7 @@ import http.client
 class TeacherClient:
     def __init__(self):
         self.students = {}
+        self.screens_locked = False
     
         self.zeroconf = Zeroconf()
         self.browser = ServiceBrowser(self.zeroconf, "_http._tcp.local.", self)
@@ -685,27 +686,50 @@ class TeacherClient:
                 self.students[name] = (host, port)
                 pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
 
+                # if the screens are supposed to be locked and a student restarted the program or just came
+                # and started it, we want the screen locked, even at the cost of interrupting whatever
+                # the teacher is doing. if on the other hand the student screens are locked and the teacher
+                # restarted the program (a rare event), the teacher can unlock explicitly and will most
+                # certainly do so, so we don't want to have a bunch of unlocking happen automatically
+                # as the teacher's program discovers the live student programs.
+                if self.screens_locked:
+                    self.broadcast_request('/lock', 'Locking one...', [name])
+                    layout.draw()
+                    pygame.display.flip()
+
     def update_service(self, info): pass
 
-    def send_request_get_response(self, student, url):
+    def send_request(self, student, url):
         host, port = self.students[student]
         conn = http.client.HTTPConnection(host, port)
         headers = {'Content-type': 'text/html'}
         conn.request('GET', url, headers=headers)
-
+        
         response = conn.getresponse()
         status = response.status
         message = response.read().decode()
         conn.close()
-
         return status, message
 
+    def broadcast_request(self, url, progress_bar_title, students=None):
+        if not students:
+            students = self.students.keys()
+        # a big reason for the progress bar is, when a student computer hybernates [for example],
+        # remove_service isn't called, and it takes a while to reach a timeout. TODO: see what needs
+        # to be done to improve student machine hybernation and waking up from it
+        progress_bar = ProgressBar(progress_bar_title)
+        for i, student in enumerate(students):
+            self.send_request(student, url)
+            progress_bar.on_progress(i+1, len(students))
+
+    # locking and unlocking deliberately locks up the teacher's main thread - you want to know the students'
+    # screen state, eg you don't want to keep going when some of their screens aren't locked
     def lock_screens(self):
-        for student in self.students:
-            self.send_request_get_response(student, '/lock')
+        self.broadcast_request('/lock', 'Locking all...')
+        self.screens_locked = True
     def unlock_screens(self):
-        for student in self.students:
-            self.send_request_get_response(student, '/unlock')
+        self.broadcast_request('/unlock', 'Unlocking all...')
+        self.screens_locked = False
 
 teacher_client = None
 
