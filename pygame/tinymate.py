@@ -605,6 +605,62 @@ class ExportProgressStatus:
 
 _empty_frame = Frame('')
 
+# Student server & teacher client: turn screen on/off, save/restore backups
+
+import threading
+import socket
+from zeroconf import ServiceInfo, Zeroconf
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class StudentRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        response = 404
+        message = f'Unknown path: {self.path}'
+
+        if self.path == '/lock':
+            student_server.lock_screen = True
+            message = f'Screen locked'
+            response = 200
+        elif self.path == '/unlock':
+            student_server.lock_screen = False
+            message = f'Screen unlocked'
+            response = 200
+
+        self.send_response(response)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(bytes(message, "utf8"))
+
+class StudentServer:
+    def __init__(self):
+        self.lock_screen = False
+
+        self.host = socket.gethostname()
+        self.host_addr = socket.gethostbyname(self.host)
+        self.port = 8080
+        self.zeroconf = Zeroconf()
+        self.service_info = ServiceInfo(
+            "_http._tcp.local.",
+            "Tinymate._http._tcp.local.",
+            addresses=[socket.inet_aton(self.host_addr)],
+            port=self.port)
+        self.zeroconf.register_service(self.service_info)
+        print(f"Student server running on {self.host}[{self.host_addr}]:{self.port}")
+
+        self.thread = threading.Thread(target=self._run)
+        self.thread.start()
+
+    def _run(self):
+        server_address = ('', self.port)
+        self.httpd = HTTPServer(server_address, StudentRequestHandler)
+        self.httpd.serve_forever()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.thread.join()
+
+student_server = StudentServer()
+
 import subprocess
 import pygame.gfxdraw
 if on_windows:
@@ -1042,6 +1098,10 @@ flashlight_cursor = (flashlight_cursor[0], load_image('flashlight-tool.png'))
 paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], load_image('bucket-tool.png'))
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
+
+# for locked screen
+empty_cursor = pg.cursors.Cursor((0,0), pg.Surface((10,10), pg.SRCALPHA))
+
 # set_cursor can fail on some machines so we don't count on it to work.
 # we set it early on to "give a sign of life" while the window is black;
 # we reset it again before entering the event loop.
@@ -1618,6 +1678,10 @@ class Layout:
         elem.draw_border = draw_border
         getattr(elem, 'init', lambda: None)()
         self.elems.append(elem)
+
+    def draw_locked(self):
+        screen.fill(PEN)
+        screen.blit(locked_image, ((screen.get_width()-locked_image.get_width())//2, (screen.get_height()-locked_image.get_height())//2))
 
     def draw(self):
         if self.is_pressed:
@@ -3503,10 +3567,32 @@ pygame.display.flip()
 
 export_on_exit = True
 
+class ScreenLock:
+    def __init__(self):
+        self.locked = False
+
+    def is_locked(self):
+        if student_server.lock_screen:
+            layout.draw_locked()
+            pygame.display.flip()
+            try_set_cursor(empty_cursor)
+            self.locked = True
+            return True
+        elif self.locked:
+            layout.draw()
+            pygame.display.flip()
+            try_set_cursor(layout.full_tool.cursor[0])
+            self.locked = False
+        return False
+
 try:
+    screen_lock = ScreenLock()
     while not escape: 
         for event in pygame.event.get():
             if event.type not in interesting_events:
+                continue
+
+            if screen_lock.is_locked():
                 continue
 
             timer = event2timer[event.type]
@@ -3575,3 +3661,4 @@ else:
 
 pygame.display.quit()
 pygame.quit()
+student_server.stop()
