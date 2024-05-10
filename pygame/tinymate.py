@@ -641,7 +641,7 @@ class StudentServer:
         self.zeroconf = Zeroconf()
         self.service_info = ServiceInfo(
             "_http._tcp.local.",
-            "Tinymate._http._tcp.local.",
+            f"Tinymate.{self.host}.{self.host_addr}._http._tcp.local.",
             addresses=[socket.inet_aton(self.host_addr)],
             port=self.port)
         self.zeroconf.register_service(self.service_info)
@@ -658,8 +658,64 @@ class StudentServer:
     def stop(self):
         self.httpd.shutdown()
         self.thread.join()
+        self.zeroconf.unregister_service(self.service_info)
 
 student_server = StudentServer()
+
+from zeroconf import ServiceBrowser
+import http.client
+
+class TeacherClient:
+    def __init__(self):
+        self.students = {}
+    
+        self.zeroconf = Zeroconf()
+        self.browser = ServiceBrowser(self.zeroconf, "_http._tcp.local.", self)
+
+    def remove_service(self, zeroconf, type, name):
+        if name in self.students:
+            del self.students[name]
+            pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
+
+    def add_service(self, zeroconf, type, name):
+        if name.startswith('Tinymate'):
+            info = zeroconf.get_service_info(type, name)
+            if info:
+                host, port = socket.inet_ntoa(info.addresses[0]), info.port
+                self.students[name] = (host, port)
+                pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
+
+    def update_service(self, info): pass
+
+    def send_request_get_response(self, student, url):
+        host, port = self.students[student]
+        conn = http.client.HTTPConnection(host, port)
+        headers = {'Content-type': 'text/html'}
+        conn.request('GET', url, headers=headers)
+
+        response = conn.getresponse()
+        status = response.status
+        message = response.read().decode()
+        conn.close()
+
+        return status, message
+
+    def lock_screens(self):
+        for student in self.students:
+            self.send_request_get_response(student, '/lock')
+    def unlock_screens(self):
+        for student in self.students:
+            self.send_request_get_response(student, '/unlock')
+
+teacher_client = None
+
+def start_teacher_client():
+    global student_server
+    global teacher_client
+
+    student_server.stop()
+    student_server = None
+    teacher_client = TeacherClient()
 
 import subprocess
 import pygame.gfxdraw
@@ -1699,11 +1755,21 @@ class Layout:
                 if elem.draw_border:
                     pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
 
+        self.draw_students()
+
         layout_draw_timer.stop()
+
+    def draw_students(self):
+        if teacher_client:
+            text_surface = font.render(f"{len(teacher_client.students)} students", True, (255, 0, 0), (255, 255, 255))
+            screen.blit(text_surface, ((screen.get_width()-text_surface.get_width()), (screen.get_height()-text_surface.get_height())))
 
     # note that pygame seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
     def on_event(self,event):
+        if event.type == REDRAW_LAYOUT_EVENT:
+            return
+
         if event.type == PLAYBACK_TIMER_EVENT:
             if self.is_playing:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
@@ -3437,15 +3503,18 @@ timer_events = [
     FADING_TIMER_EVENT,
 ]
 
+REDRAW_LAYOUT_EVENT = pygame.USEREVENT + 4
+
 interesting_events = [
     pygame.KEYDOWN,
     pygame.MOUSEMOTION,
     pygame.MOUSEBUTTONDOWN,
     pygame.MOUSEBUTTONUP,
+    REDRAW_LAYOUT_EVENT,
 ] + timer_events
 
 event2timer = {}
-event_names = 'KEY MOVE DOWN UP PLAYBACK SAVING FADING'.split()
+event_names = 'KEY MOVE DOWN UP REDRAW PLAYBACK SAVING FADING'.split()
 for i,event in enumerate(interesting_events):
     event2timer[event] = timers.add(event_names[i])
 
@@ -3546,6 +3615,18 @@ def process_keydown_event(event):
     if ctrl and event.key == pg.K_r:
         swap_width_height()
 
+    # teacher/student - TODO: better UI
+    # Ctrl-T: teacher client
+    if ctrl and event.key == pg.K_t:
+        print('shutting down the student server and starting the teacher client')
+        start_teacher_client()
+    if ctrl and event.key == pg.K_l and teacher_client:
+        print('locking student screens')
+        teacher_client.lock_screens()
+    if ctrl and event.key == pg.K_u and teacher_client:
+        print('unlocking student screens')
+        teacher_client.unlock_screens()
+
     # other keyboard shortcuts are enabled/disabled by Ctrl-A
     global keyboard_shortcuts_enabled
 
@@ -3572,7 +3653,7 @@ class ScreenLock:
         self.locked = False
 
     def is_locked(self):
-        if student_server.lock_screen:
+        if student_server is not None and student_server.lock_screen:
             layout.draw_locked()
             pygame.display.flip()
             try_set_cursor(empty_cursor)
@@ -3584,6 +3665,8 @@ class ScreenLock:
             try_set_cursor(layout.full_tool.cursor[0])
             self.locked = False
         return False
+
+sys.stdout.flush()
 
 try:
     screen_lock = ScreenLock()
@@ -3661,4 +3744,5 @@ else:
 
 pygame.display.quit()
 pygame.quit()
-student_server.stop()
+if student_server:
+    student_server.stop()
