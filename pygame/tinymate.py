@@ -856,28 +856,32 @@ class TeacherClient:
         done = []
 
         backup_dir = os.path.join(WD, f'Tinymate-class-backup-{format_now()}')
+        try:
+            os.makedirs(backup_dir)
+        except:
+            pass
 
         def response_thread(student, conn):
             def thread_func():
                 response = conn.getresponse()
                 # TODO: error handling incl response.status
-                backup_base64 = ''
+                backup_base64 = b''
                 while True:
-                    line = response.fp.readline().decode('utf-8').strip()
+                    line = response.fp.readline()
                     if not line:
                         break
                     student2progress[student] = len(backup_base64)*5/8
                     backup_base64 += line
 
-                data = base64.b64decode
+                data = base64.b64decode(backup_base64)
                 info = backup_info[student]
                 host = info['host']
                 user = info['user']
                 mac = info['mac']
                 file = info['file']
-                fname = f'student-{user}@{host}-{mac}-{file}'
+                fname = f'student-{user}@{host}-{mac}-{file}'.replace(':','_')
                 with open(os.path.join(backup_dir, fname), 'wb') as f:
-                    f.write(base64.b64decode(data))
+                    f.write(data)
 
                 done.append(student)
                 conn.close()
