@@ -638,6 +638,7 @@ import socket
 from zeroconf import ServiceInfo, Zeroconf
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import getpass, getmac
+import base64
 
 class StudentRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -672,6 +673,22 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
                 message = json.dumps(backup_props)
                 self.wfile.write(bytes(message, "utf8"))
                 return
+            elif self.path.startswith('/file/'):
+                fpath = self.path[len('/file/'):]
+                xpath = fpath
+                fpath = os.path.join(WD, fpath)
+                if os.path.exists(fpath):
+                    with open(fpath, 'rb') as f:
+                        data = f.read()
+                    data64 = base64.b64encode(data)
+                    self.send_response(response)
+                    self.send_header('Content-type', 'text/html')
+                    self.end_headers()
+                    chunk = 16*1024
+                    for i in range(0, len(data64), chunk):
+                        self.wfile.write(data64[i:i+chunk])
+                    return
+
         except Exception:
             import traceback
             traceback.print_exc()
@@ -791,7 +808,6 @@ class TeacherClient:
 
         progress_bar = ProgressBar('Saving...')
         student2progress = {}
-
         done = []
 
         def response_thread(student, conn):
@@ -802,7 +818,7 @@ class TeacherClient:
                     line = response.fp.readline().decode('utf-8').strip()
                     if not line:
                         break
-                    print(line)
+                    print(student, line)
                     if line.endswith('<br>'):
                         student2progress[student] = [int(t) for t in line.split()[:2]]
                     else:
@@ -833,11 +849,63 @@ class TeacherClient:
 
         return backup_info
 
+    def get_backups(self, backup_info, students):
+        threads = []
+        progress_bar = ProgressBar('Receiving...')
+        student2progress = {}
+        done = []
+
+        backup_dir = os.path.join(WD, f'Tinymate-class-backup-{format_now()}')
+
+        def response_thread(student, conn):
+            def thread_func():
+                response = conn.getresponse()
+                # TODO: error handling incl response.status
+                backup_base64 = ''
+                while True:
+                    line = response.fp.readline().decode('utf-8').strip()
+                    if not line:
+                        break
+                    student2progress[student] = len(backup_base64)*5/8
+                    backup_base64 += line
+
+                data = base64.b64decode
+                info = backup_info[student]
+                host = info['host']
+                user = info['user']
+                mac = info['mac']
+                file = info['file']
+                fname = f'student-{user}@{host}-{mac}-{file}'
+                with open(os.path.join(backup_dir, fname), 'wb') as f:
+                    f.write(base64.b64decode(data))
+
+                done.append(student)
+                conn.close()
+            return thread_func
+
+        for student in students:
+            host, port = students[student]
+            conn = http.client.HTTPConnection(host, port)
+            headers = {'Content-type': 'text/html'}
+            conn.request('GET', '/file/'+backup_info[student]['file'], headers=headers)
+
+            thread = threading.Thread(target=response_thread(student, conn))
+            thread.start()
+            threads.append(thread)
+
+        total_bytes = sum([backup['size'] for backup in backup_info.values()])
+        while len(done) < len(students):
+            progress = student2progress.copy()
+            received = sum(progress.values())
+            progress_bar.on_progress(received, total_bytes)
+
+        for thread in threads:
+            thread.join()
+
     def save_class_backup(self):
         students = self.students.copy() # if someone connects past this point, we don't have their backup
         student_backups = self.get_backup_info(students)
-        total_bytes = sum([backup['size'] for backup in student_backups.values()])
-        print(student_backups)
+        self.get_backups(student_backups, students)
 
 teacher_client = None
 
