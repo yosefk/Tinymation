@@ -785,7 +785,7 @@ class TeacherClient:
         self.broadcast_request('/unlock', 'Unlocking all...')
         self.screens_locked = False
 
-    def get_backup_info(self):
+    def get_backup_info(self, students):
         backup_info = {}
         threads = []
 
@@ -812,8 +812,8 @@ class TeacherClient:
                 conn.close()
             return thread_func
 
-        for student in self.students:
-            host, port = self.students[student]
+        for student in students:
+            host, port = students[student]
             conn = http.client.HTTPConnection(host, port)
             headers = {'Content-type': 'text/html'}
             conn.request('GET', '/backup', headers=headers)
@@ -823,7 +823,7 @@ class TeacherClient:
             threads.append(thread)
 
         while len(done) < len(students):
-            progress = student2progress.values().copy()
+            progress = student2progress.copy().values()
             compressed = sum([p[0] for p in progress])
             total = sum([p[1] for p in progress])
             progress_bar.on_progress(compressed, total)
@@ -834,7 +834,8 @@ class TeacherClient:
         return backup_info
 
     def save_class_backup(self):
-        student_backups = self.get_backup_info()
+        students = self.students.copy() # if someone connects past this point, we don't have their backup
+        student_backups = self.get_backup_info(students)
         total_bytes = sum([backup['size'] for backup in student_backups.values()])
         print(student_backups)
 
@@ -3756,6 +3757,9 @@ def process_keydown_event(event):
     if ctrl and event.key == pg.K_u and teacher_client:
         print('unlocking student screens')
         teacher_client.unlock_screens()
+    if ctrl and event.key == pg.K_b and teacher_client:
+        print('saving class backup')
+        teacher_client.save_class_backup()
 
     # other keyboard shortcuts are enabled/disabled by Ctrl-A
     global keyboard_shortcuts_enabled
