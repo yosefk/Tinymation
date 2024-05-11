@@ -678,15 +678,16 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
                 xpath = fpath
                 fpath = os.path.join(WD, fpath)
                 if os.path.exists(fpath):
+                    response = 200
                     with open(fpath, 'rb') as f:
                         data = f.read()
                     data64 = base64.b64encode(data)
                     self.send_response(response)
                     self.send_header('Content-type', 'text/html')
                     self.end_headers()
-                    chunk = 16*1024
+                    chunk = 64*1024
                     for i in range(0, len(data64), chunk):
-                        self.wfile.write(data64[i:i+chunk])
+                        self.wfile.write(data64[i:i+chunk]+b'\n')
                     return
 
         except Exception:
@@ -766,7 +767,18 @@ class TeacherClient:
                     layout.draw()
                     pygame.display.flip()
 
-    def update_service(self, info): pass
+    def update_service(self, zeroconf, type, name):
+        num_students = len(self.students)
+        if name.startswith('Tinymate'):
+            info = zeroconf.get_service_info(type, name)
+            if info:
+                host, port = socket.inet_ntoa(info.addresses[0]), info.port
+                if (host, port) != self.students[name]:
+                    self.students[name] = (host, port)
+            else:
+                del self.students[name]
+        if num_students != len(self.students):
+            pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
 
     def send_request(self, student, url):
         host, port = self.students[student]
@@ -819,6 +831,7 @@ class TeacherClient:
                     if not line:
                         break
                     print(student, line)
+                    sys.stdout.flush()
                     if line.endswith('<br>'):
                         student2progress[student] = [int(t) for t in line.split()[:2]]
                     else:
@@ -843,6 +856,7 @@ class TeacherClient:
             compressed = sum([p[0] for p in progress])
             total = sum([p[1] for p in progress])
             progress_bar.on_progress(compressed, total)
+            time.sleep(0.3)
 
         for thread in threads:
             thread.join()
@@ -872,6 +886,8 @@ class TeacherClient:
                         break
                     student2progress[student] = len(backup_base64)*5/8
                     backup_base64 += line
+                    print(student, 'sent', int(len(backup_base64)*5/8), '/', backup_info[student]['size'])
+                    sys.stdout.flush()
 
                 data = base64.b64decode(backup_base64)
                 info = backup_info[student]
@@ -902,6 +918,7 @@ class TeacherClient:
             progress = student2progress.copy()
             received = sum(progress.values())
             progress_bar.on_progress(received, total_bytes)
+            time.sleep(0.3)
 
         for thread in threads:
             thread.join()
@@ -2634,6 +2651,7 @@ class ProgressBar:
         pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
         screen.blit(text_surface, pos)
         pg.display.flip()
+        pg.event.pump()
 
 def open_movie_with_progress_bar(clipdir):
     progress_bar = ProgressBar('Loading...')
