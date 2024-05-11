@@ -605,26 +605,78 @@ class ExportProgressStatus:
 
 _empty_frame = Frame('')
 
+# backups
+import zipfile
+
+def create_backup(on_progress):
+    backup_file = os.path.join(WD, f'Tinymate-backup-{format_now()}.zip')
+
+    files_to_back_up = []
+    for root, dirs, files in os.walk(WD):
+        for file in files:
+            ext = file.split('.')[-1].lower() if '.' in file else None
+            if ext not in ['gif','mp4','zip','bmp']:
+                files_to_back_up.append(os.path.join(root, file))
+
+    total_bytes = sum([os.path.getsize(f) for f in files_to_back_up])
+    compressed_bytes = 0
+
+    with zipfile.ZipFile(backup_file, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+        for file_path in files_to_back_up:
+            relative_path = os.path.relpath(file_path, WD)
+            zipf.write(file_path, relative_path)
+
+            compressed_bytes += os.path.getsize(file_path)
+            on_progress(compressed_bytes, total_bytes)
+
+    return backup_file
+
 # Student server & teacher client: turn screen on/off, save/restore backups
 
 import threading
 import socket
 from zeroconf import ServiceInfo, Zeroconf
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import getpass, getmac
 
 class StudentRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         response = 404
         message = f'Unknown path: {self.path}'
 
-        if self.path == '/lock':
-            student_server.lock_screen = True
-            message = f'Screen locked'
-            response = 200
-        elif self.path == '/unlock':
-            student_server.lock_screen = False
-            message = f'Screen unlocked'
-            response = 200
+        try:
+            if self.path == '/lock':
+                student_server.lock_screen = True
+                message = f'Screen locked'
+                response = 200
+            elif self.path == '/unlock':
+                student_server.lock_screen = False
+                message = f'Screen unlocked'
+                response = 200
+            elif self.path == '/backup':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+
+                def on_progress(compressed, total):
+                    self.wfile.write(bytes(f'{compressed} {total} <br>\n', "utf8"))
+                abspath = create_backup(on_progress)
+
+                backup_props = {}
+                backup_props['file'] = os.path.basename(abspath)
+                backup_props['size'] = os.path.getsize(abspath)
+                backup_props['user'] = getpass.getuser()
+                backup_props['host'] = student_server.host
+                backup_props['mac'] = getmac.get_mac_address()
+
+                message = json.dumps(backup_props)
+                self.wfile.write(bytes(message, "utf8"))
+                return
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            message = f'internal error handling {self.path}'
+            response = 500
 
         self.send_response(response)
         self.send_header('Content-type', 'text/html')
@@ -718,9 +770,11 @@ class TeacherClient:
         # remove_service isn't called, and it takes a while to reach a timeout. TODO: see what needs
         # to be done to improve student machine hybernation and waking up from it
         progress_bar = ProgressBar(progress_bar_title)
+        responses = {}
         for i, student in enumerate(students):
-            self.send_request(student, url)
+            responses[student] = self.send_request(student, url)
             progress_bar.on_progress(i+1, len(students))
+        return responses
 
     # locking and unlocking deliberately locks up the teacher's main thread - you want to know the students'
     # screen state, eg you don't want to keep going when some of their screens aren't locked
@@ -730,6 +784,59 @@ class TeacherClient:
     def unlock_screens(self):
         self.broadcast_request('/unlock', 'Unlocking all...')
         self.screens_locked = False
+
+    def get_backup_info(self):
+        backup_info = {}
+        threads = []
+
+        progress_bar = ProgressBar('Saving...')
+        student2progress = {}
+
+        done = []
+
+        def response_thread(student, conn):
+            def thread_func():
+                response = conn.getresponse()
+                # TODO: error handling incl response.status
+                while True:
+                    line = response.fp.readline().decode('utf-8').strip()
+                    if not line:
+                        break
+                    print(line)
+                    if line.endswith('<br>'):
+                        student2progress[student] = [int(t) for t in line.split()[:2]]
+                    else:
+                        backup_info[student] = json.loads(line)
+                        break
+                done.append(student)
+                conn.close()
+            return thread_func
+
+        for student in self.students:
+            host, port = self.students[student]
+            conn = http.client.HTTPConnection(host, port)
+            headers = {'Content-type': 'text/html'}
+            conn.request('GET', '/backup', headers=headers)
+
+            thread = threading.Thread(target=response_thread(student, conn))
+            thread.start()
+            threads.append(thread)
+
+        while len(done) < len(students):
+            progress = student2progress.values().copy()
+            compressed = sum([p[0] for p in progress])
+            total = sum([p[1] for p in progress])
+            progress_bar.on_progress(compressed, total)
+
+        for thread in threads:
+            thread.join()
+
+        return backup_info
+
+    def save_class_backup(self):
+        student_backups = self.get_backup_info()
+        total_bytes = sum([backup['size'] for backup in student_backups.values()])
+        print(student_backups)
 
 teacher_client = None
 
@@ -3360,9 +3467,8 @@ def init_layout():
 
     set_tool(last_tool if last_tool else TOOLS['pencil'])
 
-def new_movie_clip_dir():
-    now = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    return os.path.join(WD, now)
+def format_now(): return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+def new_movie_clip_dir(): return os.path.join(WD, format_now())
 
 def default_clip_dir():
     clip_dirs = get_clip_dirs() 
