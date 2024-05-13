@@ -660,7 +660,8 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
         if self.path.startswith('/put/'):
             fname = os.path.join(WD, self.path[len('/put/'):])
             if not os.path.exists(fname):
-                data = self.rfile.read()
+                size = int(self.headers['Content-Length'])
+                data = self.rfile.read(size)
                 with open(fname, 'wb') as f:
                     f.write(data)
 
@@ -723,7 +724,7 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
                         self.wfile.write(data64[i:i+chunk]+b'\n')
                     return
             elif self.path.startswith('/unzip/'):
-                fpath = self.path[len('/file/'):]
+                fpath = self.path[len('/unzip/'):]
                 fpath = os.path.join(WD, fpath)
                 if os.path.exists(fpath):
                     self.send_response(200)
@@ -999,17 +1000,18 @@ class TeacherClient:
     def put(self, file, students):
         class PutThreads(StudentThreads):
             def student_thread(self, student, conn):
-                conn.putrequest('PUT', '/put/'+os.path.basename(file))
-                conn.putheader('Content-Type', 'application/octet-stream')
-                conn.endheaders()
-
                 with open(file, 'rb') as f:
                     data = f.read()
 
+                conn.putrequest('PUT', '/put/'+os.path.basename(file))
+                conn.putheader('Content-Length', str(len(data)))
+                conn.putheader('Content-Type', 'application/octet-stream')
+                conn.endheaders()
+
                 chunk_size = 64*1024
                 for i in range(0, len(data), chunk_size):
-                    conn.send(data[i,i+chunk_size])
-                    self.student2progress[student] = i*chunk_size, len(data)
+                    conn.send(data[i:i+chunk_size])
+                    self.student2progress[student] = i, len(data)
                 self.student2progress[student] = len(data), len(data)
 
                 response = conn.getresponse()
@@ -2110,8 +2112,7 @@ class Layout:
             return
 
         if event.type == RELOAD_MOVIE_LIST_EVENT:
-            movie.save_before_closing()
-            movie_list.reload()
+            clips_were_inserted_via_filesystem()
             return
 
         if event.type == PLAYBACK_TIMER_EVENT:
@@ -3426,6 +3427,12 @@ def insert_clip():
     movie = Movie(new_movie_clip_dir())
     movie.render_and_save_current_frame() # write out CURRENT_FRAME_FILE for MovieListArea.reload...
     movie_list.reload()
+
+def clips_were_inserted_via_filesystem():
+    global movie
+    movie.save_before_closing()
+    movie_list.reload()
+    movie = Movie(default_clip_dir())
 
 def remove_clip():
     if len(movie_list.clips) <= 1:
