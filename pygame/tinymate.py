@@ -3432,7 +3432,7 @@ def clips_were_inserted_via_filesystem():
     global movie
     movie.save_before_closing()
     movie_list.reload()
-    movie = Movie(default_clip_dir())
+    movie = Movie(default_clip_dir()[0])
 
 def remove_clip():
     if len(movie_list.clips) <= 1:
