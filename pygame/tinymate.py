@@ -702,11 +702,20 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
                 abspath = create_backup(on_progress)
 
                 backup_props = {}
-                backup_props['file'] = os.path.basename(abspath)
                 backup_props['size'] = os.path.getsize(abspath)
-                backup_props['user'] = getpass.getuser()
-                backup_props['host'] = student_server.host
-                backup_props['mac'] = getmac.get_mac_address()
+                
+                user = getpass.getuser()
+                host = student_server.host
+                mac = getmac.get_mac_address()
+
+                # we deliberately rename here and not on the client since if a computer keeps the files
+                # across sessions, it will save us a transfer when restoring the backup to have the file
+                # already stored with the name the server will use to restore it
+                file = os.path.basename(abspath)
+                fname = f'student-{user}@{host}-{mac}-{file}'.replace(':','_')
+                shutil.move(abspath, os.path.join(os.path.dirname(abspath), fname))
+
+                backup_props['file'] = fname
 
                 message = json.dumps(backup_props)
                 self.wfile.write(bytes(message, "utf8"))
@@ -973,12 +982,8 @@ class TeacherClient:
 
                 data = base64.b64decode(backup_base64)
                 info = backup_info[student]
-                host = info['host']
-                user = info['user']
-                mac = info['mac']
                 file = info['file']
-                fname = f'student-{user}@{host}-{mac}-{file}'.replace(':','_')
-                with open(os.path.join(backup_dir, fname), 'wb') as f:
+                with open(os.path.join(backup_dir, file), 'wb') as f:
                     f.write(data)
 
                 self.student2progress[student] = (total, total)
@@ -1020,20 +1025,32 @@ class TeacherClient:
         responses = self.broadcast_request('/mac', 'Getting IDs...', students)
         student_macs = dict([(student, r.replace(':','_')) for (student, (s,r)) in responses.items()])
         backup_files = [os.path.join(class_backup_dir, f) for f in os.listdir(class_backup_dir)]
-        print(student_macs)
-        print(backup_files)
 
         student2backup = {}
+        teacher_backup = None
         for student,mac in student_macs.items():
             for f in backup_files:
                 if mac in f:
                     student2backup[student] = f
                     break
+        for f in backup_files:
+            if 'teacher-' in f:
+                teacher_backup = f
 
-        print(student2backup)
+        def my_backup_thread():
+            if not teacher_backup:
+                return
+            def on_progress(uncompressed, total): pass
+            unzip_files(teacher_backup, on_progress)
+            pg.event.post(pg.Event(RELOAD_MOVIE_LIST_EVENT))
+
+        teacher_thread = threading.Thread(target=my_backup_thread)
+        teacher_thread.start()
+
         self.put(student2backup, students)
-        # TODO: unzip teacher's backup
         self.unzip(student2backup, students)
+
+        teacher_thread.join()
 
     def put(self, student2file, students):
         class PutThreads(StudentThreads):
