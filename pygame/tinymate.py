@@ -610,9 +610,14 @@ import zipfile
 
 def create_backup(on_progress):
     backup_file = os.path.join(WD, f'Tinymate-backup-{format_now()}.zip')
+    zip_dir(backup_file, WD, on_progress)
+    return backup_file
 
+def zip_dir(backup_file, dirname, on_progress, rel_path_root=None):
+    if rel_path_root is None:
+        rel_path_root = dirname
     files_to_back_up = []
-    for root, dirs, files in os.walk(WD):
+    for root, dirs, files in os.walk(dirname):
         for file in files:
             ext = file.split('.')[-1].lower() if '.' in file else None
             if ext not in ['gif','mp4','zip','bmp']:
@@ -623,13 +628,22 @@ def create_backup(on_progress):
 
     with zipfile.ZipFile(backup_file, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
         for file_path in files_to_back_up:
-            relative_path = os.path.relpath(file_path, WD)
+            relative_path = os.path.relpath(file_path, rel_path_root) 
             zipf.write(file_path, relative_path)
 
             compressed_bytes += os.path.getsize(file_path)
             on_progress(compressed_bytes, total_bytes)
 
-    return backup_file
+# we do NOT overwrite already existing files - the user needs to actively delete them.
+def unzip_files(zip_file, on_progress):
+    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        files = zip_ref.infolist()
+        total_bytes = sum([f.file_size for f in files])
+
+        for f in files:
+            if not os.path.exists(os.path.join(WD, f.filename)):
+                zip_ref.extract(f, WD)
+    
 
 # Student server & teacher client: turn screen on/off, save/restore backups
 
@@ -641,6 +655,26 @@ import getpass, getmac
 import base64
 
 class StudentRequestHandler(BaseHTTPRequestHandler):
+    def do_PUT(self):
+        # TODO: exception handling
+        if self.path.startswith('/put/'):
+            fname = os.path.join(WD, self.path[len('/put/'):])
+            if not os.path.exists(fname):
+                data = self.rfile.read()
+                with open(fname, 'wb') as f:
+                    f.write(data)
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.end_headers()
+                self.wfile.write(b'PUT request processed successfully')
+                return
+
+        self.send_response(500)
+        self.send_header('Content-Type', 'text/html')
+        self.end_headers()
+        self.wfile.write(bytes(f'failed to handle PUT path: {self.path}', 'utf-8'))
+
     def do_GET(self):
         response = 404
         message = f'Unknown path: {self.path}'
@@ -656,7 +690,7 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
                 response = 200
             elif self.path == '/backup':
                 self.send_response(200)
-                self.send_header('Content-type', 'text/html')
+                self.send_header('Content-Type', 'text/html')
                 self.end_headers()
 
                 def on_progress(compressed, total):
@@ -675,7 +709,6 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
                 return
             elif self.path.startswith('/file/'):
                 fpath = self.path[len('/file/'):]
-                xpath = fpath
                 fpath = os.path.join(WD, fpath)
                 if os.path.exists(fpath):
                     response = 200
@@ -683,11 +716,24 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
                         data = f.read()
                     data64 = base64.b64encode(data)
                     self.send_response(response)
-                    self.send_header('Content-type', 'text/html')
+                    self.send_header('Content-Type', 'text/html')
                     self.end_headers()
                     chunk = 64*1024
                     for i in range(0, len(data64), chunk):
                         self.wfile.write(data64[i:i+chunk]+b'\n')
+                    return
+            elif self.path.startswith('/unzip/'):
+                fpath = self.path[len('/file/'):]
+                fpath = os.path.join(WD, fpath)
+                if os.path.exists(fpath):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html')
+                    self.end_headers()
+
+                    def on_progress(uncompressed, total):
+                        self.wfile.write(bytes(f'{uncompressed} {total} <br>\n', "utf8"))
+                    unzip_files(fpath, on_progress)
+                    pg.event.post(pg.Event(RELOAD_MOVIE_LIST_EVENT))
                     return
 
         except Exception:
@@ -697,7 +743,7 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
             response = 500
 
         self.send_response(response)
-        self.send_header('Content-type', 'text/html')
+        self.send_header('Content-Type', 'text/html')
         self.end_headers()
         self.wfile.write(bytes(message, "utf8"))
 
@@ -734,6 +780,51 @@ student_server = StudentServer()
 
 from zeroconf import ServiceBrowser
 import http.client
+
+class StudentThreads:
+    def __init__(self, students, title):
+        self.threads = []
+        self.done = []
+        self.students = students
+        self.student2progress = {}
+        self.progress_bar = ProgressBar(title)
+
+    def run_thread_func(self, student, conn):
+        try:
+            self.student_thread(student, conn)
+        except:
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.done.append(student)
+            conn.close()
+
+    def thread_func(self, student, conn):
+        def thread():
+            return self.run_thread_func(student, conn)
+        return thread
+
+    def student_thread(self, student, conn): pass 
+
+    def start_thread_per_student(self):
+        for student in self.students:
+            host, port = self.students[student]
+            conn = http.client.HTTPConnection(host, port)
+
+            thread = threading.Thread(target=self.thread_func(student, conn))
+            thread.start()
+            self.threads.append(thread)
+
+    def wait_for_all_threads(self):
+        while len(self.done) < len(self.students):
+            progress = self.student2progress.copy().values()
+            done = sum([p[0] for p in progress])
+            total = max(1, sum([p[1] for p in progress]))
+            self.progress_bar.on_progress(done, total)
+            time.sleep(0.3)
+
+        for thread in self.threads:
+            thread.join()
 
 class TeacherClient:
     def __init__(self):
@@ -783,7 +874,7 @@ class TeacherClient:
     def send_request(self, student, url):
         host, port = self.students[student]
         conn = http.client.HTTPConnection(host, port)
-        headers = {'Content-type': 'text/html'}
+        headers = {'Content-Type': 'text/html'}
         conn.request('GET', url, headers=headers)
         
         response = conn.getresponse()
@@ -816,143 +907,144 @@ class TeacherClient:
 
     def get_backup_info(self, students):
         backup_info = {}
-        threads = []
 
-        progress_bar = ProgressBar(f'Saving {len(students)}+1...')
-        student2progress = {}
-        done = []
+        class BackupInfoStudentThreads(StudentThreads):
+            def student_thread(self, student, conn):
+                headers = {'Content-Type': 'text/html'}
+                conn.request('GET', '/backup', headers=headers)
+                response = conn.getresponse()
+                while True:
+                    line = response.fp.readline().decode('utf-8').strip()
+                    if not line:
+                        break
+                    print(student, line)
+                    sys.stdout.flush()
+                    if line.endswith('<br>'):
+                        self.student2progress[student] = [int(t) for t in line.split()[:2]]
+                    else:
+                        backup_info[student] = json.loads(line)
+                        break
 
-        def response_thread(student, conn):
-            def thread_func():
-                try:
-                    response = conn.getresponse()
-                    while True:
-                        line = response.fp.readline().decode('utf-8').strip()
-                        if not line:
-                            break
-                        print(student, line)
-                        sys.stdout.flush()
-                        if line.endswith('<br>'):
-                            student2progress[student] = [int(t) for t in line.split()[:2]]
-                        else:
-                            backup_info[student] = json.loads(line)
-                            break
-                except:
-                    import traceback
-                    traceback.print_exc()
-                finally:
-                    done.append(student)
-                    conn.close()
-            return thread_func
+        student_threads = BackupInfoStudentThreads(students, f'Saving {len(students)}+1...')
+        student_threads.start_thread_per_student()
 
-        teacher_id = None
         def my_backup_thread():
-            def on_progress(compressed, total): student2progress[teacher_id] = (compressed, total)
+            teacher_id = None
+            def on_progress(compressed, total):
+                student_threads.student2progress[teacher_id] = (compressed, total)
             filename = create_backup(on_progress)
             backup_info[teacher_id] = {'file':filename}
-            done.append(teacher_id)
 
-        for student in students:
-            host, port = students[student]
-            conn = http.client.HTTPConnection(host, port)
-            headers = {'Content-type': 'text/html'}
-            conn.request('GET', '/backup', headers=headers)
+        teacher_thread = threading.Thread(target=my_backup_thread)
+        teacher_thread.start()
 
-            thread = threading.Thread(target=response_thread(student, conn))
-            thread.start()
-            threads.append(thread)
-
-        thread = threading.Thread(target=my_backup_thread)
-        thread.start()
-        threads.append(thread)
-
-        while len(done) < len(students):
-            progress = student2progress.copy().values()
-            compressed = sum([p[0] for p in progress])
-            total = sum([p[1] for p in progress])
-            progress_bar.on_progress(compressed, total)
-            time.sleep(0.3)
-
-        for thread in threads:
-            thread.join()
+        student_threads.wait_for_all_threads()
+        teacher_thread.join()
 
         return backup_info
 
     def get_backups(self, backup_info, students):
-        threads = []
-        progress_bar = ProgressBar(f'Receiving {len(students)}...')
-        student2progress = {}
-        done = []
-
         backup_dir = os.path.join(WD, f'Tinymate-class-backup-{format_now()}')
         try:
             os.makedirs(backup_dir)
         except:
             pass
 
-        def response_thread(student, conn):
-            def thread_func():
-                try:
-                    response = conn.getresponse()
-                    backup_base64 = b''
-                    while True:
-                        line = response.fp.readline()
-                        if not line:
-                            break
-                        student2progress[student] = len(backup_base64)*5/8
-                        backup_base64 += line
-                        print(student, 'sent', int(len(backup_base64)*5/8), '/', backup_info[student]['size'])
-                        sys.stdout.flush()
+        class BackupInfoStudentThreads(StudentThreads):
+            def student_thread(self, student, conn):
+                headers = {'Content-Type': 'text/html'}
+                conn.request('GET', '/file/'+backup_info[student]['file'], headers=headers)
 
-                    data = base64.b64decode(backup_base64)
-                    info = backup_info[student]
-                    host = info['host']
-                    user = info['user']
-                    mac = info['mac']
-                    file = info['file']
-                    fname = f'student-{user}@{host}-{mac}-{file}'.replace(':','_')
-                    with open(os.path.join(backup_dir, fname), 'wb') as f:
-                        f.write(data)
+                response = conn.getresponse()
+                backup_base64 = b''
+                total = backup_info[student]['size']
+                while True:
+                    line = response.fp.readline()
+                    if not line:
+                        break
+                    self.student2progress[student] = (len(backup_base64)*5/8, total)
+                    backup_base64 += line
+                    print(student, 'sent', int(len(backup_base64)*5/8), '/', total)
+                    sys.stdout.flush()
+
+                data = base64.b64decode(backup_base64)
+                info = backup_info[student]
+                host = info['host']
+                user = info['user']
+                mac = info['mac']
+                file = info['file']
+                fname = f'student-{user}@{host}-{mac}-{file}'.replace(':','_')
+                with open(os.path.join(backup_dir, fname), 'wb') as f:
+                    f.write(data)
+
+                self.student2progress[student] = (total, total)
     
-                except:
-                    import traceback
-                    traceback.print_exc()
-                finally:
-                    done.append(student)
-                    conn.close()
-            return thread_func
-
-        for student in students:
-            host, port = students[student]
-            conn = http.client.HTTPConnection(host, port)
-            headers = {'Content-type': 'text/html'}
-            conn.request('GET', '/file/'+backup_info[student]['file'], headers=headers)
-
-            thread = threading.Thread(target=response_thread(student, conn))
-            thread.start()
-            threads.append(thread)
+        student_threads = BackupInfoStudentThreads(students, f'Receiving {len(students)}...')
+        student_threads.start_thread_per_student()
 
         teacher_id = None
         teacher_file = backup_info[teacher_id]['file']
         target_teacher_file = os.path.join(backup_dir, 'teacher-'+os.path.basename(teacher_file))
         shutil.move(teacher_file, target_teacher_file)
 
-        total_bytes = sum([backup_info[student]['size'] for student in students])
-        while len(done) < len(students):
-            progress = student2progress.copy()
-            received = sum(progress.values())
-            progress_bar.on_progress(received, total_bytes)
-            time.sleep(0.3)
-
-        for thread in threads:
-            thread.join()
-
+        student_threads.wait_for_all_threads()
+        
         open_explorer(backup_dir)
 
     def save_class_backup(self):
         students = self.students.copy() # if someone connects past this point, we don't have their backup
         student_backups = self.get_backup_info(students)
         self.get_backups(student_backups, students)
+
+    def put(self, file, students):
+        class PutThreads(StudentThreads):
+            def student_thread(self, student, conn):
+                conn.putrequest('PUT', '/put/'+os.path.basename(file))
+                conn.putheader('Content-Type', 'application/octet-stream')
+                conn.endheaders()
+
+                with open(file, 'rb') as f:
+                    data = f.read()
+
+                chunk_size = 64*1024
+                for i in range(0, len(data), chunk_size):
+                    conn.send(data[i,i+chunk_size])
+                    self.student2progress[student] = i*chunk_size, len(data)
+                self.student2progress[student] = len(data), len(data)
+
+                response = conn.getresponse()
+                response.read()
+
+        student_threads = PutThreads(students, f'Sending {len(students)}...')
+        student_threads.start_thread_per_student()
+        student_threads.wait_for_all_threads()
+
+    def unzip(self, zip_file, students):
+        class UnzipThreads(StudentThreads):
+            def student_thread(self, student, conn):
+                headers = {'Content-Type': 'text/html'}
+                conn.request('GET', '/unzip/'+zip_file, headers=headers)
+                response = conn.getresponse()
+                while True:
+                    line = response.fp.readline().decode('utf-8').strip()
+                    if not line:
+                        break
+                    if line.endswith('<br>'):
+                        self.student2progress[student] = [int(t) for t in line.split()[:2]]
+
+        student_threads = UnzipThreads(students, f'Unzipping {len(students)}...')
+        student_threads.start_thread_per_student()
+        student_threads.wait_for_all_threads()
+
+    def put_dir(self, dir):
+        dir = os.path.realpath(dir)
+        progress_bar = ProgressBar('Zipping...')
+        zip_file = os.path.join(WD, dir + '.zip')
+        zip_dir(zip_file, dir, progress_bar.on_progress, os.path.dirname(dir))
+        students = self.students.copy()
+        self.put(zip_file, self.students)
+        self.unzip(os.path.basename(zip_file), self.students)
+        os.unlink(zip_file)
 
 teacher_client = None
 
@@ -2017,6 +2109,11 @@ class Layout:
         if event.type == REDRAW_LAYOUT_EVENT:
             return
 
+        if event.type == RELOAD_MOVIE_LIST_EVENT:
+            movie.save_before_closing()
+            movie_list.reload()
+            return
+
         if event.type == PLAYBACK_TIMER_EVENT:
             if self.is_playing:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
@@ -2671,7 +2768,7 @@ class ProgressBar:
         pg.draw.rect(screen, UNUSED, self.outer_rect)
         pg.draw.rect(screen, BACKGROUND, self.inner_rect)
         left, bottom, full_width, height = self.inner_rect
-        done_width = int(full_width * (self.done/max(1,self.total)))
+        done_width = min(full_width, int(full_width * (self.done/max(1,self.total))))
         pg.draw.rect(screen, PROGRESS, (left, bottom, done_width, height))
         text_surface = font.render(self.title, True, UNUSED)
         pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
@@ -3751,6 +3848,7 @@ timer_events = [
 ]
 
 REDRAW_LAYOUT_EVENT = pygame.USEREVENT + 4
+RELOAD_MOVIE_LIST_EVENT = pygame.USEREVENT + 5
 
 interesting_events = [
     pygame.KEYDOWN,
@@ -3758,10 +3856,11 @@ interesting_events = [
     pygame.MOUSEBUTTONDOWN,
     pygame.MOUSEBUTTONUP,
     REDRAW_LAYOUT_EVENT,
+    RELOAD_MOVIE_LIST_EVENT,
 ] + timer_events
 
 event2timer = {}
-event_names = 'KEY MOVE DOWN UP REDRAW PLAYBACK SAVING FADING'.split()
+event_names = 'KEY MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING'.split()
 for i,event in enumerate(interesting_events):
     event2timer[event] = timers.add(event_names[i])
 
@@ -3809,15 +3908,16 @@ def export_and_open_explorer():
 
     open_explorer(movie.gif_path())
 
-def open_clip_dir():
-    import tkinter
-    import tkinter.filedialog
-
+def open_dir_path_dialog():
     dialog_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'dir-path-dialog'], stdout=subprocess.PIPE)
     output, _ = dialog_subprocess.communicate()
     # we use repr/eval because writing Unicode to sys.stdout fails
     # and so does writing the binary output of encode() without repr()
     file_path = eval(output).decode() if output.strip() else None
+    return file_path
+
+def open_clip_dir():
+    file_path = open_dir_path_dialog()
     global WD
     if file_path and os.path.realpath(file_path) != os.path.realpath(WD):
         movie.save_before_closing()
@@ -3880,6 +3980,10 @@ def process_keydown_event(event):
     if ctrl and event.key == pg.K_b and teacher_client:
         print('saving class backup')
         teacher_client.save_class_backup()
+    if ctrl and event.key == pg.K_p and teacher_client:
+        print("putting a directory in all students' Tinymate directories")
+        teacher_client.put_dir(open_dir_path_dialog())
+
 
     # other keyboard shortcuts are enabled/disabled by Ctrl-A
     global keyboard_shortcuts_enabled
