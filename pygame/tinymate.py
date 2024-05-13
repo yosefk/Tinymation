@@ -689,6 +689,9 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
                 student_server.lock_screen = False
                 message = f'Screen unlocked'
                 response = 200
+            elif self.path == '/mac':
+                message = str(getmac.get_mac_address())
+                response = 200
             elif self.path == '/backup':
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html')
@@ -997,9 +1000,47 @@ class TeacherClient:
         student_backups = self.get_backup_info(students)
         self.get_backups(student_backups, students)
 
-    def put(self, file, students):
+    def restore_class_backup(self, class_backup_dir):
+        if not class_backup_dir:
+            return
+        # ATM restores to machines based on their MAC addresses. we could also have a mode where we
+        # just restore to arbitrary machines (5 backups, 6 machines - pick 5 random ones.) this could
+        # be the right thing if the machines in the class are a different set every time and they
+        # all erase their files. this would be more trouble if at least some machines kept the files
+        # and some didn't, since given our reluctance to remove or rename existing clips, we could
+        # create directories with a mix of clips from different students. if a subset of machines keep
+        # their files and are the same as when the backup was made, our system of assigning by MAC
+        # works well since the ones deleting the files will get them back and the rest will be unaffected
+        #
+        # note that we don't "restore" as in "go back in time" - if some of the clips were edited
+        # after the backup was made, we don't undo these changes, since we never overwrite existing
+        # files. [we can create "orphan" files this way if a frame was deleted... we would "restore" its
+        # images but would not touch the movie metadata. this seems harmless enough]
+        students = self.students.copy()
+        responses = self.broadcast_request('/mac', 'Getting IDs...', students)
+        student_macs = dict([(student, r.replace(':','_')) for (student, (s,r)) in responses.items()])
+        backup_files = [os.path.join(class_backup_dir, f) for f in os.listdir(class_backup_dir)]
+        print(student_macs)
+        print(backup_files)
+
+        student2backup = {}
+        for student,mac in student_macs.items():
+            for f in backup_files:
+                if mac in f:
+                    student2backup[student] = f
+                    break
+
+        print(student2backup)
+        self.put(student2backup, students)
+        # TODO: unzip teacher's backup
+        self.unzip(student2backup, students)
+
+    def put(self, student2file, students):
         class PutThreads(StudentThreads):
             def student_thread(self, student, conn):
+                if student not in student2file:
+                    return
+                file = student2file[student]
                 with open(file, 'rb') as f:
                     data = f.read()
 
@@ -1021,11 +1062,14 @@ class TeacherClient:
         student_threads.start_thread_per_student()
         student_threads.wait_for_all_threads()
 
-    def unzip(self, zip_file, students):
+    def unzip(self, student2file, students):
         class UnzipThreads(StudentThreads):
             def student_thread(self, student, conn):
+                if student not in student2file:
+                    return
+                zip_file = student2file[student]
                 headers = {'Content-Type': 'text/html'}
-                conn.request('GET', '/unzip/'+zip_file, headers=headers)
+                conn.request('GET', '/unzip/'+os.path.basename(zip_file), headers=headers)
                 response = conn.getresponse()
                 while True:
                     line = response.fp.readline().decode('utf-8').strip()
@@ -1039,13 +1083,16 @@ class TeacherClient:
         student_threads.wait_for_all_threads()
 
     def put_dir(self, dir):
+        if not dir:
+            return
         dir = os.path.realpath(dir)
         progress_bar = ProgressBar('Zipping...')
         zip_file = os.path.join(WD, dir + '.zip')
         zip_dir(zip_file, dir, progress_bar.on_progress, os.path.dirname(dir))
         students = self.students.copy()
-        self.put(zip_file, self.students)
-        self.unzip(os.path.basename(zip_file), self.students)
+        student2file = dict([(student, zip_file) for student in students])
+        self.put(student2file, students)
+        self.unzip(student2file, students)
         os.unlink(zip_file)
 
 teacher_client = None
@@ -3987,6 +4034,9 @@ def process_keydown_event(event):
     if ctrl and event.key == pg.K_b and teacher_client:
         print('saving class backup')
         teacher_client.save_class_backup()
+    if ctrl and event.key == pg.K_d and teacher_client:
+        print('restoring class backup')
+        teacher_client.restore_class_backup(open_dir_path_dialog())
     if ctrl and event.key == pg.K_p and teacher_client:
         print("putting a directory in all students' Tinymate directories")
         teacher_client.put_dir(open_dir_path_dialog())
