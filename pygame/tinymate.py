@@ -792,9 +792,7 @@ class TeacherClient:
         conn.close()
         return status, message
 
-    def broadcast_request(self, url, progress_bar_title, students=None):
-        if not students:
-            students = self.students.keys()
+    def broadcast_request(self, url, progress_bar_title, students):
         # a big reason for the progress bar is, when a student computer hybernates [for example],
         # remove_service isn't called, and it takes a while to reach a timeout. TODO: see what needs
         # to be done to improve student machine hybernation and waking up from it
@@ -808,38 +806,51 @@ class TeacherClient:
     # locking and unlocking deliberately locks up the teacher's main thread - you want to know the students'
     # screen state, eg you don't want to keep going when some of their screens aren't locked
     def lock_screens(self):
-        self.broadcast_request('/lock', 'Locking all...')
+        students = self.students.keys()
+        self.broadcast_request('/lock', f'Locking {len(students)}...', students)
         self.screens_locked = True
     def unlock_screens(self):
-        self.broadcast_request('/unlock', 'Unlocking all...')
+        students = self.students.keys()
+        self.broadcast_request('/unlock', f'Unlocking {len(students)}...', students)
         self.screens_locked = False
 
     def get_backup_info(self, students):
         backup_info = {}
         threads = []
 
-        progress_bar = ProgressBar('Saving...')
+        progress_bar = ProgressBar(f'Saving {len(students)}+1...')
         student2progress = {}
         done = []
 
         def response_thread(student, conn):
             def thread_func():
-                response = conn.getresponse()
-                # TODO: error handling incl response.status
-                while True:
-                    line = response.fp.readline().decode('utf-8').strip()
-                    if not line:
-                        break
-                    print(student, line)
-                    sys.stdout.flush()
-                    if line.endswith('<br>'):
-                        student2progress[student] = [int(t) for t in line.split()[:2]]
-                    else:
-                        backup_info[student] = json.loads(line)
-                        break
-                done.append(student)
-                conn.close()
+                try:
+                    response = conn.getresponse()
+                    while True:
+                        line = response.fp.readline().decode('utf-8').strip()
+                        if not line:
+                            break
+                        print(student, line)
+                        sys.stdout.flush()
+                        if line.endswith('<br>'):
+                            student2progress[student] = [int(t) for t in line.split()[:2]]
+                        else:
+                            backup_info[student] = json.loads(line)
+                            break
+                except:
+                    import traceback
+                    traceback.print_exc()
+                finally:
+                    done.append(student)
+                    conn.close()
             return thread_func
+
+        teacher_id = None
+        def my_backup_thread():
+            def on_progress(compressed, total): student2progress[teacher_id] = (compressed, total)
+            filename = create_backup(on_progress)
+            backup_info[teacher_id] = {'file':filename}
+            done.append(teacher_id)
 
         for student in students:
             host, port = students[student]
@@ -850,6 +861,10 @@ class TeacherClient:
             thread = threading.Thread(target=response_thread(student, conn))
             thread.start()
             threads.append(thread)
+
+        thread = threading.Thread(target=my_backup_thread)
+        thread.start()
+        threads.append(thread)
 
         while len(done) < len(students):
             progress = student2progress.copy().values()
@@ -865,7 +880,7 @@ class TeacherClient:
 
     def get_backups(self, backup_info, students):
         threads = []
-        progress_bar = ProgressBar('Receiving...')
+        progress_bar = ProgressBar(f'Receiving {len(students)}...')
         student2progress = {}
         done = []
 
@@ -877,30 +892,34 @@ class TeacherClient:
 
         def response_thread(student, conn):
             def thread_func():
-                response = conn.getresponse()
-                # TODO: error handling incl response.status
-                backup_base64 = b''
-                while True:
-                    line = response.fp.readline()
-                    if not line:
-                        break
-                    student2progress[student] = len(backup_base64)*5/8
-                    backup_base64 += line
-                    print(student, 'sent', int(len(backup_base64)*5/8), '/', backup_info[student]['size'])
-                    sys.stdout.flush()
+                try:
+                    response = conn.getresponse()
+                    backup_base64 = b''
+                    while True:
+                        line = response.fp.readline()
+                        if not line:
+                            break
+                        student2progress[student] = len(backup_base64)*5/8
+                        backup_base64 += line
+                        print(student, 'sent', int(len(backup_base64)*5/8), '/', backup_info[student]['size'])
+                        sys.stdout.flush()
 
-                data = base64.b64decode(backup_base64)
-                info = backup_info[student]
-                host = info['host']
-                user = info['user']
-                mac = info['mac']
-                file = info['file']
-                fname = f'student-{user}@{host}-{mac}-{file}'.replace(':','_')
-                with open(os.path.join(backup_dir, fname), 'wb') as f:
-                    f.write(data)
-
-                done.append(student)
-                conn.close()
+                    data = base64.b64decode(backup_base64)
+                    info = backup_info[student]
+                    host = info['host']
+                    user = info['user']
+                    mac = info['mac']
+                    file = info['file']
+                    fname = f'student-{user}@{host}-{mac}-{file}'.replace(':','_')
+                    with open(os.path.join(backup_dir, fname), 'wb') as f:
+                        f.write(data)
+    
+                except:
+                    import traceback
+                    traceback.print_exc()
+                finally:
+                    done.append(student)
+                    conn.close()
             return thread_func
 
         for student in students:
@@ -913,7 +932,12 @@ class TeacherClient:
             thread.start()
             threads.append(thread)
 
-        total_bytes = sum([backup['size'] for backup in backup_info.values()])
+        teacher_id = None
+        teacher_file = backup_info[teacher_id]['file']
+        target_teacher_file = os.path.join(backup_dir, 'teacher-'+os.path.basename(teacher_file))
+        shutil.move(teacher_file, target_teacher_file)
+
+        total_bytes = sum([backup_info[student]['size'] for student in students])
         while len(done) < len(students):
             progress = student2progress.copy()
             received = sum(progress.values())
@@ -922,6 +946,8 @@ class TeacherClient:
 
         for thread in threads:
             thread.join()
+
+        open_explorer(backup_dir)
 
     def save_class_backup(self):
         students = self.students.copy() # if someone connects past this point, we don't have their backup
@@ -3770,14 +3796,18 @@ def paste_frame():
     history_item.optimize()
     history.append_item(history_item)
 
+def open_explorer(path):
+    if on_windows:
+        subprocess.Popen('explorer /select,'+path)
+    else:
+        subprocess.Popen(['nautilus', '-s', path])
+
 def export_and_open_explorer():
     movie.save_and_start_export()
     movie_list.wait_for_all_exporting_to_finish() # wait for this movie and others if we
     # were still exporting them - so that when we open explorer all the exported data is up to date
-    if on_windows:
-        subprocess.Popen('explorer /select,'+movie.gif_path())
-    else:
-        subprocess.Popen(['nautilus', '-s', movie.gif_path()])
+
+    open_explorer(movie.gif_path())
 
 def open_clip_dir():
     import tkinter
