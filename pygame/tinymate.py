@@ -663,8 +663,9 @@ import base64
 
 class StudentRequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
-        # TODO: exception handling
-        if self.path.startswith('/put/'):
+        try:
+            if not self.path.startswith('/put/'):
+                raise Exception("bad PUT path")
             fname = os.path.join(WD, self.path[len('/put/'):])
             if not os.path.exists(fname):
                 size = int(self.headers['Content-Length'])
@@ -677,6 +678,9 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b'PUT request processed successfully')
                 return
+        except:
+            import traceback
+            traceback.print_exc()
 
         self.send_response(500)
         self.send_header('Content-Type', 'text/html')
@@ -690,11 +694,23 @@ class StudentRequestHandler(BaseHTTPRequestHandler):
         try:
             if self.path == '/lock':
                 student_server.lock_screen = True
-                message = f'Screen locked'
+                pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
+                message = 'Screen locked'
                 response = 200
             elif self.path == '/unlock':
                 student_server.lock_screen = False
-                message = f'Screen unlocked'
+                pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
+                message = 'Screen unlocked'
+                response = 200
+            elif self.path == '/drawing_layout':
+                layout.mode = DRAWING_LAYOUT
+                pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
+                message = 'Layout set to drawing'
+                response = 200
+            elif self.path == '/animation_layout':
+                layout.mode = ANIMATION_LAYOUT
+                pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
+                message = 'Layout set to animation'
                 response = 200
             elif self.path == '/mac':
                 message = str(getmac.get_mac_address())
@@ -874,9 +890,12 @@ class TeacherClient:
                 # certainly do so, so we don't want to have a bunch of unlocking happen automatically
                 # as the teacher's program discovers the live student programs.
                 if self.screens_locked:
-                    self.broadcast_request('/lock', 'Locking one...', [name])
-                    layout.draw()
-                    pygame.display.flip()
+                    self.broadcast_request('/lock', 'Locking 1...', [name])
+                    pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
+
+                if layout.mode == DRAWING_LAYOUT:
+                    self.broadcast_request('/drawing_layout', 'Drawing layout 1...', [name])
+                    pg.event.post(pg.Event(REDRAW_LAYOUT_EVENT))
 
     def update_service(self, zeroconf, type, name):
         num_students = len(self.students)
@@ -924,6 +943,13 @@ class TeacherClient:
         students = self.students.keys()
         self.broadcast_request('/unlock', f'Unlocking {len(students)}...', students)
         self.screens_locked = False
+
+    def drawing_layout(self):
+        students = self.students.keys()
+        self.broadcast_request('/drawing_layout', f'Drawing layout {len(students)}...', students)
+    def animation_layout(self):
+        students = self.students.keys()
+        self.broadcast_request('/animation_layout', f'Drawing layout {len(students)}...', students)
 
     def get_backup_info(self, students):
         backup_info = {}
@@ -2126,6 +2152,9 @@ def scale_rect(rect):
     sh = screen.get_height()
     return (round(left*sw), round(bottom*sh), round(width*sw), round(height*sh))
 
+DRAWING_LAYOUT = 1
+ANIMATION_LAYOUT = 2
+
 class Layout:
     def __init__(self):
         self.elems = []
@@ -2137,6 +2166,7 @@ class Layout:
         self.full_tool = TOOLS['pencil']
         self.focus_elem = None
         self.restore_tool_on_mouse_up = False
+        self.mode = ANIMATION_LAYOUT
 
     def aspect_ratio(self): return self.width/self.height
 
@@ -2152,6 +2182,9 @@ class Layout:
         screen.fill(PEN)
         screen.blit(locked_image, ((screen.get_width()-locked_image.get_width())//2, (screen.get_height()-locked_image.get_height())//2))
 
+    def hidden(self, elem):
+        return self.mode == DRAWING_LAYOUT and (isinstance(elem, TimelineArea) or isinstance(elem, LayersArea))
+
     def draw(self):
         if self.is_pressed:
             if self.focus_elem is self.drawing_area():
@@ -2164,6 +2197,8 @@ class Layout:
         screen.fill(UNDRAWABLE)
         for elem in self.elems:
             if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
+                if self.hidden(elem):
+                    continue
                 elem.draw()
                 if elem.draw_border:
                     pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
@@ -2207,6 +2242,8 @@ class Layout:
             left, bottom, width, height = elem.rect
             if x>=left and x<left+width and y>=bottom and y<bottom+height:
                 if not self.is_playing or isinstance(elem, TogglePlaybackButton):
+                    if self.hidden(elem):
+                        continue
                     if getattr(elem, 'hit', lambda x,y: True)(x,y):
                         self._dispatch_event(elem, event, x, y)
                         dispatched = True
@@ -4071,6 +4108,15 @@ def process_keydown_event(event):
         print("putting a directory in all students' Tinymate directories")
         teacher_client.put_dir(open_dir_path_dialog())
 
+    # Ctrl-1/2: set layout to drawing/animation
+    if ctrl and event.key == pg.K_1:
+        layout.mode = DRAWING_LAYOUT
+        if teacher_client:
+            teacher_client.drawing_layout()
+    if ctrl and event.key == pg.K_2:
+        layout.mode = ANIMATION_LAYOUT
+        if teacher_client:
+            teacher_client.animation_layout()
 
     # other keyboard shortcuts are enabled/disabled by Ctrl-A
     global keyboard_shortcuts_enabled
