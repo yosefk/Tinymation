@@ -6,6 +6,13 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pygame version
 
 on_windows = os.name == 'nt'
 
+# a hack for pyinstaller - when we spawn a subprocess in python, we pass sys.executable
+# and sys.argv[0] as the command line and python then hides its own executable from the sys.argv
+# of the subprocess, but this doesn't happen with a pyinstaller produced executables
+# so you end up seeing another argument at the beginning of sys.argv; this code strips it
+if len(sys.argv) > 1 and sys.argv[0].endswith('.exe') and sys.argv[1].endswith('.exe'):
+    sys.argv = sys.argv[1:]
+
 # we spawn subprocesses to compress BMPs to PNGs and remove the BMPs
 # every time we save a BMP [which is faster than saving a PNG]
 
@@ -2129,6 +2136,7 @@ class Layout:
         self.tool = PenTool()
         self.full_tool = TOOLS['pencil']
         self.focus_elem = None
+        self.restore_tool_on_mouse_up = False
 
     def aspect_ratio(self): return self.width/self.height
 
@@ -2216,9 +2224,13 @@ class Layout:
             if self.focus_elem:
                 elem.on_mouse_down(x,y)
             if change == tool_change and self.new_delete_tool():
-                restore_tool()
+                self.restore_tool_on_mouse_up = True
         elif event.type == pygame.MOUSEBUTTONUP:
             self.is_pressed = False
+            if self.restore_tool_on_mouse_up:
+                restore_tool()
+                self.restore_tool_on_mouse_up = False
+                return
             if self.focus_elem:
                 self.focus_elem.on_mouse_up(x,y)
         elif event.type == pygame.MOUSEMOTION and self.is_pressed:
@@ -3504,6 +3516,7 @@ def remove_clip():
         # which is a bit confusing. [we can't remove the last frame in a timeline, either]
     global movie
     movie.save_before_closing()
+    movie_list.interrupt_export()
     os.rename(movie.dir, movie.dir + '-deleted')
     movie_list.delete_current_history()
     movie_list.reload()
