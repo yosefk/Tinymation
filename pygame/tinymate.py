@@ -25,7 +25,7 @@ def compress_and_remove(filepairs):
 
 if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
     compress_and_remove(sys.argv[2:])
-    exit()
+    sys.exit()
 
 # we use a subprocess for an open file dialog since using tkinter together with pygame
 # causes issues for the latter after the first use of the former
@@ -43,7 +43,7 @@ def dir_path_dialog():
 
 if len(sys.argv)>1 and sys.argv[1] == 'dir-path-dialog':
     dir_path_dialog()
-    exit()
+    sys.exit()
 
 # we spawn subprocesses to export the movie to GIF, MP4 and a PNG sequence
 # every time we close a movie (if we reopen it, we interrupt the exporting
@@ -562,7 +562,7 @@ if len(sys.argv)>1 and sys.argv[1] == 'export':
         import traceback
         traceback.print_exc()
     finally:
-        exit()
+        sys.exit()
 
 def get_last_modified(filenames):
     f2mtime = {}
@@ -1250,8 +1250,8 @@ class Timer:
     def show(self):
         scale = Timer.SCALE
         if self.calls>1:
-            history = ' '.join([str(round(scale*h)) for h in self.history])
-            return f'{self.name}: {round(scale*self.total/self.calls)} ms [{round(scale*self.min)}, {round(scale*self.max)}] in {self.calls} calls {history}'
+            history = ' '.join([str(round(scale*h)) for h in reversed(self.history)])
+            return f'{self.name}: {round(scale*self.total/self.calls)} ms [{round(scale*self.min)}, {round(scale*self.max)}] {history} in {self.calls} calls'
         elif self.calls==1:
             return f'{self.name}: {round(scale*self.total)} ms'
         else:
@@ -4162,7 +4162,10 @@ sys.stdout.flush()
 try:
     screen_lock = ScreenLock()
     while not escape: 
-        for event in pygame.event.get():
+        # pygame.event.get() returns an empty list when there are no events,
+        # so a loop using it uses 100% of CPU
+        events = [pygame.event.wait()]
+        for event in events:
             if event.type not in interesting_events:
                 continue
 
