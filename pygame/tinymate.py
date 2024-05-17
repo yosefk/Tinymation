@@ -1735,6 +1735,7 @@ def scale_and_preserve_aspect_ratio(w, h, width, height):
 class Button:
     def __init__(self):
         self.button_surface = None
+        self.only_hit_non_transparent = False
     def draw(self, rect, cursor_surface):
         left, bottom, width, height = rect
         _, _, w, h = cursor_surface.get_rect()
@@ -1746,6 +1747,8 @@ class Button:
         self.screen_bottom = int(bottom+height-scaled_height)
         screen.blit(self.button_surface, (self.screen_left, self.screen_bottom))
     def hit(self, x, y, rect=None):
+        if not self.only_hit_non_transparent:
+            return True
         if rect is None:
             rect = self.rect
         if not self.button_surface:
@@ -1956,6 +1959,7 @@ def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_
     rect = np.zeros(4, dtype=np.int32)
     region = arr_base_ptr(rect)
     mask_ptr, mask_stride, width, height = greyscale_c_params(pen_mask, is_alpha=False)
+    # TODO: if we use OpenCV anyway for resizing, maybe use floodfill from there?..
     tinylib.flood_fill_mask(mask_ptr, mask_stride, width, height, x, y, flood_code, region, 0)
     
     xstart, ystart, xlen, ylen = rect
@@ -2183,7 +2187,7 @@ class Layout:
         screen.blit(locked_image, ((screen.get_width()-locked_image.get_width())//2, (screen.get_height()-locked_image.get_height())//2))
 
     def hidden(self, elem):
-        return self.mode == DRAWING_LAYOUT and (isinstance(elem, TimelineArea) or isinstance(elem, LayersArea))
+        return self.mode == DRAWING_LAYOUT and (isinstance(elem, TimelineArea) or isinstance(elem, LayersArea) or isinstance(elem, TogglePlaybackButton))
 
     def draw(self):
         if self.is_pressed:
@@ -3054,6 +3058,12 @@ class TogglePlaybackButton(Button):
         self.play = play_icon
         self.pause = pause_icon
         Button.__init__(self)
+        # this is the one button which has a simple, big and round icon, and you don't to be too easy
+        # to hit. the others, when we make it necessary to hit the non-transparent part, get annoying -
+        # the default behavior is better since imprecise hits select _something_ and then you learn to
+        # improve your aim by figuring out what was hit, whereas when nothing is selected you have
+        # a harder time learning, apparently
+        self.only_hit_non_transparent = True
     def draw(self):
         icon = self.pause if layout.is_playing else self.play
         self.button_surface = None
@@ -4190,6 +4200,9 @@ try:
 
                     if layout.is_pressed:
                         continue # ignore keystrokes (except ESC) when a mouse tool is being used
+
+                    if layout.is_playing and not (keyboard_shortcuts_enabled and event.key == pygame.K_RETURN):
+                        continue # ignore keystrokes (except ESC and ENTER) during playback
 
                     timer.start()
                     process_keydown_event(event)
