@@ -4,3 +4,5 @@ __pycache__
 *.obj
 *.dll
 *.so
+pygame/dist/*
+pygame/build/*

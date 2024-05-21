@@ -3,6 +3,7 @@ import numpy as np
 import sys
 import os
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pygame version
+os.environ['TBB_NUM_THREADS'] = '16'
 
 on_windows = os.name == 'nt'
 
@@ -1292,6 +1293,12 @@ pen_fading_mask_timer = timers.add('fading_mask', indent=1)
 paint_bucket_timer = timers.add('PaintBucketTool.on_mouse_down')
 timeline_down_timer = timers.add('TimelineArea.on_mouse_down')
 timeline_move_timer = timers.add('TimelineArea.on_mouse_move')
+flashlight_timer = timers.add('Flashlight')
+mask_timer = timers.add('pen_mask',indent=1)
+ff_timer = timers.add('flood_fill',indent=1)
+sk_timer = timers.add('skeletonize',indent=1)
+dist_timer = timers.add('distance',indent=1)
+rest_timer = timers.add('rest',indent=1)
 
 # interface with tinylib
 
@@ -1313,10 +1320,10 @@ def color_c_params(rgb):
     ptr = ctypes.c_void_p(arr_base_ptr(rgb).value + oft)
     return ptr, ystride, width, height, bgr
 
-def greyscale_c_params(grey, is_alpha=True):
+def greyscale_c_params(grey, is_alpha=True, expected_xstride=1):
     width, height = grey.shape
     xstride, ystride = grey.strides
-    assert (xstride == 4 and is_alpha) or (xstride == 1 and not is_alpha), f'xstride={xstride} is_alpha={is_alpha}'
+    assert (xstride == 4 and is_alpha) or (xstride == expected_xstride and not is_alpha), f'xstride={xstride} is_alpha={is_alpha}'
     ptr = arr_base_ptr(grey)
     return ptr, ystride, width, height
 
@@ -1829,11 +1836,13 @@ class PenTool(Button):
             def make_color_history_item(bbox):
                 return HistoryItem('color', bbox)
 
+            # FIXME!! flood_fill_color_based_on_lines() should only be called with x,y within the image [look in the points history
+            # for such a coordinate, if not found - don't add an undo operation at all.] currently we have an assertion error
             color = movie.edit_curr_frame().surf_by_id('color')
             color_rgb = pg.surfarray.pixels3d(color)
             color_alpha = pg.surfarray.pixels_alpha(color)
             bucket_color = self.bucket_color if self.bucket_color else BACKGROUND+(0,) 
-            color_history_item = flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, round(cx), round(cy), bucket_color, make_color_history_item)
+            color_history_item = flood_fill_color_based_on_lines(color_rgb, lines, round(cx), round(cy), bucket_color, make_color_history_item)
             history_item = HistoryItemSet([lines_history_item, color_history_item])
 
             history.append_item(history_item)
@@ -1925,6 +1934,7 @@ class PenTool(Button):
                     return
                 salpha = pg.surfarray.pixels_alpha(s)
                 orig_alpha = salpha[left:right+1, bottom:top+1].copy()
+                # FIXME we assert here when erasing out of bounds
                 salpha[left:right+1, bottom:top+1] = np.minimum(orig_alpha, alpha[left:right+1,bottom:top+1])
                 del salpha
                 drawing_area.subsurface.blit(s, (ox+left,oy+bottom), (left,bottom,right-left+1,top-bottom+1))
@@ -1949,9 +1959,7 @@ class NewDeleteTool(PenTool):
     def on_mouse_up(self, x, y): pass
     def on_mouse_move(self, x, y): pass
 
-# note that we don't actually use color_alpha, rather we assume that color_rgb is actually color_rgba...
-# we assert that this is the case in color_c_params()
-def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_color, bbox_callback=None):
+def flood_fill_color_based_on_lines(color_rgba, lines, x, y, bucket_color, bbox_callback=None):
     flood_code = 2
     global pen_mask
     pen_mask = lines==255
@@ -1959,6 +1967,7 @@ def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_
     rect = np.zeros(4, dtype=np.int32)
     region = arr_base_ptr(rect)
     mask_ptr, mask_stride, width, height = greyscale_c_params(pen_mask, is_alpha=False)
+    assert x >= 0 and x < width and y >= 0 and y < height
     # TODO: if we use OpenCV anyway for resizing, maybe use floodfill from there?..
     tinylib.flood_fill_mask(mask_ptr, mask_stride, width, height, x, y, flood_code, region, 0)
     
@@ -1967,7 +1976,7 @@ def flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, bucket_
     if bbox_callback:
         bbox_retval = bbox_callback(bbox_retval)
 
-    color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color_rgb)
+    color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color_rgba)
     assert color_width == width and color_height == height
     new_color_value = make_color_int(bucket_color, bgr)
     tinylib.fill_color_based_on_mask(color_ptr, mask_ptr, color_stride, mask_stride, width, height, region, new_color_value, flood_code)
@@ -2005,7 +2014,7 @@ class PaintBucketTool(Button):
         def make_history_item(bbox):
             return HistoryItem('color', bbox)
 
-        history_item = flood_fill_color_based_on_lines(color_rgb, color_alpha, lines, x, y, self.color, make_history_item)
+        history_item = flood_fill_color_based_on_lines(color_rgb, lines, x, y, self.color, make_history_item)
         history.append_item(history_item)
         
     def on_mouse_up(self, x, y):
@@ -2015,86 +2024,73 @@ class PaintBucketTool(Button):
 
 NO_PATH_DIST = 10**6
 
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import dijkstra
-
 def skeleton_to_distances(skeleton, x, y):
-    width, height = skeleton.shape
-    yg, xg = np.meshgrid(np.arange(height), np.arange(width))
-    dist = np.sqrt((xg - x)**2 + (yg - y)**2)
+    dist = np.zeros(skeleton.shape, np.float32)
 
-    # look at points around the point on the skeleton closest to the selected point
-    # (and not around the selected point itself since nothing could be close enough to it)
-    closest = np.argmin(dist[skeleton])
-    x,y = xg[skeleton].flat[closest],yg[skeleton].flat[closest]
-
-    dist = np.sqrt((xg - x)**2 + (yg - y)**2)
-    skx, sky = np.where(skeleton & (dist < 200))
-    if len(skx) == 0:
-        return np.ones((width, height), int) * NO_PATH_DIST, NO_PATH_DIST
-    closest = np.argmin((skx-x)**2 + (sky-y)**2)
-
-    ixy = list(enumerate(zip(skx,sky)))
-    xy2i = dict([((x,y),i) for i,(x,y) in ixy])
-
-    data = [] 
-    row_ind = []
-    col_ind = []
-
-    width, height = skeleton.shape
-    neighbors = [(ox, oy) for ox in range(-1,2) for oy in range(-1,2) if ox or oy]
-    for i,(x,y) in ixy:
-        for ox, oy in neighbors:
-            nx = ox+x
-            ny = oy+y
-            if nx >= 0 and ny >= 0 and nx < width and ny < height:
-                j = xy2i.get((nx,ny), None)
-                if j is not None:
-                    data.append(1)
-                    row_ind.append(i)
-                    col_ind.append(xy2i[(nx,ny)])
+    sk_ptr, sk_stride, _, _ = greyscale_c_params(skeleton.T, is_alpha=False)
+    dist_ptr, dist_stride, width, height = greyscale_c_params(dist.T, expected_xstride=4, is_alpha=False)
     
-    graph = csr_matrix((data, (row_ind, col_ind)), (len(ixy), len(ixy)))
-    distance_matrix = dijkstra(graph, directed=False)
+    maxdist = tinylib.image_dijkstra(sk_ptr, sk_stride, dist_ptr, dist_stride//4, width, height, y, x)
 
-    distances = np.ones((width, height), int) * NO_PATH_DIST
-    maxdist = 0
-    for i,(x,y) in ixy:
-        d = distance_matrix[closest,i]
-        if not math.isinf(d):
-            distances[x,y] = d
-            maxdist = max(maxdist, d)
-
-    return distances, maxdist
-
-last_flood_mask = None
-last_skeleton = None
+    return dist, maxdist
 
 import colorsys
 
-def skeletonize_color_based_on_lines(color, lines, x, y):
-    global last_flood_mask
-    global last_skeleton
+def tl_skeletonize(mask):
+    skeleton = np.zeros(mask.shape,np.uint8)
+    mask_ptr, mask_stride, width, height = greyscale_c_params(mask.T, is_alpha=False)
+    sk_ptr, sk_stride, _, _ = greyscale_c_params(skeleton.T, is_alpha=False)
+    tinylib.skeletonize(mask_ptr, mask_stride, sk_ptr, sk_stride, width, height)
+    return skeleton
 
+SK_WIDTH = 350
+SK_HEIGHT = 350
+
+def skeletonize_color_based_on_lines(color, lines, x, y):
+    flashlight_timer.start()
+    mask_timer.start()
     pen_mask = lines == 255
+    mask_timer.stop()
     if pen_mask[x,y]:
+        flashlight_timer.stop()
         return
 
+    ff_timer.start()
     flood_code = 2
-    flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
-    if last_flood_mask is not None and np.array_equal(flood_mask, last_flood_mask):
-        skeleton = last_skeleton
-    else: 
-        skeleton = skeletonize(flood_mask)
+    flood_mask = np.ascontiguousarray(pen_mask.astype(np.uint8))
+    cv2.floodFill(flood_mask, None, seedPoint=(y, x), newVal=flood_code, loDiff=(0, 0, 0, 0), upDiff=(0, 0, 0, 0))
+    flood_mask = flood_mask == flood_code
+    #flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
+    ff_timer.stop()
+        
+    sk_timer.start()
+    if x < SK_WIDTH//2:
+        sk_xmin = 0
+    elif x > IWIDTH - SK_WIDTH//2:
+        sk_xmin = IWIDTH-SK_WIDTH
+    else:
+        sk_xmin = x - SK_WIDTH//2
+
+    if y < SK_HEIGHT//2:
+        sk_ymin = 0
+    elif y > IHEIGHT - SK_HEIGHT//2:
+        sk_ymin = IHEIGHT-SK_HEIGHT
+    else:
+        sk_ymin = y - SK_HEIGHT//2
+    
+    skx = slice(sk_xmin, sk_xmin+SK_WIDTH)
+    sky = slice(sk_ymin, sk_ymin+SK_HEIGHT)
+    skeleton = skeletonize(np.ascontiguousarray(flood_mask[skx,sky]))
+    sk_timer.stop()
 
     fmb = binary_dilation(binary_dilation(skeleton))
-    fading_mask = pg.Surface((flood_mask.shape[0], flood_mask.shape[1]), pg.SRCALPHA)
-
-    fm = pg.surfarray.pixels3d(fading_mask)
-    yg, xg = np.meshgrid(np.arange(flood_mask.shape[1]), np.arange(flood_mask.shape[0]))
 
     # Compute distance from each point to the specified center
-    d, maxdist = skeleton_to_distances(skeleton, x, y)
+    dist_timer.start()
+    d, maxdist = skeleton_to_distances(skeleton, x-sk_xmin, y-sk_ymin)
+    dist_timer.stop()
+
+
     if maxdist != NO_PATH_DIST:
         d = (d == NO_PATH_DIST)*maxdist + (d != NO_PATH_DIST)*d # replace NO_PATH_DIST with maxdist
     else: # if all the pixels are far from clicked coordinate, make the mask bright instead of dim,
@@ -2104,16 +2100,27 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
         # point on the skeleton to the clocked coordinate and not around the clicked coordinate itself
         d = np.ones(lines.shape, int)
         maxdist = 10
+
     outer_d = -grey_dilation(-d, 3)
+
+    maxdist = min(700, maxdist)
+
+    rest_timer.start()
     inner = (255,255,255)
     outer = [255-ch for ch in color[x,y]]
     h,s,v = colorsys.rgb_to_hsv(*[o/255. for o in outer])
     s = 1
     v = 1
     outer = [255*o for o in colorsys.hsv_to_rgb(h,s,v)]
+
+    fading_mask = pg.Surface((flood_mask.shape[0], flood_mask.shape[1]), pg.SRCALPHA)
+    fm = pg.surfarray.pixels3d(fading_mask)
     for ch in range(3):
-         fm[:,:,ch] = outer[ch]*(1-skeleton) + inner[ch]*skeleton
-    pg.surfarray.pixels_alpha(fading_mask)[:] = fmb*255*np.maximum(0,(1- .90*outer_d/maxdist))
+         fm[skx,sky,ch] = outer[ch]*(1-skeleton) + inner[ch]*skeleton
+    pg.surfarray.pixels_alpha(fading_mask)[skx,sky] = fmb*255*np.maximum(0,pow(1 - outer_d/maxdist, 3))
+
+    rest_timer.stop()
+    flashlight_timer.stop()
 
     return fading_mask
 
