@@ -1298,6 +1298,7 @@ mask_timer = timers.add('pen_mask',indent=1)
 ff_timer = timers.add('flood_fill',indent=1)
 sk_timer = timers.add('skeletonize',indent=1)
 dist_timer = timers.add('distance',indent=1)
+hole_timer = timers.add('patch_hole',indent=1)
 rest_timer = timers.add('rest',indent=1)
 
 # interface with tinylib
@@ -2043,11 +2044,25 @@ def tl_skeletonize(mask):
     tinylib.skeletonize(mask_ptr, mask_stride, sk_ptr, sk_stride, width, height)
     return skeleton
 
+def fixed_size_region_1d(center, part, full): 
+    assert part*2 <= full
+    if center < part//2:
+        start = 0
+    elif center > full - part//2:
+        start = full - part
+    else:
+        start = center - part//2
+    return slice(start, start+part)
+
+def fixed_size_image_region(x, y, w, h):
+    xs = fixed_size_region_1d(x, w, IWIDTH)
+    ys = fixed_size_region_1d(y, h, IHEIGHT)
+    return xs, ys
+
 SK_WIDTH = 350
 SK_HEIGHT = 350
 
 def skeletonize_color_based_on_lines(color, lines, x, y):
-    flashlight_timer.start()
     mask_timer.start()
     pen_mask = lines == 255
     mask_timer.stop()
@@ -2064,22 +2079,7 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
     ff_timer.stop()
         
     sk_timer.start()
-    if x < SK_WIDTH//2:
-        sk_xmin = 0
-    elif x > IWIDTH - SK_WIDTH//2:
-        sk_xmin = IWIDTH-SK_WIDTH
-    else:
-        sk_xmin = x - SK_WIDTH//2
-
-    if y < SK_HEIGHT//2:
-        sk_ymin = 0
-    elif y > IHEIGHT - SK_HEIGHT//2:
-        sk_ymin = IHEIGHT-SK_HEIGHT
-    else:
-        sk_ymin = y - SK_HEIGHT//2
-    
-    skx = slice(sk_xmin, sk_xmin+SK_WIDTH)
-    sky = slice(sk_ymin, sk_ymin+SK_HEIGHT)
+    skx, sky = fixed_size_image_region(x, y, SK_WIDTH, SK_HEIGHT)
     skeleton = skeletonize(np.ascontiguousarray(flood_mask[skx,sky]))
     sk_timer.stop()
 
@@ -2087,7 +2087,7 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
 
     # Compute distance from each point to the specified center
     dist_timer.start()
-    d, maxdist = skeleton_to_distances(skeleton, x-sk_xmin, y-sk_ymin)
+    d, maxdist = skeleton_to_distances(skeleton, x-skx.start, y-sky.start)
     dist_timer.stop()
 
 
@@ -2120,9 +2120,61 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
     pg.surfarray.pixels_alpha(fading_mask)[skx,sky] = fmb*255*np.maximum(0,pow(1 - outer_d/maxdist, 3))
 
     rest_timer.stop()
-    flashlight_timer.stop()
+    return fading_mask, (skeleton, skx, sky)
 
-    return fading_mask
+HOLE_REGION_W = 40
+HOLE_REGION_H = 40
+
+def patch_hole(lines, x, y, skeleton, skx, sky):
+    lines_patch = np.ascontiguousarray(lines[skx,sky])
+    # pad the lines with 255 if we're near the image boundary, to patch holes near image boundaries
+
+    def add_boundary(arr):
+        new = np.zeros((arr.shape[0]+2, arr.shape[1]+2), arr.dtype)
+        new[1:-1,1:-1] = arr
+        return new
+
+    lines_patch = add_boundary(lines_patch)
+    skeleton = add_boundary(skeleton)
+    skx = slice(skx.start-1,skx.stop+1)
+    sky = slice(sky.start-1,sky.stop+1)
+
+    if skx.start < 0:
+        lines_patch[0,:] = 255
+    if sky.start < 0:
+        lines_patch[:,0] = 255
+    if skx.stop > lines.shape[0]:
+        lines_patch[-1,:] = 255
+    if sky.stop > lines.shape[1]:
+        lines_patch[:,-1] = 255
+
+    sk_ptr, sk_stride, _, _ = greyscale_c_params(skeleton.T, is_alpha=False)
+    lines_ptr, lines_stride, width, height = greyscale_c_params(lines_patch.T, is_alpha=False)
+    
+    npoints = 3
+    xs = np.zeros(npoints, int)
+    ys = np.zeros(npoints, int)
+    found = tinylib.patch_hole(lines_ptr, lines_stride, sk_ptr, sk_stride, width, height, y-sky.start, x-skx.start,
+                               HOLE_REGION_H, HOLE_REGION_W, arr_base_ptr(ys), arr_base_ptr(xs), npoints)
+    if not found:
+        return False
+
+    xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]
+    ys = [ys[0], ys[0]*0.9 + ys[1]*0.1, ys[1], ys[1]*0.1 + ys[2]*0.9, ys[2]]
+    lines_patch[:] = 0
+    skeleton[:] = 0
+    points=[(x+skx.start,y+sky.start) for x,y in zip(xs,ys)]
+
+    new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines)[0]
+
+    history_item = HistoryItem('lines', bbox)
+    (minx, miny, maxx, maxy) = bbox
+    lines[minx:maxx+1, miny:maxy+1] = np.maximum(new_lines, lines[minx:maxx+1, miny:maxy+1])
+    history.append_item(history_item)
+
+    return True
+
+last_skeleton = None
 
 class FlashlightTool(Button):
     def __init__(self):
@@ -2130,15 +2182,49 @@ class FlashlightTool(Button):
     def on_mouse_down(self, x, y):
         x, y = layout.drawing_area().xy2frame(x,y)
         x, y = round(x), round(y)
-        color = pygame.surfarray.pixels3d(movie.curr_frame().surf_by_id('color'))
-        lines = pygame.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
+
+        try_to_patch = pygame.key.get_mods() & pygame.KMOD_CTRL
+        frame = movie.edit_curr_frame() if try_to_patch else movie.curr_frame()
+
+        color = pygame.surfarray.pixels3d(frame.surf_by_id('color'))
+        lines = pygame.surfarray.pixels_alpha(frame.surf_by_id('lines'))
         if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1]:
             return
-        fading_mask = skeletonize_color_based_on_lines(color, lines, x, y)
-        if not fading_mask:
+        flashlight_timer.start()
+
+        if try_to_patch:
+            # Ctrl pressed - attempt to patch a hole using the previous skeleton (if relevant
+            if last_skeleton:
+                skeleton, skx, sky = last_skeleton
+                if x >= skx.start and x < skx.stop and y >= sky.start and y < sky.stop:
+                    hole_timer.start()
+                    if patch_hole(lines, x, y, skeleton, skx, sky):
+                        # find a point to compute a new skeleton around. Sometimes x,y itself
+                        # is that point and sometimes a neighbor, depending on how the hole was patched.
+                        # we want "some" sort of skeleton to give a clear feedback showing that "a hole
+                        # was really patched" and the skeleton running into the patch is good feedback.
+                        # if we just show no skeleton then if the patch is near invisible it's not clear
+                        # what happened. the downside is that we don't know which side of the hole
+                        # the new skeleton should be at; we could probably compute several and choose the
+                        # largest but seems like too much trouble?..
+                        neighbors = [(0,0),(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,-1),(-1,1),(1,-1)]
+                        for ox,oy in neighbors:
+                            xi,yi = x+ox,y+oy
+                            if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1]:
+                                continue
+                            if lines[x,y] != 255:
+                                break
+                        x,y = xi,yi
+                    hole_timer.stop()
+
+        fading_mask_and_skeleton = skeletonize_color_based_on_lines(color, lines, x, y)
+
+        flashlight_timer.stop()
+        if not fading_mask_and_skeleton:
             return
+        fading_mask, skeleton = fading_mask_and_skeleton
         fading_mask.set_alpha(255)
-        layout.drawing_area().set_fading_mask(fading_mask)
+        layout.drawing_area().set_fading_mask(fading_mask, skeleton)
         layout.drawing_area().fade_per_frame = 255/(FADING_RATE*15)
     def on_mouse_up(self, x, y): pass
     def on_mouse_move(self, x, y): pass
@@ -2322,7 +2408,10 @@ class DrawingArea:
     def xy2frame(self, x, y):
         return (x - self.xmargin)*self.xscale, (y - self.ymargin)*self.yscale
     def scale(self, surface): return scale_image(surface, self.iwidth, self.iheight)
-    def set_fading_mask(self, fading_mask): self.fading_mask = self.scale(fading_mask)
+    def set_fading_mask(self, fading_mask, skeleton=None):
+        self.fading_mask = self.scale(fading_mask)
+        global last_skeleton
+        last_skeleton = skeleton
     def draw(self):
         drawing_area_draw_timer.start()
 
@@ -2354,6 +2443,12 @@ class DrawingArea:
         self.subsurface.blits([(surface, starting_point) for surface in surfaces])
         drawing_area_draw_timer.stop()
 
+    def clear_fading_mask(self):
+        global last_skeleton
+        last_skeleton = None
+        self.fading_mask = None
+        self.fading_func = None
+
     def update_fading_mask(self):
         if not self.fading_mask:
             return
@@ -2366,8 +2461,7 @@ class DrawingArea:
 
         alpha = self.fading_mask.get_alpha()
         if alpha == 0:
-            self.fading_mask = None
-            self.fading_func = None
+            self.clear_fading_mask()
             return
 
         if not self.fading_func:
@@ -3181,7 +3275,7 @@ class Movie(MovieData):
         return cache.fetch(CachedThumbnail())
 
     def clear_cache(self):
-        layout.drawing_area().fading_mask = None
+        layout.drawing_area().clear_fading_mask()
 
     def seek_frame_and_layer(self,pos,layer_pos):
         assert pos >= 0 and pos < len(self.frames)
@@ -3881,7 +3975,7 @@ class History:
     def __init__(self):
         self.undo = []
         self.redo = []
-        layout.drawing_area().fading_mask = None
+        layout.drawing_area().clear_fading_mask()
         self.suggestions = None
 
     def __del__(self):
@@ -3922,7 +4016,7 @@ class History:
             History.byte_size -= byte_size(self.undo[0])
             del self.undo[0]
 
-        layout.drawing_area().fading_mask = None # new operations invalidate old skeletons
+        layout.drawing_area().clear_fading_mask() # new operations invalidate old skeletons
 
     def undo_item(self, drawing_changes_only):
         if self.suggestions:
@@ -3941,7 +4035,7 @@ class History:
             self.redo.append(redo)
             self.undo.pop()
 
-        layout.drawing_area().fading_mask = None # changing canvas state invalidates old skeletons
+        layout.drawing_area().clear_fading_mask() # changing canvas state invalidates old skeletons
 
     def redo_item(self):
         if self.redo:
