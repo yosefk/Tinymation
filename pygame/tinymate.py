@@ -1949,6 +1949,46 @@ class PenTool(Button):
         self.prev_drawn = (x,y) 
         pen_move_timer.stop()
 
+class PanTool:
+    def on_mouse_down(self, x, y):
+        self.start = (x,y)
+        self.sxo = layout.drawing_area().xoffset
+        self.syo = layout.drawing_area().yoffset
+    def on_mouse_up(self, x, y): pass
+    def on_mouse_move(self, x, y):
+        px, py = self.start
+        da = layout.drawing_area()
+        da.set_xyoffset(self.sxo - (x - px), self.syo - (y - py))
+        da.draw()
+
+class ZoomTool:
+    def on_mouse_down(self, x, y):
+        self.start = (x,y)
+        self.max_dist = min(screen.get_width(), screen.get_height())//2
+        da = layout.drawing_area()
+        self.frame_start = da.xy2frame(x,y)
+        self.orig_zoom = da.zoom
+        #framex = (startx - self.xmargin + self.xoffset)*self.xscale #, (y - self.ymargin + self.yoffset)*self.yscale
+    def on_mouse_up(self, x, y): pass
+    def on_mouse_move(self, x, y):
+        px, py = self.start
+        dist = abs(y - py)
+        ratio = min(1, max(0, dist/self.max_dist))
+        MIN_ZOOM, MAX_ZOOM = 1, 5
+        zoom_change = ratio*(MAX_ZOOM - MIN_ZOOM)
+        if y > py:
+            zoom_change = -zoom_change
+        da = layout.drawing_area()
+        new_zoom = max(MIN_ZOOM,min(self.orig_zoom + zoom_change, MAX_ZOOM))
+        da.set_zoom(new_zoom)
+
+        # we want xy2frame(self.start) to return the same value through the zooming [if possible]
+        framex, framey = self.frame_start
+        xoffset = framex/da.xscale - px + da.xmargin
+        yoffset = framey/da.yscale - py + da.ymargin
+        da.set_xyoffset(xoffset, yoffset)
+        da.draw()
+
 class NewDeleteTool(PenTool):
     def __init__(self, frame_func, clip_func, layer_func):
         PenTool.__init__(self)
@@ -2357,7 +2397,7 @@ class Layout:
             self.focus_elem = elem
             if self.focus_elem:
                 elem.on_mouse_down(x,y)
-            if change == tool_change and self.new_delete_tool():
+            if (change == tool_change and self.new_delete_tool()) or self.zoom_pan_tool():
                 self.restore_tool_on_mouse_up = True
         elif event.type == pygame.MOUSEBUTTONUP:
             self.is_pressed = False
@@ -2380,6 +2420,7 @@ class Layout:
         return self.elems[1]
 
     def new_delete_tool(self): return isinstance(self.tool, NewDeleteTool) 
+    def zoom_pan_tool(self): return isinstance(self.tool, ZoomTool) or isinstance(self.tool, PanTool)
 
     def toggle_playing(self):
         self.is_playing = not self.is_playing
@@ -2396,6 +2437,9 @@ class DrawingArea:
         self.render_surface = None
         self.iwidth = 0
         self.iheight = 0
+        self.zoom = 1
+        self.xoffset = 0
+        self.yoffset = 0
     def _internal_layout(self):
         if self.iwidth and self.iheight:
             return
@@ -2403,11 +2447,22 @@ class DrawingArea:
         self.iwidth, self.iheight = scale_and_preserve_aspect_ratio(IWIDTH, IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
         self.xmargin = round((width - self.iwidth)/2)
         self.ymargin = round((height - self.iheight)/2)
-        self.xscale = IWIDTH/self.iwidth
-        self.yscale = IHEIGHT/self.iheight
+        self.set_zoom(self.zoom)
+    def set_xyoffset(self, xoffset, yoffset):
+        self.xoffset = min(max(xoffset, 0), self.iwidth*(self.zoom - 1))
+        self.yoffset = min(max(yoffset, 0), self.iheight*(self.zoom - 1))
+    def set_zoom(self, zoom):
+        self.zoom = zoom
+        self.xscale = IWIDTH/(self.iwidth * self.zoom)
+        self.yscale = IHEIGHT/(self.iheight * self.zoom)
+    def roi(self, surface):
+        if self.zoom == 1:
+            return surface
+        return surface.subsurface((self.xoffset, self.yoffset, self.iwidth, self.iheight))
     def xy2frame(self, x, y):
-        return (x - self.xmargin)*self.xscale, (y - self.ymargin)*self.yscale
-    def scale(self, surface): return scale_image(surface, self.iwidth, self.iheight)
+        return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
+    # TODO: invalidate caches upon zoom changes [fading mask and light table mask need this]
+    def scale(self, surface): return self.roi(scale_image(surface, self.iwidth*self.zoom, self.iheight*self.zoom))
     def set_fading_mask(self, fading_mask, skeleton=None):
         self.fading_mask = self.scale(fading_mask)
         global last_skeleton
@@ -2427,11 +2482,11 @@ class DrawingArea:
         highlight = not layout.is_playing and not movie.curr_layer().locked
         starting_point = (self.xmargin, self.ymargin)
         surfaces = []
-        surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight))
+        surfaces.append(self.roi(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=self.iwidth*self.zoom, height=self.iheight*self.zoom)))
         if movie.layers[movie.layer_pos].visible:
-            scaled_layer = movie.get_thumbnail(pos, self.iwidth, self.iheight, transparent_single_layer=movie.layer_pos)
+            scaled_layer = self.roi(movie.get_thumbnail(pos, self.iwidth*self.zoom, self.iheight*self.zoom, transparent_single_layer=movie.layer_pos))
             surfaces.append(scaled_layer)
-        surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight))
+        surfaces.append(self.roi(movie.curr_top_layers_surface(pos, highlight=highlight, width=self.iwidth*self.zoom, height=self.iheight*self.zoom)))
 
         if not layout.is_playing:
             mask = layout.timeline_area().combined_light_table_mask()
@@ -2474,12 +2529,15 @@ class DrawingArea:
         left, bottom, _, _ = self.rect
         return (x-left), (y-bottom)
     def on_mouse_down(self,x,y):
+        pressed = pg.key.get_pressed()
+        if pressed[pg.K_x]:
+            set_tool(TOOLS['pan'])
+        elif pressed[pg.K_z]:
+            set_tool(TOOLS['zoom'])
         layout.tool.on_mouse_down(*self.fix_xy(x,y))
     def on_mouse_up(self,x,y):
-        left, bottom, _, _ = self.rect
         layout.tool.on_mouse_up(*self.fix_xy(x,y))
     def on_mouse_move(self,x,y):
-        left, bottom, _, _ = self.rect
         layout.tool.on_mouse_move(*self.fix_xy(x,y))
 
 class TimelineArea:
@@ -3693,6 +3751,8 @@ def toggle_layer_lock():
     history.append_item(ToggleHistoryItem(layer.toggle_locked))
 
 TOOLS = {
+    'pan': Tool(PanTool(), pencil_cursor, ''), #FIXME proper cursor
+    'zoom': Tool(ZoomTool(), pencil_cursor, ''), #FIXME proper cursor
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
     'eraser-medium': Tool(PenTool(BACKGROUND, MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'rR'),

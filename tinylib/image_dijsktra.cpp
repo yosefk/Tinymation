@@ -64,7 +64,7 @@ int image_dijkstra(const uint8_t* image, int im_stride, float* dist, int d_strid
 				if(!image[im_stride*y + x]) {
 					continue;
 				}
-				float extra_dist = (xo==0 || yo==0) ? 1 : 1.44; //sqrt(2)
+				float extra_dist = (xo==0 || yo==0) ? 1 : 1.41421356f; //sqrt(2)
 				float neigh_dist = p.dist + extra_dist;
 				if(neigh_dist < dist[d_stride*y + x]) {
 					dist[d_stride*y + x] = neigh_dist;
