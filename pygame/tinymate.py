@@ -110,6 +110,7 @@ class Cache:
         self.cached_bytes = 0
         # sum([self.size(value) for value in self.key2value.values()])
         self.cache_size = 0
+        self.locked = False
     def size(self,value):
         try:
             # surface
@@ -120,6 +121,8 @@ class Cache:
                 return reduce(lambda x,y: x*y, value.shape)
             except:
                 return 0
+    def lock(self): self.locked = True
+    def unlock(self): self.locked = False
     def fetch(self, cached_item):
         key = (cached_item.compute_key(), (IWIDTH, IHEIGHT))
         value = self.key2value.get(key, Cache.MISS)
@@ -127,6 +130,8 @@ class Cache:
             value = cached_item.compute_value()
             vsize = self.size(value)
             self.computed_bytes += vsize
+            if self.locked:
+                return value
             self.cache_size += vsize
             self._evict_lru_as_needed()
             self.key2value[key] = value
@@ -180,7 +185,7 @@ def fit_to_resolution(surface):
     elif w == IHEIGHT and h == IWIDTH:
         return pg.transform.rotate(surface, 90 * (1 if w>h else -1)) 
     else:
-        return pg.transform.scale(surface, (w, h))
+        return pg.transform.smoothscale(surface, (w, h))
 
 def new_frame():
     frame = pygame.Surface((IWIDTH, IHEIGHT), pygame.SRCALPHA)
@@ -275,18 +280,31 @@ class Frame:
         s = getattr(self, surface_id)
         return s if s is not None else empty_frame().surf_by_id(surface_id)
 
-    def surface(self):
+    def surface(self, roi=None):
+        def sub(surface): return surface.subsurface(roi) if roi else surface
         if self.empty():
-            return empty_frame().color
-        s = self.color.copy()
-        s.blit(self.lines, (0, 0))
+            return sub(empty_frame().color)
+        s = sub(self.color).copy()
+        s.blit(sub(self.lines), (0, 0))
         return s
 
-    def thumbnail(self, width, height):
+    def thumbnail(self, width, height, roi):
         if self.empty():
-            return scale_image(self.surface(), width, height)
-        s = scale_image(self.color, width, height)
-        s.blit(scale_image(self.lines, width, height), (0, 0))
+            return empty_frame().color.subsurface(0, 0, width, height)
+        def sub(surface): return surface.subsurface(roi)
+        with thumb_timer:
+            match roi:
+                # for a small ROI it's better to blit lines onto color first, and then scale;
+                # for a large ROI, better to scale first and then blit the smaller number of pixels.
+                # (there might be a multiplier in that comparison... empirically with the implicit
+                # multiplier 1, the two branches take about the same amount of time)
+                case _,_,w,h if w*h < width*height:
+                    with small_roi_timer:
+                        s = scale_image(self.surface(roi), width, height)
+                case _:
+                    with large_roi_timer:
+                        s = scale_image(sub(self.color), width, height)
+                        s.blit(scale_image(sub(self.lines), width, height), (0, 0))
         return s
 
     def filenames_png_bmp(self,surface_id):
@@ -452,9 +470,10 @@ class MovieData:
     def mp4_path(self): return os.path.realpath(self.dir)+'-MP4.mp4'
     def png_path(self, i): return os.path.join(self.dir, FRAME_FMT%i)
 
-    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False, width=None, height=None):
+    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False, width=None, height=None, roi=None):
         if not width: width=IWIDTH
         if not height: height=IHEIGHT
+        if not roi: roi = (0, 0, IWIDTH, IHEIGHT)
         s = pygame.Surface((width, height), pygame.SRCALPHA)
         if not transparent:
             s.fill(BACKGROUND)
@@ -462,12 +481,12 @@ class MovieData:
         for layer in layers:
             if not layer.visible and not include_invisible:
                 continue
-            if width==IWIDTH and height==IHEIGHT:
+            if width==IWIDTH and height==IHEIGHT and roi==(0,0,IWIDTH,IHEIGHT):
                 f = layer.frame(pos)
                 surfaces.append(f.surf_by_id('color'))
                 surfaces.append(f.surf_by_id('lines'))
             else:
-                surfaces.append(movie.get_thumbnail(pos, width, height, transparent_single_layer=self.layers.index(layer)))
+                surfaces.append(movie.get_thumbnail(pos, width, height, transparent_single_layer=self.layers.index(layer), roi=roi))
         s.blits([(surface, (0, 0), (0, 0, width, height)) for surface in surfaces])
         return s
 
@@ -1261,7 +1280,6 @@ class Timer:
         self.start()
     def __exit__(self, *args):
         self.stop()
-        print(self.show())
 
 class Timers:
     def __init__(self):
@@ -1279,6 +1297,12 @@ class Timers:
 timers = Timers()
 layout_draw_timer = timers.add('Layout.draw')
 drawing_area_draw_timer = timers.add('DrawingArea.draw', indent=1)
+draw_bottom_timer = timers.add('bottom layers', indent=2)
+draw_curr_timer = timers.add('current layer', indent=2)
+draw_top_timer = timers.add('top layers', indent=2)
+draw_light_timer = timers.add('light table mask', indent=2)
+draw_fading_timer = timers.add('fading mask', indent=2)
+draw_blits_timer = timers.add('blit surfaces', indent=2)
 timeline_area_draw_timer = timers.add('TimelineArea.draw', indent=1)
 layers_area_draw_timer = timers.add('LayersArea.draw', indent=1)
 movie_list_area_draw_timer = timers.add('MovieListArea.draw', indent=1)
@@ -1300,6 +1324,9 @@ sk_timer = timers.add('skeletonize',indent=1)
 dist_timer = timers.add('distance',indent=1)
 hole_timer = timers.add('patch_hole',indent=1)
 rest_timer = timers.add('rest',indent=1)
+thumb_timer = timers.add('thumbnail')
+small_roi_timer = timers.add('small roi',indent=1)
+large_roi_timer = timers.add('large roi',indent=1)
 
 # interface with tinylib
 
@@ -1526,23 +1553,27 @@ def make_surface(width, height):
 
 import cv2
 def cv2_resize_surface(src, dst):
-    iptr, _, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
-    optr, _, owidth, oheight, obgr = color_c_params(pg.surfarray.pixels3d(dst))
+    iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
+    optr, ostride, owidth, oheight, obgr = color_c_params(pg.surfarray.pixels3d(dst))
     assert ibgr == obgr
 
-    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iwidth * iheight * 4))).contents
+    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iwidth * istride * 4))).contents
 
     # reinterpret the array as RGBA height x width (this "transposes" the image and flips R and B channels,
     # in order to fit the data into the layout cv2 expects)
-    #
-    # the default strides are height*4, 4, 1
-    iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer)
+    iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
 
-    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (owidth * oheight * 4))).contents
+    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (owidth * ostride * 4))).contents
 
-    oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer)
+    oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer, strides=(ostride, 4, 1))
 
-    cv2.resize(iattached, (owidth,oheight), oattached)
+    if owidth < iwidth/2:
+        method = cv2.INTER_AREA
+    elif owidth > iwidth:
+        method = cv2.INTER_CUBIC
+    else:
+        method = cv2.INTER_LINEAR
+    cv2.resize(iattached, (owidth,oheight), oattached, interpolation=method)
 
 def scale_image(surface, width=None, height=None):
     assert width or height
@@ -1804,10 +1835,17 @@ class PenTool(Button):
         self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
         if self.eraser:
             if not self.alpha_surface:
-                self.alpha_surface = new_frame()
+                self.alpha_surface = pg.Surface((layout.drawing_area().iwidth, layout.drawing_area().iheight), pg.SRCALPHA)
             pg.surfarray.pixels_red(self.alpha_surface)[:] = 0
         self.on_mouse_move(x,y)
         pen_down_timer.stop()
+
+    def find_flood_fill_point(self):
+        if not self.eraser: return
+        for cx, cy in reversed(self.points):
+            x, y = round(cx), round(cy)
+            if x >= 0 and y >= 0 and x < IWIDTH and y < IHEIGHT:
+                return x, y
 
     def on_mouse_up(self, x, y):
         if curr_layer_locked():
@@ -1826,7 +1864,10 @@ class PenTool(Button):
         line_options = drawLines(frame.get_width(), frame.get_height(), self.points, line_width, suggest_options=not self.eraser, existing_lines=lines)
         pen_draw_lines_timer.stop()
 
-        if self.eraser:
+        # note that theoretically we might have a line intersecting the image but we'll ignore it because no point
+        # in self.points is in the image; doesn't seem a likely enough to case add code that doesn't lose the line in this case
+        flood_fill_point = self.find_flood_fill_point()
+        if self.eraser and flood_fill_point:
             eraser_timer.start()
 
             new_lines,(minx,miny,maxx,maxy) = line_options[0]
@@ -1837,19 +1878,18 @@ class PenTool(Button):
             def make_color_history_item(bbox):
                 return HistoryItem('color', bbox)
 
-            # FIXME!! flood_fill_color_based_on_lines() should only be called with x,y within the image [look in the points history
-            # for such a coordinate, if not found - don't add an undo operation at all.] currently we have an assertion error
             color = movie.edit_curr_frame().surf_by_id('color')
             color_rgb = pg.surfarray.pixels3d(color)
             color_alpha = pg.surfarray.pixels_alpha(color)
             bucket_color = self.bucket_color if self.bucket_color else BACKGROUND+(0,) 
-            color_history_item = flood_fill_color_based_on_lines(color_rgb, lines, round(cx), round(cy), bucket_color, make_color_history_item)
+            fx, fy = flood_fill_point
+            color_history_item = flood_fill_color_based_on_lines(color_rgb, lines, round(fx), round(fy), bucket_color, make_color_history_item)
             history_item = HistoryItemSet([lines_history_item, color_history_item])
 
             history.append_item(history_item)
 
             eraser_timer.stop()
-        else:
+        elif not self.eraser:
             pen_suggestions_timer.start()
 
             prev_history_item = None
@@ -1912,13 +1952,14 @@ class PenTool(Button):
                 self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((cx,cy))
         self.points.append((cx,cy))
         color = self.color if not self.eraser else (self.bucket_color if self.bucket_color else (255,255,255,0))
-        expose_other_layers = self.eraser and color[3]==0
+        expose_other_layers = self.eraser and color[3]==0 #TODO: maybe expose other layers for non-transparent colors, too?
         if expose_other_layers:
             color = (255,0,0,0)
         draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface
         ox,oy = (0,0) if not expose_other_layers else (drawing_area.xmargin, drawing_area.ymargin)
         if self.prev_drawn:
             drawLine(draw_into, (self.prev_drawn[0]-ox, self.prev_drawn[1]-oy), (x-ox,y-oy), color, self.width)
+        # FIXME: adapt brush width to scale?..
         drawCircle(draw_into, x-ox, y-oy, color, self.circle_width)
         if expose_other_layers:
             alpha = pg.surfarray.pixels_red(draw_into)
@@ -1935,15 +1976,15 @@ class PenTool(Button):
                     return
                 salpha = pg.surfarray.pixels_alpha(s)
                 orig_alpha = salpha[left:right+1, bottom:top+1].copy()
-                # FIXME we assert here when erasing out of bounds
                 salpha[left:right+1, bottom:top+1] = np.minimum(orig_alpha, alpha[left:right+1,bottom:top+1])
                 del salpha
                 drawing_area.subsurface.blit(s, (ox+left,oy+bottom), (left,bottom,right-left+1,top-bottom+1))
                 salpha = pg.surfarray.pixels_alpha(s)
                 salpha[left:right+1, bottom:top+1] = orig_alpha
 
-            render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True, width=drawing_area.iwidth, height=drawing_area.iheight))
-            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True, width=drawing_area.iwidth, height=drawing_area.iheight))
+            roi = drawing_area.frame_roi()
+            render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True, width=drawing_area.iwidth, height=drawing_area.iheight, roi=roi))
+            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True, width=drawing_area.iwidth, height=drawing_area.iheight, roi=roi))
             render_surface(layout.timeline_area().combined_light_table_mask())
 
         self.prev_drawn = (x,y) 
@@ -1954,12 +1995,12 @@ class PanTool:
         self.start = (x,y)
         self.sxo = layout.drawing_area().xoffset
         self.syo = layout.drawing_area().yoffset
-    def on_mouse_up(self, x, y): pass
+    def on_mouse_up(self, x, y):
+        layout.drawing_area().draw()
     def on_mouse_move(self, x, y):
         px, py = self.start
         da = layout.drawing_area()
         da.set_xyoffset(self.sxo - (x - px), self.syo - (y - py))
-        da.draw()
 
 class ZoomTool:
     def on_mouse_down(self, x, y):
@@ -1968,8 +2009,8 @@ class ZoomTool:
         da = layout.drawing_area()
         self.frame_start = da.xy2frame(x,y)
         self.orig_zoom = da.zoom
-        #framex = (startx - self.xmargin + self.xoffset)*self.xscale #, (y - self.ymargin + self.yoffset)*self.yscale
-    def on_mouse_up(self, x, y): pass
+    def on_mouse_up(self, x, y):
+        layout.drawing_area().draw()
     def on_mouse_move(self, x, y):
         px, py = self.start
         dist = abs(y - py)
@@ -1978,8 +2019,8 @@ class ZoomTool:
         zoom_change = ratio*(MAX_ZOOM - MIN_ZOOM)
         if y > py:
             zoom_change = -zoom_change
-        da = layout.drawing_area()
         new_zoom = max(MIN_ZOOM,min(self.orig_zoom + zoom_change, MAX_ZOOM))
+        da = layout.drawing_area()
         da.set_zoom(new_zoom)
 
         # we want xy2frame(self.start) to return the same value through the zooming [if possible]
@@ -1987,7 +2028,6 @@ class ZoomTool:
         xoffset = framex/da.xscale - px + da.xmargin
         yoffset = framey/da.yscale - py + da.ymargin
         da.set_xyoffset(xoffset, yoffset)
-        da.draw()
 
 class NewDeleteTool(PenTool):
     def __init__(self, frame_func, clip_func, layer_func):
@@ -2362,6 +2402,13 @@ class Layout:
         if event.type == PLAYBACK_TIMER_EVENT:
             if self.is_playing:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
+            # when zooming/panning, we redraw at the playback rate [instead of per mouse event,
+            # which can create a "backlog" where we keep redrawing after the mouse stops moving because we
+            # lag after mouse motion.] TODO: do we want to use a similar approach elsewhere?..
+            elif self.is_pressed and self.zoom_pan_tool() and self.focus_elem is self.drawing_area():
+                cache.lock() # the chance to need to redraw with the same intermediate zoom/pan is low
+                self.drawing_area().draw()
+                cache.unlock()
 
         if event.type == FADING_TIMER_EVENT:
             self.drawing_area().update_fading_mask()
@@ -2440,6 +2487,7 @@ class DrawingArea:
         self.zoom = 1
         self.xoffset = 0
         self.yoffset = 0
+        self.fading_mask_version = 0
     def _internal_layout(self):
         if self.iwidth and self.iheight:
             return
@@ -2451,22 +2499,48 @@ class DrawingArea:
     def set_xyoffset(self, xoffset, yoffset):
         self.xoffset = min(max(xoffset, 0), self.iwidth*(self.zoom - 1))
         self.yoffset = min(max(yoffset, 0), self.iheight*(self.zoom - 1))
+        # make sure xoffset,yoffset correspond to an integer coordinate in the non-zoomed image,
+        # otherwise the scaled image cannot match xoffset, yoffset exactly. NOTE: this causes "dancing"
+        # when zooming - xy offset jumps... could be called a bad consequence of using off the shelf
+        # scaling code that doesn't support backward warping from non-integer source coordinates...
+        x, y, _, _ = self.frame_roi()
+        self.xoffset = math.floor(x) * self.zoom * self.iwidth / IWIDTH
+        self.yoffset = math.floor(y) * self.zoom * self.iheight / IHEIGHT
     def set_zoom(self, zoom):
         self.zoom = zoom
         self.xscale = IWIDTH/(self.iwidth * self.zoom)
         self.yscale = IHEIGHT/(self.iheight * self.zoom)
+    def frame_roi(self):
+        # the roi in the drawing area is xoffset, yoffset, iwidth, iheight
+        return tuple([c/self.zoom for c in (self.xoffset*(IWIDTH/self.iwidth), self.yoffset*(IHEIGHT/self.iheight), IWIDTH, IHEIGHT)])
+    def xy2frame(self, x, y):
+        return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
     def roi(self, surface):
         if self.zoom == 1:
             return surface
         return surface.subsurface((self.xoffset, self.yoffset, self.iwidth, self.iheight))
-    def xy2frame(self, x, y):
-        return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
-    # TODO: invalidate caches upon zoom changes [fading mask and light table mask need this]
-    def scale(self, surface): return self.roi(scale_image(surface, self.iwidth*self.zoom, self.iheight*self.zoom))
+    def scale_and_cache(self, surface, key):
+        if surface is None:
+            return None
+        self._internal_layout()
+        class ScaledSurface:
+            def compute_key(_):
+                id2version, comp = key
+                return id2version, ('scaled-to-drawing-area', comp, self.zoom, self.xoffset, self.yoffset)
+            def compute_value(_):
+                return scale_image(surface.subsurface(self.frame_roi()), self.iwidth, self.iheight)
+        return cache.fetch(ScaledSurface())
     def set_fading_mask(self, fading_mask, skeleton=None):
-        self.fading_mask = self.scale(fading_mask)
+        self.fading_mask_version += 1
+        cache.update_id('fading-mask', self.fading_mask_version)
+        self.fading_mask = fading_mask
         global last_skeleton
         last_skeleton = skeleton
+    def scaled_fading_mask(self):
+        key = (('fading-mask',self.fading_mask_version),), 'fading-mask'
+        m = self.scale_and_cache(self.fading_mask, key)
+        m.set_alpha(self.fading_mask.get_alpha())
+        return m
     def draw(self):
         drawing_area_draw_timer.start()
 
@@ -2482,20 +2556,28 @@ class DrawingArea:
         highlight = not layout.is_playing and not movie.curr_layer().locked
         starting_point = (self.xmargin, self.ymargin)
         surfaces = []
-        surfaces.append(self.roi(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=self.iwidth*self.zoom, height=self.iheight*self.zoom)))
+
+        roi = self.frame_roi() 
+        with draw_bottom_timer:
+            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight, roi=roi))
         if movie.layers[movie.layer_pos].visible:
-            scaled_layer = self.roi(movie.get_thumbnail(pos, self.iwidth*self.zoom, self.iheight*self.zoom, transparent_single_layer=movie.layer_pos))
+            with draw_curr_timer:
+                scaled_layer = movie.get_thumbnail(pos, self.iwidth, self.iheight, transparent_single_layer=movie.layer_pos, roi=roi)
             surfaces.append(scaled_layer)
-        surfaces.append(self.roi(movie.curr_top_layers_surface(pos, highlight=highlight, width=self.iwidth*self.zoom, height=self.iheight*self.zoom)))
+        with draw_top_timer:
+            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight, roi=roi))
 
         if not layout.is_playing:
-            mask = layout.timeline_area().combined_light_table_mask()
+            with draw_light_timer:
+                mask = layout.timeline_area().combined_light_table_mask()
             if mask:
                 surfaces.append(mask)
             if self.fading_mask:
-                surfaces.append(self.fading_mask)
+                with draw_fading_timer:
+                    surfaces.append(self.scaled_fading_mask())
 
-        self.subsurface.blits([(surface, starting_point) for surface in surfaces])
+        with draw_blits_timer:
+            self.subsurface.blits([(surface, starting_point) for surface in surfaces])
         drawing_area_draw_timer.stop()
 
     def clear_fading_mask(self):
@@ -2671,11 +2753,10 @@ class TimelineArea:
                 masks = []
                 for pos, color, transparency in self.light_table_positions():
                     masks.append(movie.get_mask(pos, color, transparency))
-                scale = layout.drawing_area().scale
                 if len(masks) == 0:
                     return None
                 elif len(masks) == 1:
-                    return scale(masks[0])
+                    return masks[0]
                 else:
                     mask = masks[0].copy()
                     alphas = []
@@ -2685,9 +2766,10 @@ class TimelineArea:
                     mask.blits([(m, (0, 0), (0, 0, mask.get_width(), mask.get_height())) for m in masks[1:]])
                     for m,a in zip(masks[1:],alphas):
                         m.set_alpha(a)
-                    return scale(mask)
+                    return mask
 
-        return cache.fetch(CachedCombinedMask())
+        cached_combined_mask = CachedCombinedMask()
+        return layout.drawing_area().scale_and_cache(cache.fetch(cached_combined_mask), cached_combined_mask.compute_key())
 
     def x2frame(self, x):
         for left, right, pos in self.frame_boundaries:
@@ -3091,6 +3173,8 @@ class MovieList:
     def open_history(self, clip_pos):
         global history
         history = self.histories.get(self.clips[clip_pos], History())
+        layout.drawing_area().set_xyoffset(0,0)
+        layout.drawing_area().set_zoom(1)
     def save_history(self):
         if self.clips:
             self.histories[self.clips[self.clip_pos]] = history
@@ -3302,7 +3386,9 @@ class Movie(MovieData):
         frames = [layer.frame(pos) for layer in layers if layer.visible or include_invisible]
         return tuple([frame.cache_id_version() for frame in frames if not frame.empty()])
 
-    def get_thumbnail(self, pos, width, height, highlight=True, transparent_single_layer=-1):
+    def get_thumbnail(self, pos, width, height, highlight=True, transparent_single_layer=-1, roi=None):
+        if roi is None:
+            roi = (0, 0, IWIDTH, IHEIGHT) # the roi is in the original image coordinates, not the thumbnail coordinates
         trans_single = transparent_single_layer >= 0
         layer_pos = self.layer_pos if not trans_single else transparent_single_layer
         def id2version(layers): return self._visible_layers_id2version(layers, pos, include_invisible=trans_single)
@@ -3310,25 +3396,25 @@ class Movie(MovieData):
         class CachedThumbnail(CachedItem):
             def compute_key(_):
                 if trans_single:
-                    return id2version([self.layers[layer_pos]]), ('transparent-layer-thumbnail', width, height)
+                    return id2version([self.layers[layer_pos]]), ('transparent-layer-thumbnail', width, height, roi)
                 else:
                     def layer_ids(layers): return tuple([layer.id for layer in layers if not layer.frame(pos).empty()])
                     hl = ('highlight', layer_ids(self.layers[:layer_pos]), layer_ids([self.layers[layer_pos]]), layer_ids(self.layers[layer_pos+1:])) if highlight else 'no-highlight'
-                    return id2version(self.layers), ('thumbnail', width, height, hl)
+                    return id2version(self.layers), ('thumbnail', width, height, roi, hl)
             def compute_value(_):
                 h = int(screen.get_height() * 0.15)
                 w = int(h * IWIDTH / IHEIGHT)
                 if w <= width and h <= height:
                     if trans_single:
-                        return self.layers[layer_pos].frame(pos).thumbnail(width, height)
+                        return self.layers[layer_pos].frame(pos).thumbnail(width, height, roi)
 
-                    s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height).copy()
+                    s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi).copy()
                     if self.layers[self.layer_pos].visible:
-                        s.blit(self.get_thumbnail(pos, width, height, transparent_single_layer=layer_pos), (0, 0))
-                    s.blit(self.curr_top_layers_surface(pos, highlight=highlight, width=width, height=height), (0, 0))
+                        s.blit(self.get_thumbnail(pos, width, height, transparent_single_layer=layer_pos, roi=roi), (0, 0))
+                    s.blit(self.curr_top_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi), (0, 0))
                     return s
                 else:
-                    return scale_image(self.get_thumbnail(pos, w, h, highlight=highlight, transparent_single_layer=transparent_single_layer), width, height)
+                    return scale_image(self.get_thumbnail(pos, w, h, highlight=highlight, transparent_single_layer=transparent_single_layer, roi=roi), width, height)
 
         return cache.fetch(CachedThumbnail())
 
@@ -3484,15 +3570,16 @@ class Movie(MovieData):
         alpha[:1:WIDTH*3, ::WIDTH*3, :] = 0
         alpha[1:1:WIDTH*3, ::WIDTH*3, :] = 0
 
-    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None):
+    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None):
         if not width: width=IWIDTH
         if not height: height=IHEIGHT
+        if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
 
         class CachedBottomLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height)
+                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height)
+                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi)
                 s = pg.Surface((width, height), pg.SRCALPHA)
                 s.fill(BACKGROUND)
                 if self.layer_pos == 0:
@@ -3514,15 +3601,16 @@ class Movie(MovieData):
 
         return cache.fetch(CachedBottomLayers())
 
-    def curr_top_layers_surface(self, pos, highlight, width=None, height=None):
+    def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None):
         if not width: width=IWIDTH
         if not height: height=IHEIGHT
+        if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
 
         class CachedTopLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height)
+                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height, roi)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height)
+                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi)
                 if not highlight or self.layer_pos == len(self.layers)-1:
                     return layers
                 layers.set_alpha(128)
@@ -4130,7 +4218,7 @@ SAVING_TIMER_EVENT = pygame.USEREVENT + 2
 FADING_TIMER_EVENT = pygame.USEREVENT + 3
 
 pygame.time.set_timer(PLAYBACK_TIMER_EVENT, 1000//FRAME_RATE) # we play back at 12 fps
-pygame.time.set_timer(SAVING_TIMER_EVENT, 15*1000) # we save a copy of the current clip every 15 seconds
+pygame.time.set_timer(SAVING_TIMER_EVENT, 15*1000) # we save the current frame every 15 seconds
 pygame.time.set_timer(FADING_TIMER_EVENT, 1000//FADING_RATE) # we save a copy of the current clip every 15 seconds
 
 timer_events = [
