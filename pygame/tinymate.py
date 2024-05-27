@@ -2236,7 +2236,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     ys = np.zeros(npoints, int)
     found = tinylib.patch_hole(lines_ptr, lines_stride, sk_ptr, sk_stride, width, height, y-sky.start, x-skx.start,
                                HOLE_REGION_H, HOLE_REGION_W, arr_base_ptr(ys), arr_base_ptr(xs), npoints)
-    if not found:
+    if found < 3:
         return False
 
     xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]

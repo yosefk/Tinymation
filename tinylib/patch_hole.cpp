@@ -41,6 +41,14 @@ int fixed_size_region_1d(int center, int part, int full)
     }
 }
 
+enum CantPatchReason
+{
+	NotEnoughCoordinates = -1,
+	NoClosestPointOnSkeleton = -2,
+	No2DisjointRegions = -3,
+	NoClosestPointOnLines = -4
+};
+
 //we modify the skeleton in-place
 //
 //find the closest point to x,y on the skeleton
@@ -58,38 +66,59 @@ int patch_hole(const uint8_t* lines, int lines_stride, uint8_t* skeleton, int sk
 	       int patch_region_w, int patch_region_h, int* xs, int* ys, int max_coord)
 {
 	if(max_coord < 3) {
-		return 0;
+		return NotEnoughCoordinates;
 	}
 	int closest_x, closest_y;
 	bool found = find_closest_point(width, height, cx, cy, closest_x, closest_y, [&](int x, int y) { return skeleton[sk_stride*y + x]; });
 	if(!found) {
-		return 0;
+		return NoClosestPointOnSkeleton;
 	}
-	int xstart = fixed_size_region_1d(closest_x, patch_region_w, width);
-	int ystart = fixed_size_region_1d(closest_y, patch_region_h, height);
-	uint8_t* patch = skeleton + sk_stride*ystart + xstart;
-
-	//find a neighbor point which is not a part of the skeleton and flood-fill it with a first color,
-	//and then another which is not a part of the skeleton nor was flooded by the first flood-fill,
-	//and flood-fill it with a second color
 	const int region_color[2] = {2,3};
 	int pass = 0;
-	for(int yo=-1; yo<=1 && pass < 2; ++yo) {
-		for(int xo=-1; xo<=1 && pass < 2; ++xo) {
-			int x = closest_x + xo;
-			int y = closest_y + yo;
-			if(x < 0 || x >= width || y < 0 || y >= height) {
-				continue;
-			}
-			if(!skeleton[sk_stride*y + x]) {
-				flood_fill_mask(patch, sk_stride, patch_region_w, patch_region_h, x-xstart, y-ystart, region_color[pass], nullptr, 0);
-				pass++;
-			}
+	while(pass < 2 && patch_region_w > 1 && patch_region_h > 1) {
+		int xstart = fixed_size_region_1d(closest_x, patch_region_w, width);
+		int ystart = fixed_size_region_1d(closest_y, patch_region_h, height);
+		uint8_t* patch = skeleton + sk_stride*ystart + xstart;
 
+		//find a neighbor point which is not a part of the skeleton and flood-fill it with a first color,
+		//and then another which is not a part of the skeleton nor was flooded by the first flood-fill,
+		//and flood-fill it with a second color
+		//
+		//make the patch iteratively smaller. big patches are good because you can patch big holes,
+		//but if a patch is too big, you might not see two disjoint colors. smaller patches are more
+		//likely to give you two disjoint colors, but can only patch smaller holes. if we fail to find
+		//disjoint colors at the largest patch size, try smaller ones before giving up
+		int flood_x = 0, flood_y = 0;
+		for(int yo=-1; yo<=1 && pass < 2; ++yo) {
+			for(int xo=-1; xo<=1 && pass < 2; ++xo) {
+				int x = closest_x + xo;
+				int y = closest_y + yo;
+				if(x < 0 || x >= width || y < 0 || y >= height) {
+					continue;
+				}
+				if(!skeleton[sk_stride*y + x]) {
+					flood_x = x-xstart;
+					flood_y = y-ystart;
+					flood_fill_mask(patch, sk_stride, patch_region_w, patch_region_h, flood_x, flood_y, region_color[pass], nullptr, 0);
+					pass++;
+				}
+				else {
+				}
+
+			}
+		}
+		if(pass < 2) {
+			//clear the are we flooded during the previous attempt
+			flood_fill_mask(patch, sk_stride, patch_region_w, patch_region_h, flood_x, flood_y, 0, nullptr, 0);
+			//TODO: do a better search than this?..
+			patch_region_w -= 5;
+			patch_region_h -= 5;
+
+			pass = 0;
 		}
 	}
 	if(pass < 2) {
-		return 0; //couldn't find 2 disjoint regions
+		return No2DisjointRegions; //couldn't find 2 disjoint regions
 	}
 
 	xs[1] = closest_x;
@@ -99,7 +128,7 @@ int patch_hole(const uint8_t* lines, int lines_stride, uint8_t* skeleton, int sk
 			return lines[lines_stride*y + x] == 255 && skeleton[sk_stride*y + x] == region_color[c];
 		});
 		if(!found) {
-			return 0;
+			return NoClosestPointOnLines;
 		}
 	}
 
