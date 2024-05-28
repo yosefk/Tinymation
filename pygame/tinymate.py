@@ -1631,6 +1631,7 @@ flashlight_cursor = (flashlight_cursor[0], load_image('flashlight-tool.png'))
 paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], load_image('bucket-tool.png'))
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
+needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE*2))
 
 # for locked screen
 empty_cursor = pg.cursors.Cursor((0,0), pg.Surface((10,10), pg.SRCALPHA))
@@ -2287,12 +2288,12 @@ class FlashlightTool(Button):
                         # what happened. the downside is that we don't know which side of the hole
                         # the new skeleton should be at; we could probably compute several and choose the
                         # largest but seems like too much trouble?..
-                        neighbors = [(0,0),(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,-1),(-1,1),(1,-1)]
+                        neighbors = [(0,0),(2,0),(-2,0),(0,2),(0,-2),(2,2),(-2,-2),(-2,2),(2,-2)]
                         for ox,oy in neighbors:
                             xi,yi = x+ox,y+oy
-                            if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1]:
+                            if xi < 0 or yi < 0 or xi >= color.shape[0] or yi >= color.shape[1]:
                                 continue
-                            if lines[x,y] != 255:
+                            if lines[xi,yi] != 255:
                                 break
                         x,y = xi,yi
                     hole_timer.stop()
@@ -4232,6 +4233,7 @@ RELOAD_MOVIE_LIST_EVENT = pygame.USEREVENT + 5
 
 interesting_events = [
     pygame.KEYDOWN,
+    pygame.KEYUP,
     pygame.MOUSEMOTION,
     pygame.MOUSEBUTTONDOWN,
     pygame.MOUSEBUTTONUP,
@@ -4240,7 +4242,7 @@ interesting_events = [
 ] + timer_events
 
 event2timer = {}
-event_names = 'KEY MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING'.split()
+event_names = 'KEYDOWN KEYUP MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING'.split()
 for i,event in enumerate(interesting_events):
     event2timer[event] = timers.add(event_names[i])
 
@@ -4305,9 +4307,17 @@ def open_clip_dir():
         set_wd(file_path)
         load_clips_dir()
 
+def process_keyup_event(event):
+    ctrl = event.mod & pg.KMOD_CTRL
+    if not ctrl and isinstance(layout.tool, FlashlightTool):
+        try_set_cursor(flashlight_cursor[0])
+
 def process_keydown_event(event):
     ctrl = event.mod & pg.KMOD_CTRL
     shift = event.mod & pg.KMOD_SHIFT
+
+    if ctrl and isinstance(layout.tool, FlashlightTool):
+        try_set_cursor(needle_cursor[0])
 
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
     if event.key == pg.K_SPACE:
@@ -4455,10 +4465,14 @@ try:
 
                     timer.start()
                     process_keydown_event(event)
-        
+
                 else:
                     timer.start()
-                    layout.on_event(event)
+
+                    if event.type == pygame.KEYUP:
+                        process_keyup_event(event)
+                    else:
+                        layout.on_event(event)
 
                 # TODO: might be good to optimize repainting beyond "just repaint everything
                 # upon every event"
