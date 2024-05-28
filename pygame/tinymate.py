@@ -1632,6 +1632,8 @@ paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], load_image('bucket-to
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE*2))
+zoom_cursor = load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*2))
+pan_cursor = load_cursor('pan.png', hot_spot=(0.5, 0.5), size=int(CURSOR_SIZE*2))
 
 # for locked screen
 empty_cursor = pg.cursors.Cursor((0,0), pg.Surface((10,10), pg.SRCALPHA))
@@ -3840,8 +3842,8 @@ def toggle_layer_lock():
     history.append_item(ToggleHistoryItem(layer.toggle_locked))
 
 TOOLS = {
-    'pan': Tool(PanTool(), pencil_cursor, ''), #FIXME proper cursor
-    'zoom': Tool(ZoomTool(), pencil_cursor, ''), #FIXME proper cursor
+    'pan': Tool(PanTool(), pan_cursor, ''),
+    'zoom': Tool(ZoomTool(), zoom_cursor, ''),
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
     'eraser-medium': Tool(PenTool(BACKGROUND, MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'rR'),
