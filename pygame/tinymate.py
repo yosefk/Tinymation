@@ -4332,74 +4332,93 @@ def process_keydown_event(event):
 
     if ctrl and isinstance(layout.tool, FlashlightTool):
         try_set_cursor(needle_cursor[0])
+        return
 
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
     if event.key == pg.K_SPACE:
         if ctrl:
             history.redo_item()
+            return
         else:
             history.undo_item(drawing_changes_only=True)
+            return
 
     # Ctrl-Z: undo any change (space only undoes drawing changes and does nothing if the latest change in the history
     # isn't a drawing change)
     if event.key == pg.K_z and ctrl:
         history.undo_item(drawing_changes_only=False)
+        return
 
     # Ctrl+Shift+Delete
     if event.key == pg.K_DELETE and ctrl and shift:
         clear_history()
+        return
 
     # Ctrl-E: export
     if ctrl and event.key == pg.K_e:
         export_and_open_explorer()
+        return
 
     # Ctrl-O: open a directory
     if ctrl and event.key == pg.K_o:
         open_clip_dir()
+        return
 
     # Ctrl-C/X/V
     if ctrl:
         if event.key == pg.K_c:
             copy_frame()
+            return
         elif event.key == pg.K_x:
             cut_frame()
+            return
         elif event.key == pg.K_v:
             paste_frame()
+            return
 
     # Ctrl-R: rotate
     if ctrl and event.key == pg.K_r:
         swap_width_height()
+        return
 
     # teacher/student - TODO: better UI
     # Ctrl-T: teacher client
     if ctrl and event.key == pg.K_t:
         print('shutting down the student server and starting the teacher client')
         start_teacher_client()
+        return
     if ctrl and event.key == pg.K_l and teacher_client:
         print('locking student screens')
         teacher_client.lock_screens()
+        return
     if ctrl and event.key == pg.K_u and teacher_client:
         print('unlocking student screens')
         teacher_client.unlock_screens()
+        return
     if ctrl and event.key == pg.K_b and teacher_client:
         print('saving class backup')
         teacher_client.save_class_backup()
+        return
     if ctrl and event.key == pg.K_d and teacher_client:
         print('restoring class backup')
         teacher_client.restore_class_backup(open_dir_path_dialog())
+        return
     if ctrl and event.key == pg.K_p and teacher_client:
         print("putting a directory in all students' Tinymate directories")
         teacher_client.put_dir(open_dir_path_dialog())
+        return
 
     # Ctrl-1/2: set layout to drawing/animation
     if ctrl and event.key == pg.K_1:
         layout.mode = DRAWING_LAYOUT
         if teacher_client:
             teacher_client.drawing_layout()
+        return
     if ctrl and event.key == pg.K_2:
         layout.mode = ANIMATION_LAYOUT
         if teacher_client:
             teacher_client.animation_layout()
+        return
 
     # other keyboard shortcuts are enabled/disabled by Ctrl-A
     global keyboard_shortcuts_enabled
@@ -4408,10 +4427,12 @@ def process_keydown_event(event):
         for tool in TOOLS.values():
             if event.key in [ord(c) for c in tool.chars]:
                 set_tool(tool)
+                return
 
         for func, chars, _ in FUNCTIONS.values():
             if event.key in [ord(c) for c in chars]:
                 func()
+                return
                 
     if event.key == pygame.K_a and ctrl:
         keyboard_shortcuts_enabled = not keyboard_shortcuts_enabled
