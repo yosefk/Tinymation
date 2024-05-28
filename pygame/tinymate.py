@@ -1993,7 +1993,7 @@ class PenTool(Button):
         self.prev_drawn = (x,y) 
         pen_move_timer.stop()
 
-class PanTool:
+class PanTool(Button):
     def on_mouse_down(self, x, y):
         self.start = (x,y)
         self.sxo = layout.drawing_area().xoffset
@@ -2004,8 +2004,14 @@ class PanTool:
         px, py = self.start
         da = layout.drawing_area()
         da.set_xyoffset(self.sxo - (x - px), self.syo - (y - py))
+    def draw(*args):
+        if layout.drawing_area().zoom > 1: # can't pan at zoom==1
+            Button.draw(*args)
+    def hit(*args):
+        if layout.drawing_area().zoom > 1:
+            return Button.hit(*args)
 
-class ZoomTool:
+class ZoomTool(Button):
     def on_mouse_down(self, x, y):
         self.start = (x,y)
         self.max_dist = min(screen.get_width(), screen.get_height())//2
@@ -2447,7 +2453,7 @@ class Layout:
             self.focus_elem = elem
             if self.focus_elem:
                 elem.on_mouse_down(x,y)
-            if (change == tool_change and self.new_delete_tool()) or self.zoom_pan_tool():
+            if change == tool_change and self.new_delete_tool():
                 self.restore_tool_on_mouse_up = True
         elif event.type == pygame.MOUSEBUTTONUP:
             self.is_pressed = False
@@ -2614,11 +2620,6 @@ class DrawingArea:
         left, bottom, _, _ = self.rect
         return (x-left), (y-bottom)
     def on_mouse_down(self,x,y):
-        pressed = pg.key.get_pressed()
-        if pressed[pg.K_x]:
-            set_tool(TOOLS['pan'])
-        elif pressed[pg.K_z]:
-            set_tool(TOOLS['zoom'])
         layout.tool.on_mouse_down(*self.fix_xy(x,y))
     def on_mouse_up(self,x,y):
         layout.tool.on_mouse_up(*self.fix_xy(x,y))
@@ -3842,8 +3843,8 @@ def toggle_layer_lock():
     history.append_item(ToggleHistoryItem(layer.toggle_locked))
 
 TOOLS = {
-    'pan': Tool(PanTool(), pan_cursor, ''),
-    'zoom': Tool(ZoomTool(), zoom_cursor, ''),
+    'pan': Tool(PanTool(), pan_cursor, 'xX'),
+    'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
     'eraser-medium': Tool(PenTool(BACKGROUND, MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'rR'),
@@ -3900,7 +3901,7 @@ def color_image(s, rgba):
     return sc
 
 class Palette:
-    def __init__(self, filename, rows=12, columns=3):
+    def __init__(self, filename, rows=11, columns=3):
         s = load_image(filename)
         color_hist = {}
         first_color_hit = {}
@@ -3915,19 +3916,23 @@ class Palette:
                     color_hist[color] = color_hist.get(color,0) + 1
 
         colors = [[None for col in range(columns)] for row in range(rows)]
-        colors[0] = [BACKGROUND+(0,), white+(255,), white+(255,)]
-        color2popularity = dict(list(reversed(sorted(list(color_hist.items()), key=lambda x: x[1])))[:(rows-1)*columns])
+        color2popularity = dict(list(reversed(sorted(list(color_hist.items()), key=lambda x: x[1])))[:rows*columns])
         hit2color = [(first_hit, color) for color, first_hit in sorted(list(first_color_hit.items()), key=lambda x: x[1])]
 
-        row = 1
+        row = 0
         col = 0
         for hit, color in hit2color:
             if color in color2popularity:
+                if row == 0 and col == 0:
+                    row += 1
+                    continue
                 colors[row][col] = color + (255,)
                 row+=1
                 if row == rows:
-                    row = 1
                     col += 1
+                    row = 0
+
+        colors[0][0] = BACKGROUND+(0,)
 
         self.rows = rows
         self.columns = columns
@@ -4041,10 +4046,17 @@ def init_layout():
     layout.add((TOOLBAR_X_START+color_w*2, 0.85-color_w, color_w, color_w*1.5), ToolSelectionButton(TOOLS['flashlight']))
     
     for row,y in enumerate(np.arange(0.25,0.85-0.001,color_w)):
-        for col,x in enumerate(np.arange(0,0.15-0.001,color_w)):            
-            if row == len(palette.colors)-1 and col == 2:
-                continue
-            tool = Tool(PaintBucketTool(palette.colors[len(palette.colors)-row-1][col]), palette.cursors[len(palette.colors)-row-1][col], '')
+        for col,x in enumerate(np.arange(0,0.15-0.001,color_w)):
+            tool = None
+            if row == len(palette.colors):
+                if col == 0:
+                    tool = TOOLS['zoom']
+                elif col == 1:
+                    tool = TOOLS['pan']
+                elif col == 2:
+                    continue
+            if not tool:
+                tool = Tool(PaintBucketTool(palette.colors[len(palette.colors)-row-1][col]), palette.cursors[len(palette.colors)-row-1][col], '')
             layout.add((TOOLBAR_X_START+x,y,color_w,color_w), ToolSelectionButton(tool))
             i += 1
 

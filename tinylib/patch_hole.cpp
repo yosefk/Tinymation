@@ -102,9 +102,6 @@ int patch_hole(const uint8_t* lines, int lines_stride, uint8_t* skeleton, int sk
 					flood_fill_mask(patch, sk_stride, patch_region_w, patch_region_h, flood_x, flood_y, region_color[pass], nullptr, 0);
 					pass++;
 				}
-				else {
-				}
-
 			}
 		}
 		if(pass < 2) {
