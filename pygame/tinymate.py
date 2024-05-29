@@ -1366,6 +1366,11 @@ import numpy.ctypeslib as npct
 import ctypes
 tinylib = npct.load_library('tinylib','.')
 
+def rgba_array(surface):
+    ptr, ystride, width, height, bgr = color_c_params(pg.surfarray.pixels3d(surface))
+    buffer = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * (width * ystride * 4))).contents
+    return np.ndarray((height,width,4), dtype=np.uint8, buffer=buffer, strides=(ystride, 4, 1)), bgr
+
 # these are simple functions to test the assumptions regarding Surface numpy array layout
 def meshgrid_color(rgb): tinylib.meshgrid_color(*color_c_params(rgb))
 def meshgrid_alpha(alpha): tinylib.meshgrid_alpha(*greyscale_c_params(alpha))
@@ -3367,6 +3372,8 @@ class Movie(MovieData):
             init_layout()
         self.edited_since_export = True # MovieList can set it safely to false - we don't know
         # if the last exporting process is done or not
+        self.below_image = None
+        self.above_image = None
 
     def toggle_hold(self):
         pos = self.pos
@@ -3629,12 +3636,15 @@ class Movie(MovieData):
                     s.blit(layers, (0, 0))
                     return s
                 layers.set_alpha(128)
-                below_image = pg.Surface((width, height), pg.SRCALPHA)
-                below_image.set_alpha(128)
-                below_image.fill(LAYERS_BELOW)
-                alpha = pg.surfarray.array_alpha(layers)
-                layers.blit(below_image, (0,0))
-                pg.surfarray.pixels_alpha(layers)[:] = alpha
+                if self.below_image is None:
+                    da = layout.drawing_area()
+                    self.below_image = pg.Surface((da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2), pg.SRCALPHA)
+                    self.below_image.set_alpha(128)
+                    self.below_image.fill(LAYERS_BELOW)
+                rgba = np.copy(rgba_array(layers)[0]) # funnily enough, this is much faster than calling array_alpha()
+                # to save a copy of just the alpha pixels [those we really need]...
+                layers.blit(self.below_image, (0,0), (0, 0, width, height))
+                rgba_array(layers)[0][:,:,3] = rgba[:,:,3]
                 self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
 
@@ -3654,17 +3664,20 @@ class Movie(MovieData):
                 layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi)
                 if not highlight or self.layer_pos == len(self.layers)-1:
                     return layers
+
                 layers.set_alpha(128)
                 s = pg.Surface((width, height), pg.SRCALPHA)
                 s.fill(BACKGROUND)
-                above_image = pg.Surface((width, height), pg.SRCALPHA)
-                above_image.set_alpha(128)
-                above_image.fill(LAYERS_ABOVE)
-                alpha = pg.surfarray.array_alpha(layers)
-                layers.blit(above_image, (0,0))
+                if self.above_image is None:
+                    da = layout.drawing_area()
+                    self.above_image = pg.Surface((da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2), pg.SRCALPHA)
+                    self.above_image.set_alpha(128)
+                    self.above_image.fill(LAYERS_ABOVE)
+                rgba = np.copy(rgba_array(layers)[0])
+                layers.blit(self.above_image, (0,0), (0, 0, width, height))
                 self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
-                pg.surfarray.pixels_alpha(s)[:] = alpha
+                rgba_array(s)[0][:,:,3] = rgba[:,:,3]
                 s.set_alpha(192)
 
                 return s
