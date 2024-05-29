@@ -2022,7 +2022,7 @@ class ZoomTool(Button):
         self.start = (x,y)
         self.max_dist = min(screen.get_width(), screen.get_height())//2
         da = layout.drawing_area()
-        self.frame_start = da.xy2frame(x,y)
+        self.frame_start = da.xy2frame(x,y,minoft=-1000000)
         self.orig_zoom = da.zoom
     def on_mouse_up(self, x, y):
         layout.drawing_area().draw()
@@ -2554,8 +2554,10 @@ class DrawingArea:
         ystart = self.ymargin-(no_margins_frame_roi[1] - frame_roi[1])/self.yscale
         sub_roi = trim_roi((xstart, ystart, frame_roi[2]/self.xscale, frame_roi[3]/self.yscale), round_xy=True, check_round=False)
         return frame_roi, sub_roi
-    def xy2frame(self, x, y):
-        return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
+    def xy2frame(self, x, y, minoft=0):
+        # we need minoft because we get small negative xoffset/yoffset upon zooming and panning to the rightmost/bottommost extent,
+        # and this throws off everything except the zoom tool which seems to need it?!.. TODO: understand and solve this properly
+        return (x - self.xmargin + max(minoft,self.xoffset))*self.xscale, (y - self.ymargin + max(minoft,self.yoffset))*self.yscale
     def roi(self, surface):
         if self.zoom == 1:
             return surface
