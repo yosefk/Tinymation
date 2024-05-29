@@ -1206,7 +1206,7 @@ font = pygame.font.Font(size=screen.get_height()//15)
 
 FADING_RATE = 3
 UNDRAWABLE = (220, 215, 190)
-MARGIN = (220-40, 215-40, 190-40)
+MARGIN = (220-80, 215-80, 190-80, 192)
 SELECTED = (220-80, 215-80, 190-80)
 UNUSED = SELECTED
 PROGRESS = (192-45, 255-25, 192-45)
@@ -2506,22 +2506,52 @@ class DrawingArea:
         self.ymargin = round((height - self.iheight)/2)
         self.set_zoom(self.zoom)
     def set_xyoffset(self, xoffset, yoffset):
-        self.xoffset = min(max(xoffset, 0), self.iwidth*(self.zoom - 1))
-        self.yoffset = min(max(yoffset, 0), self.iheight*(self.zoom - 1))
+        self.xoffset = min(max(xoffset, 0), (self.iwidth)*(self.zoom - 1))
+        self.yoffset = min(max(yoffset, 0), (self.iheight)*(self.zoom - 1))
         # make sure xoffset,yoffset correspond to an integer coordinate in the non-zoomed image,
         # otherwise the scaled image cannot match xoffset, yoffset exactly. NOTE: this causes "dancing"
         # when zooming - xy offset jumps... could be called a bad consequence of using off the shelf
         # scaling code that doesn't support backward warping from non-integer source coordinates...
-        x, y, _, _ = self.frame_roi()
-        self.xoffset = math.floor(x) * self.zoom * self.iwidth / IWIDTH
-        self.yoffset = math.floor(y) * self.zoom * self.iheight / IHEIGHT
+        #(x, y, _, _), (fx, fy, _, _) = self.frame_and_subsurface_roi()
+        xm = self.xmargin * IWIDTH / self.iwidth
+        ym = self.ymargin * IHEIGHT / self.iheight
+        x, y = [c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth - xm, self.yoffset*IHEIGHT/self.iheight - ym)]
+        self.xoffset = (math.floor(x) * self.zoom + xm) * self.iwidth / IWIDTH
+        self.yoffset = (math.floor(y) * self.zoom + ym) * self.iheight / IHEIGHT
     def set_zoom(self, zoom):
         self.zoom = zoom
         self.xscale = IWIDTH/(self.iwidth * self.zoom)
         self.yscale = IHEIGHT/(self.iheight * self.zoom)
+    def frame_and_subsurface_roi(self):
+        # ignoring margins, the roi in the drawing area shows the frame scaled by zoom and then cut
+        # to the subsurface xoffset, yoffset, iwidth, iheight
+        def trim_roi(roi, round_xy, check_round):
+            left,bottom,width,height = roi
+            left = max(0, left)
+            bottom = max(0, bottom)
+            def round_and_check(c):
+                if not round_xy:
+                    return c
+                rc = round(c)
+                if check_round:
+                    assert abs(rc - c) < 0.0001, f'expecting a coordinate value very close to an integer, got {c}'
+                return rc
+            left = round_and_check(left)
+            bottom = round_and_check(bottom)
+            width = min(width, IWIDTH-left)
+            height = min(height, IHEIGHT-bottom)
+            return left,bottom,width,height
+        no_margins_frame_roi = trim_roi([c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth, self.yoffset*IHEIGHT/self.iheight, IWIDTH, IHEIGHT)], round_xy=False, check_round=False)
+        xm = self.xmargin * IWIDTH / self.iwidth
+        ym = self.ymargin * IHEIGHT / self.iheight
+        frame_roi = trim_roi([c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth - xm, self.yoffset*IHEIGHT/self.iheight - ym, IWIDTH+xm*2, IHEIGHT+ym*2)], round_xy=True, check_round=True)
+        xstart = self.xmargin-(no_margins_frame_roi[0] - frame_roi[0])/self.xscale
+        ystart = self.ymargin-(no_margins_frame_roi[1] - frame_roi[1])/self.yscale
+        sub_roi = trim_roi((xstart, ystart, frame_roi[2]/self.xscale, frame_roi[3]/self.yscale), round_xy=True, check_round=False)
+        return frame_roi, sub_roi
     def frame_roi(self):
-        # the roi in the drawing area is xoffset, yoffset, iwidth, iheight
-        return tuple([c/self.zoom for c in (self.xoffset*(IWIDTH/self.iwidth), self.yoffset*(IHEIGHT/self.iheight), IWIDTH, IHEIGHT)])
+        frame_roi, sub_roi = self.frame_and_subsurface_roi()
+        return frame_roi
     def xy2frame(self, x, y):
         return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
     def roi(self, surface):
@@ -2555,23 +2585,26 @@ class DrawingArea:
 
         self._internal_layout()
         left, bottom, width, height = self.rect
-        if not layout.is_playing:
-            pygame.draw.rect(self.subsurface, MARGIN, (0, 0, width, self.ymargin))
-            pygame.draw.rect(self.subsurface, MARGIN, (0, 0, self.xmargin, height))
-            pygame.draw.rect(self.subsurface, MARGIN, (width-self.xmargin, 0, self.xmargin, height))
-            pygame.draw.rect(self.subsurface, MARGIN, (0, height-self.ymargin, width, self.ymargin))
 
         pos = layout.playing_index if layout.is_playing else movie.pos
         highlight = not layout.is_playing and not movie.curr_layer().locked
-        starting_point = (self.xmargin, self.ymargin)
         surfaces = []
 
-        roi = self.frame_roi() 
+        # FIXME: we need to be able to tell the difference between background covered by margins,
+        # and "empty" margins! Otherwise we are missing the benefit of drawing under the margin,
+        # which is seeing the zoom [at least we lose it more often... ??]
+        self.subsurface.fill(BACKGROUND) # TODO: optimize away?..
+
+        roi, sub_roi = self.frame_and_subsurface_roi() 
+        print('roi',roi)
+        print('sub_roi',sub_roi)
+        starting_point = (sub_roi[0], sub_roi[1]) # (self.xmargin, self.ymargin)
+        iwidth, iheight = sub_roi[2], sub_roi[3]
         with draw_bottom_timer:
             surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight, roi=roi))
         if movie.layers[movie.layer_pos].visible:
             with draw_curr_timer:
-                scaled_layer = movie.get_thumbnail(pos, self.iwidth, self.iheight, transparent_single_layer=movie.layer_pos, roi=roi)
+                scaled_layer = movie.get_thumbnail(pos, iwidth, iheight, transparent_single_layer=movie.layer_pos, roi=roi)
             surfaces.append(scaled_layer)
         with draw_top_timer:
             surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight, roi=roi))
@@ -2587,6 +2620,13 @@ class DrawingArea:
 
         with draw_blits_timer:
             self.subsurface.blits([(surface, starting_point) for surface in surfaces])
+
+        if not layout.is_playing:
+            pygame.gfxdraw.box(self.subsurface, (0, 0, width, self.ymargin), MARGIN)
+            pygame.gfxdraw.box(self.subsurface, (0, self.ymargin, self.xmargin, height-self.ymargin), MARGIN)
+            pygame.gfxdraw.box(self.subsurface, (width-self.xmargin, self.ymargin, self.xmargin, height-self.ymargin), MARGIN)
+            pygame.gfxdraw.box(self.subsurface, (self.xmargin, height-self.ymargin, width-self.xmargin*2, self.ymargin), MARGIN)
+
         drawing_area_draw_timer.stop()
 
     def clear_fading_mask(self):
