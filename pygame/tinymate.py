@@ -1772,7 +1772,7 @@ def scale_and_preserve_aspect_ratio(w, h, width, height):
     else:
         scaled_height = h*width/w
         scaled_width = w*scaled_height/h
-    return scaled_width, scaled_height
+    return round(scaled_width), round(scaled_height)
 
 class Button:
     def __init__(self):
@@ -1838,7 +1838,8 @@ class PenTool(Button):
         self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
         if self.eraser:
             if not self.alpha_surface:
-                self.alpha_surface = pg.Surface((layout.drawing_area().iwidth, layout.drawing_area().iheight), pg.SRCALPHA)
+                da = layout.drawing_area()
+                self.alpha_surface = pg.Surface((da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2), pg.SRCALPHA)
             pg.surfarray.pixels_red(self.alpha_surface)[:] = 0
         self.on_mouse_move(x,y)
         pen_down_timer.stop()
@@ -1958,8 +1959,9 @@ class PenTool(Button):
         expose_other_layers = self.eraser and color[3]==0 #TODO: maybe expose other layers for non-transparent colors, too?
         if expose_other_layers:
             color = (255,0,0,0)
-        draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface
-        ox,oy = (0,0) if not expose_other_layers else (drawing_area.xmargin, drawing_area.ymargin)
+        roi, (xstart, ystart, iwidth, iheight) = drawing_area.frame_and_subsurface_roi()
+        draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface.subsurface((xstart, ystart, iwidth, iheight))
+        ox,oy = (0,0) if not expose_other_layers else (xstart, ystart)
         if self.prev_drawn:
             drawLine(draw_into, (self.prev_drawn[0]-ox, self.prev_drawn[1]-oy), (x-ox,y-oy), color, self.width)
         # FIXME: adapt brush width to scale?..
@@ -1985,9 +1987,8 @@ class PenTool(Button):
                 salpha = pg.surfarray.pixels_alpha(s)
                 salpha[left:right+1, bottom:top+1] = orig_alpha
 
-            roi = drawing_area.frame_roi()
-            render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True, width=drawing_area.iwidth, height=drawing_area.iheight, roi=roi))
-            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True, width=drawing_area.iwidth, height=drawing_area.iheight, roi=roi))
+            render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True, width=iwidth, height=iheight, roi=roi))
+            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True, width=iwidth, height=iheight, roi=roi))
             render_surface(layout.timeline_area().combined_light_table_mask())
 
         self.prev_drawn = (x,y) 
@@ -2506,13 +2507,12 @@ class DrawingArea:
         self.ymargin = round((height - self.iheight)/2)
         self.set_zoom(self.zoom)
     def set_xyoffset(self, xoffset, yoffset):
-        self.xoffset = min(max(xoffset, 0), (self.iwidth)*(self.zoom - 1))
-        self.yoffset = min(max(yoffset, 0), (self.iheight)*(self.zoom - 1))
+        self.xoffset = min(max(xoffset, 0), self.iwidth*(self.zoom - 1))
+        self.yoffset = min(max(yoffset, 0), self.iheight*(self.zoom - 1))
         # make sure xoffset,yoffset correspond to an integer coordinate in the non-zoomed image,
         # otherwise the scaled image cannot match xoffset, yoffset exactly. NOTE: this causes "dancing"
         # when zooming - xy offset jumps... could be called a bad consequence of using off the shelf
         # scaling code that doesn't support backward warping from non-integer source coordinates...
-        #(x, y, _, _), (fx, fy, _, _) = self.frame_and_subsurface_roi()
         xm = self.xmargin * IWIDTH / self.iwidth
         ym = self.ymargin * IHEIGHT / self.iheight
         x, y = [c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth - xm, self.yoffset*IHEIGHT/self.iheight - ym)]
@@ -2549,9 +2549,6 @@ class DrawingArea:
         ystart = self.ymargin-(no_margins_frame_roi[1] - frame_roi[1])/self.yscale
         sub_roi = trim_roi((xstart, ystart, frame_roi[2]/self.xscale, frame_roi[3]/self.yscale), round_xy=True, check_round=False)
         return frame_roi, sub_roi
-    def frame_roi(self):
-        frame_roi, sub_roi = self.frame_and_subsurface_roi()
-        return frame_roi
     def xy2frame(self, x, y):
         return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
     def roi(self, surface):
@@ -2567,7 +2564,8 @@ class DrawingArea:
                 id2version, comp = key
                 return id2version, ('scaled-to-drawing-area', comp, self.zoom, self.xoffset, self.yoffset)
             def compute_value(_):
-                return scale_image(surface.subsurface(self.frame_roi()), self.iwidth, self.iheight)
+                frame_roi, (_, _, iwidth, iheight) = self.frame_and_subsurface_roi()
+                return scale_image(surface.subsurface(frame_roi), iwidth, iheight)
         return cache.fetch(ScaledSurface())
     def set_fading_mask(self, fading_mask, skeleton=None):
         self.fading_mask_version += 1
@@ -2586,28 +2584,30 @@ class DrawingArea:
         self._internal_layout()
         left, bottom, width, height = self.rect
 
+        def draw_margin(margin_color):
+            pygame.gfxdraw.box(self.subsurface, (0, 0, width, self.ymargin), margin_color)
+            pygame.gfxdraw.box(self.subsurface, (0, self.ymargin, self.xmargin, height-self.ymargin), margin_color)
+            pygame.gfxdraw.box(self.subsurface, (width-self.xmargin, self.ymargin, self.xmargin, height-self.ymargin), margin_color)
+            pygame.gfxdraw.box(self.subsurface, (self.xmargin, height-self.ymargin, width-self.xmargin*2, self.ymargin), margin_color)
+
+        if not layout.is_playing:
+            draw_margin(BACKGROUND)
+
         pos = layout.playing_index if layout.is_playing else movie.pos
         highlight = not layout.is_playing and not movie.curr_layer().locked
         surfaces = []
 
-        # FIXME: we need to be able to tell the difference between background covered by margins,
-        # and "empty" margins! Otherwise we are missing the benefit of drawing under the margin,
-        # which is seeing the zoom [at least we lose it more often... ??]
-        self.subsurface.fill(BACKGROUND) # TODO: optimize away?..
-
         roi, sub_roi = self.frame_and_subsurface_roi() 
-        print('roi',roi)
-        print('sub_roi',sub_roi)
-        starting_point = (sub_roi[0], sub_roi[1]) # (self.xmargin, self.ymargin)
+        starting_point = (sub_roi[0], sub_roi[1])
         iwidth, iheight = sub_roi[2], sub_roi[3]
         with draw_bottom_timer:
-            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight, roi=roi))
+            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=iwidth, height=iheight, roi=roi))
         if movie.layers[movie.layer_pos].visible:
             with draw_curr_timer:
                 scaled_layer = movie.get_thumbnail(pos, iwidth, iheight, transparent_single_layer=movie.layer_pos, roi=roi)
             surfaces.append(scaled_layer)
         with draw_top_timer:
-            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, width=self.iwidth, height=self.iheight, roi=roi))
+            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, width=iwidth, height=iheight, roi=roi))
 
         if not layout.is_playing:
             with draw_light_timer:
@@ -2621,11 +2621,8 @@ class DrawingArea:
         with draw_blits_timer:
             self.subsurface.blits([(surface, starting_point) for surface in surfaces])
 
-        if not layout.is_playing:
-            pygame.gfxdraw.box(self.subsurface, (0, 0, width, self.ymargin), MARGIN)
-            pygame.gfxdraw.box(self.subsurface, (0, self.ymargin, self.xmargin, height-self.ymargin), MARGIN)
-            pygame.gfxdraw.box(self.subsurface, (width-self.xmargin, self.ymargin, self.xmargin, height-self.ymargin), MARGIN)
-            pygame.gfxdraw.box(self.subsurface, (self.xmargin, height-self.ymargin, width-self.xmargin*2, self.ymargin), MARGIN)
+        margin_color = UNDRAWABLE if layout.is_playing else MARGIN
+        draw_margin(margin_color)
 
         drawing_area_draw_timer.stop()
 
@@ -4372,7 +4369,6 @@ def process_keydown_event(event):
 
     if ctrl and isinstance(layout.tool, FlashlightTool):
         try_set_cursor(needle_cursor[0])
-        return
 
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
     if event.key == pg.K_SPACE:
