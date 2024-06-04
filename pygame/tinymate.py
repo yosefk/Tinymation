@@ -1479,7 +1479,7 @@ def bspline_interp(points, suggest_options, existing_lines):
     fit_curve_timer.stop()
     return results
 
-def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height):
+def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points):
     results = []
     def add_results(px, py):
         minx = math.floor(max(0, np.min(px) - pwidth - 1))
@@ -1506,7 +1506,7 @@ def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_
         points = [(x+eps, y+eps)] + points
     try:
         for path in bspline_interp(points, suggest_options, existing_lines):
-            px, py = path[0], path[1]
+            px, py = filter_points(path[0], path[1])
             add_results(px, py)
     except:
         px = np.array([x for x,y in points])
@@ -1515,7 +1515,7 @@ def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_
 
     return results
 
-def drawLines(image_height, image_width, points, width, suggest_options, existing_lines):
+def drawLines(image_height, image_width, points, width, suggest_options, existing_lines, filter_points=lambda px, py: (px, py)):
     global fig_dict
     global ax_dict
     global fig
@@ -1545,7 +1545,7 @@ def drawLines(image_height, image_width, points, width, suggest_options, existin
     pwidth = width
     width *= 72 / fig.get_dpi()
 
-    return plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height)
+    return plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points)
 
 def drawCircle( screen, x, y, color, width):
     pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -2002,8 +2002,10 @@ class PenTool(Button):
 class PanTool(Button):
     def on_mouse_down(self, x, y):
         self.start = (x,y)
-        self.sxo = layout.drawing_area().xoffset
-        self.syo = layout.drawing_area().yoffset
+        da = layout.drawing_area()
+        self.sxo = da.xoffset
+        self.syo = da.yoffset
+        da.set_zoom_center((x,y))
     def on_mouse_up(self, x, y):
         layout.drawing_area().draw()
     def on_mouse_move(self, x, y):
@@ -2017,32 +2019,47 @@ class PanTool(Button):
         if layout.drawing_area().zoom > 1:
             return Button.hit(*args)
 
+MIN_ZOOM, MAX_ZOOM = 1, 5
+
 class ZoomTool(Button):
     def on_mouse_down(self, x, y):
         self.start = (x,y)
-        self.max_dist = min(screen.get_width(), screen.get_height())//2
         da = layout.drawing_area()
+        abs_y = y + da.rect[1]
+        h = screen.get_height()
+        self.max_up_dist = min(.85 * abs_y, h * .3 * (MAX_ZOOM - da.zoom)/(MAX_ZOOM - MIN_ZOOM))
+        self.max_down_dist = min(.85 * (h - abs_y), h * .3 * (da.zoom - MIN_ZOOM)/(MAX_ZOOM - MIN_ZOOM))
         self.frame_start = da.xy2frame(x,y,minoft=-1000000)
         self.orig_zoom = da.zoom
+        da.set_zoom_center(self.start)
     def on_mouse_up(self, x, y):
         layout.drawing_area().draw()
     def on_mouse_move(self, x, y):
         px, py = self.start
-        dist = abs(y - py)
-        ratio = min(1, max(0, dist/self.max_dist))
-        MIN_ZOOM, MAX_ZOOM = 1, 5
-        zoom_change = ratio*(MAX_ZOOM - MIN_ZOOM)
-        if y > py:
+        up = y < py
+        if (up and self.max_up_dist == 0) or (not up and self.max_down_dist == 0):
+            return
+
+        da = layout.drawing_area()
+        dist = abs(py - y) #math.sqrt(sqdist((x,y), (px,py)))#abs(y - py)
+        ratio = min(1, max(0, dist/(self.max_up_dist if up else self.max_down_dist)))
+        zoom_change = ratio*((MAX_ZOOM - self.orig_zoom) if up else (self.orig_zoom - MIN_ZOOM))
+        if not up:
             zoom_change = -zoom_change
         new_zoom = max(MIN_ZOOM,min(self.orig_zoom + zoom_change, MAX_ZOOM))
-        da = layout.drawing_area()
         da.set_zoom(new_zoom)
 
-        # we want xy2frame(self.start) to return the same value through the zooming [if possible]
+        # we want xy2frame(self.start) to return the same value at the beginnig of the zooming [if possible]
+        # we then want xy2frame(iwidth/2, iheight/2) to eventually converge to self.frame_start [if possible]
+        # centerx, centery is somewhere between these two "x/yoffset-defining" points
+        centerx = (da.iwidth/2)*ratio + px*(1-ratio)
+        centery = (da.iheight/2)*ratio + py*(1-ratio)
         framex, framey = self.frame_start
-        xoffset = framex/da.xscale - px + da.xmargin
-        yoffset = framey/da.yscale - py + da.ymargin
+        xoffset = framex/da.xscale - centerx + da.xmargin
+        yoffset = framey/da.yscale - centery + da.ymargin
         da.set_xyoffset(xoffset, yoffset)
+
+        da.set_zoom_center(da.frame2xy(*self.frame_start))
 
 class NewDeleteTool(PenTool):
     def __init__(self, frame_func, clip_func, layer_func):
@@ -2175,7 +2192,7 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
         
     sk_timer.start()
     skx, sky = fixed_size_image_region(x, y, SK_WIDTH, SK_HEIGHT)
-    skeleton = skeletonize(np.ascontiguousarray(flood_mask[skx,sky]))
+    skeleton = skeletonize(np.ascontiguousarray(flood_mask[skx,sky])).astype(np.uint8)
     sk_timer.stop()
 
     fmb = binary_dilation(binary_dilation(skeleton))
@@ -2249,18 +2266,77 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     npoints = 3
     xs = np.zeros(npoints, int)
     ys = np.zeros(npoints, int)
+
+    nextra = 100
+    xs1 = np.zeros(nextra, int)
+    ys1 = np.zeros(nextra, int)
+    n1 = np.array([nextra], int)
+    xs2 = np.zeros(nextra, int)
+    ys2 = np.zeros(nextra, int)
+    n2 = np.array([nextra], int)
+
+    # TODO: if the closest point on the skeleton is near invisible (due to the past distance computation),
+    # maybe better to recompute the distances and repaint instead of going ahead and patching?..
     found = tinylib.patch_hole(lines_ptr, lines_stride, sk_ptr, sk_stride, width, height, y-sky.start, x-skx.start,
-                               HOLE_REGION_H, HOLE_REGION_W, arr_base_ptr(ys), arr_base_ptr(xs), npoints)
+                               HOLE_REGION_H, HOLE_REGION_W, arr_base_ptr(ys), arr_base_ptr(xs), npoints,
+                               arr_base_ptr(ys1), arr_base_ptr(xs1), arr_base_ptr(n1),
+                               arr_base_ptr(ys2), arr_base_ptr(xs2), arr_base_ptr(n2))
+
     if found < 3:
         return False
+    n1 = n1[0]
+    n2 = n2[0]
+    xs1 = xs1[:n1]
+    ys1 = ys1[:n1]
+    xs2 = xs2[:n2]
+    ys2 = ys2[:n2]
+    #skeleton[xs,ys] = 5
+    #skeleton[xs1,ys1] = 6
+    #skeleton[xs2,ys2] = 7
+    #print('LP xs ys',lines[xs+skx.start,ys+sky.start])
+    #imageio.imwrite('lines-skel.png', skeleton.astype(np.uint8)*(256//8))
+    #imageio.imwrite('lines-bin.png', lines_patch.astype(np.uint8)*127)
 
-    xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]
-    ys = [ys[0], ys[0]*0.9 + ys[1]*0.1, ys[1], ys[1]*0.1 + ys[2]*0.9, ys[2]]
+    endp1 = xs[0]+skx.start, ys[0]+sky.start
+    endp2 = xs[2]+skx.start, ys[2]+sky.start
+
+    if n1 == 0 and n2 == 0: #  just 3 points - create 5 points to fit a curve
+        # through the point on the skeleton and the 2 endpoints
+        xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]
+        ys = [ys[0], ys[0]*0.9 + ys[1]*0.1, ys[1], ys[1]*0.1 + ys[2]*0.9, ys[2]]
+    else: # we have enough points to not depend on the exact point
+        # on the skeleton
+        def pad(c, n): # a crude way to add weight to a "lone endpoint",
+            # absent this the line fitting can fail to reach it
+            eps = 0.0001
+            return [c+eps*i for i in range(1 + 9*(n==0))]
+        xs = pad(xs[0],n1) + pad(xs[2],n2)
+        ys = pad(ys[0],n1) + pad(ys[2],n2)
+
+
+    # +.5 because line skeletonization done inside tinylib.patch_hole
+    # seems to move "the line center of mass" by about half a pixel
+    #print(xs1[::-1]+.5, xs, xs2+.5)
+    #print(ys1[::-1]+.5, ys, ys2+.5)
+    xs = np.concatenate((xs1[::-1]+.5, xs, xs2+.5))
+    ys = np.concatenate((ys1[::-1]+.5, ys, ys2+.5))
     lines_patch[:] = 0
     skeleton[:] = 0
     points=[(x+skx.start,y+sky.start) for x,y in zip(xs,ys)]
 
-    new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines)[0]
+    def filter_points(px, py):
+        start = 0
+        end = -1
+        for i in range(len(px)):
+            if not start and (px[i] - endp1[0])**2 + (py[i] - endp1[1])**2 < 4:
+                start = i
+                break
+        for i in reversed(range(len(px))):
+            if end < 0 and (px[i] - endp2[0])**2 + (py[i] - endp2[1])**2 < 4:
+                end = i
+                break
+        return px[start:end], py[start:end]
+    new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines, filter_points=filter_points)[0]
 
     history_item = HistoryItem('lines', bbox)
     (minx, miny, maxx, maxy) = bbox
@@ -2500,6 +2576,7 @@ class DrawingArea:
         self.iwidth = 0
         self.iheight = 0
         self.zoom = 1
+        self.zoom_center = (0, 0)
         self.xoffset = 0
         self.yoffset = 0
         self.fading_mask_version = 0
@@ -2511,7 +2588,25 @@ class DrawingArea:
         self.xmargin = round((width - self.iwidth)/2)
         self.ymargin = round((height - self.iheight)/2)
         self.set_zoom(self.zoom)
+
+        w, h = ((self.iwidth+self.xmargin*2 + self.iheight+self.ymargin*2)//2,)*2
+        self.zoom_surface = pg.Surface((w,h ), pg.SRCALPHA)
+        self.zoom_surface.fill(([(a+b)//2 for a,b in zip(MARGIN[:3], BACKGROUND[:3])]))
+        rgb = pg.surfarray.pixels3d(self.zoom_surface)
+        alpha = pg.surfarray.pixels_alpha(self.zoom_surface)
+        yv, xv = np.meshgrid(np.arange(h), np.arange(w))
+        cx, cy = w/2, h/2
+        dist = np.sqrt((xv-cx)**2 + (yv-cy)**2)
+        mdist = np.max(dist)
+        rgb[dist >= 0.7*mdist] = MARGIN[:3]
+        dist = np.minimum(np.maximum(dist, mdist*0.43), mdist*0.7)
+        norm_dist = np.maximum(0, dist-mdist*0.43)/(mdist*(0.7-0.43))
+        grad = (1 + np.sin(30*norm_dist**1.3))/2
+        for i in range(3):
+            rgb[:,:,i] = (BACKGROUND[i]*grad +MARGIN[i]*(1-grad))
+        alpha[:] = MARGIN[-1]*norm_dist
     def set_xyoffset(self, xoffset, yoffset):
+        prevxo, prevyo = self.xoffset, self.yoffset
         self.xoffset = min(max(xoffset, 0), self.iwidth*(self.zoom - 1))
         self.yoffset = min(max(yoffset, 0), self.iheight*(self.zoom - 1))
         # make sure xoffset,yoffset correspond to an integer coordinate in the non-zoomed image,
@@ -2523,10 +2618,14 @@ class DrawingArea:
         x, y = [c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth - xm, self.yoffset*IHEIGHT/self.iheight - ym)]
         self.xoffset = (math.floor(x) * self.zoom + xm) * self.iwidth / IWIDTH
         self.yoffset = (math.floor(y) * self.zoom + ym) * self.iheight / IHEIGHT
+
+        zx, zy = self.zoom_center
+        self.zoom_center = zx - (self.xoffset - prevxo), zy - (self.yoffset - prevyo)
     def set_zoom(self, zoom):
         self.zoom = zoom
         self.xscale = IWIDTH/(self.iwidth * self.zoom)
         self.yscale = IHEIGHT/(self.iheight * self.zoom)
+    def set_zoom_center(self, center): self.zoom_center = center
     def frame_and_subsurface_roi(self):
         # ignoring margins, the roi in the drawing area shows the frame scaled by zoom and then cut
         # to the subsurface xoffset, yoffset, iwidth, iheight
@@ -2558,6 +2657,8 @@ class DrawingArea:
         # we need minoft because we get small negative xoffset/yoffset upon zooming and panning to the rightmost/bottommost extent,
         # and this throws off everything except the zoom tool which seems to need it?!.. TODO: understand and solve this properly
         return (x - self.xmargin + max(minoft,self.xoffset))*self.xscale, (y - self.ymargin + max(minoft,self.yoffset))*self.yscale
+    def frame2xy(self, framex, framey):
+        return framex/self.xscale + self.xmargin - self.xoffset, framey/self.yscale + self.ymargin - self.yoffset
     def roi(self, surface):
         if self.zoom == 1:
             return surface
@@ -2628,10 +2729,24 @@ class DrawingArea:
         with draw_blits_timer:
             self.subsurface.blits([(surface, starting_point) for surface in surfaces])
 
-        margin_color = UNDRAWABLE if layout.is_playing else MARGIN
-        draw_margin(margin_color)
+        if self.zoom > 1:
+            self.draw_zoom_surface()
+        else:
+            margin_color = UNDRAWABLE if layout.is_playing else MARGIN
+            draw_margin(margin_color)
 
         drawing_area_draw_timer.stop()
+
+    def draw_zoom_surface(self):
+        start_x = int(self.zoom_center[0] - self.zoom_surface.get_width()/2)
+        start_y = int(self.zoom_center[1] - self.zoom_surface.get_height()/2)
+        self.subsurface.blit(self.zoom_surface, (start_x, start_y))
+        end_x = start_x + self.zoom_surface.get_width()
+        end_y = start_y + self.zoom_surface.get_height()
+        pygame.gfxdraw.box(self.subsurface, (0, 0, self.subsurface.get_width(), start_y), MARGIN)
+        pygame.gfxdraw.box(self.subsurface, (0, end_y, self.subsurface.get_width(), self.subsurface.get_height()), MARGIN)
+        pygame.gfxdraw.box(self.subsurface, (0, start_y, start_x, end_y-start_y), MARGIN)
+        pygame.gfxdraw.box(self.subsurface, (end_x, start_y, self.subsurface.get_width(), end_y-start_y), MARGIN)
 
     def clear_fading_mask(self):
         global last_skeleton

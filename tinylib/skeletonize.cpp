@@ -3,8 +3,9 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
-#include <tbb/parallel_for.h>
-#include <tbb/global_control.h>
+#include <algorithm>
+//#include <tbb/parallel_for.h>
+//#include <tbb/global_control.h>
 
 static const uint8_t lut[256] =
                             {0, 0, 0, 1, 0, 0, 1, 3, 0, 0, 3, 1, 1, 0,
@@ -27,10 +28,9 @@ static const uint8_t lut[256] =
                              0, 0, 3, 3, 0, 1, 0, 0, 0, 0, 2, 2, 0, 0,
                              2, 0, 0, 0};
 
-static int threads = atoi(getenv("TBB_NUM_THREADS") ? getenv("TBB_NUM_THREADS") : "4");
+//static int threads = atoi(getenv("TBB_NUM_THREADS") ? getenv("TBB_NUM_THREADS") : "4");
 
 //TODO: resurrect; ATM don't want to bother with TBB, margins...
-#if SKEL
 void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_stride, int width, int height) 
 {
 	int l = -1;
@@ -44,6 +44,7 @@ void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_
 	uint8_t* next_skeleton = new uint8_t[sk_stride*height]; 
 
 	//FIXME: do this properly...
+	if(0) {
 	uint8_t* fimg = (uint8_t*)image;
 	memset(fimg, 0, im_stride);
 	memset(fimg+im_stride*(height-1), 0, im_stride);
@@ -51,6 +52,7 @@ void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_
 		uint8_t* r = fimg + im_stride*y;
 		r[0]=0;
 		r[width-1]=0;
+	}
 	}
 
 	//FIXME: copy per row!! we have different strides... or force them being the same...
@@ -72,8 +74,8 @@ void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_
 
 	int passes = 0;
 
-	printf("max_allowed_parallelism %d\n", threads);
-	oneapi::tbb::global_control global_limit(oneapi::tbb::global_control::max_allowed_parallelism, threads);
+	//printf("max_allowed_parallelism %d\n", threads);
+	//oneapi::tbb::global_control global_limit(oneapi::tbb::global_control::max_allowed_parallelism, threads);
 
 	int skipped = 0;
 	int total = 0;
@@ -87,7 +89,7 @@ void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_
 			passes++;
 //#pragma omp parallel for num_threads(16) schedule(dynamic, 16)
 
-
+#if TBB
 			tbb::parallel_for(tbb::blocked_range<int>(1, height-1, 16), [&](const tbb::blocked_range<int>& ys) {
 #if 0
 			    bool passive = true;
@@ -104,8 +106,9 @@ void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_
 			    }
 #endif
 			    for(int y=ys.begin(); y<ys.end(); ++y) {
-//
-//			for(int y=1; y<height-1; ++y) {
+#else
+			for(int y=1; y<height-1; ++y) {
+#endif
 				uint8_t* curr_row = curr_skeleton + sk_stride*y;
 				uint8_t* next_row = next_skeleton + sk_stride*y;
 				for(int x=1; x<width-1; ++x) {
@@ -130,7 +133,9 @@ void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_
 				}
 //			}
 			    }
+#if TBB
 			}, tbb::simple_partitioner());
+#endif
 			//
 			//
 			memcpy(curr_skeleton, next_skeleton, sk_stride * height);
@@ -144,7 +149,5 @@ void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_
 		}
 	}
 	delete [] next_skeleton;
-	printf("total passes: %d\n", passes);
-	printf("skipped %f\n", 100*double(skipped)/total);
+	//printf("total passes: %d\n", passes);
 }
-#endif

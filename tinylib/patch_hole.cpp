@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 
 extern "C" void flood_fill_mask(unsigned char* mask, int mask_stride,
 	       int width, int height, int seed_x, int seed_y, int mask_new_val,
@@ -49,6 +50,8 @@ enum CantPatchReason
 	NoClosestPointOnLines = -4
 };
 
+void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_stride, int width, int height);
+
 //we modify the skeleton in-place
 //
 //find the closest point to x,y on the skeleton
@@ -62,8 +65,9 @@ enum CantPatchReason
 //writes coordinates of the points to draw a line through into xs[] and ys[]
 //returns a non-zero number of coordinates iff there's a hole to patch
 //and there was enough room in xs[] and ys[] for the output
-int patch_hole(const uint8_t* lines, int lines_stride, uint8_t* skeleton, int sk_stride, int width, int height, int cx, int cy,
-	       int patch_region_w, int patch_region_h, int* xs, int* ys, int max_coord)
+int patch_hole(uint8_t* lines, int lines_stride, uint8_t* skeleton, int sk_stride, int width, int height, int cx, int cy,
+	       int patch_region_w, int patch_region_h, int* xs, int* ys, int max_coord,
+	       int* xs1, int* ys1, int *max1, int* xs2, int* ys2, int *max2)
 {
 	if(max_coord < 3) {
 		return NotEnoughCoordinates;
@@ -128,6 +132,97 @@ int patch_hole(const uint8_t* lines, int lines_stride, uint8_t* skeleton, int sk
 			return NoClosestPointOnLines;
 		}
 	}
+
+	//skeletonize the lines and try to find additional points for line fitting so we have a smooth fit
+	//(this helps when patching a hole in a circle, for example; doesn't work when patching a hole between
+	//two nearly parallel lines - in the latter case we will hit a "junction" in the skeleton immediately,
+	//finding nothing
+	for(int y=0; y<height; ++y) {
+		for(int x=0; x<width; ++x) {
+			int i = lines_stride*y + x;
+			lines[i] = lines[i] == 255; //skeletonize expects a binary image
+		}
+	}
+
+	std::vector<uint8_t> lines_skeleton(width*height);
+	skeletonize(lines, lines_stride, &lines_skeleton[0], width, width, height);
+	//fill the boundary with 1s if we had 255 there (special case of patching holes near image boundaries)
+	for(int y=0; y<height; ++y) {
+		for(int x=0; x<width; ++x) {
+			if(x==0 || y==0 || x==width-1 || y==height-1) {
+				int i = lines_stride*y + x;
+				lines[i] = lines[i] == 255;
+			}
+		}
+	}
+
+	int* xarr[] = {xs1, xs2};
+	int* yarr[] = {ys1, ys2};
+	int* maxarr[] = {max1, max2};
+	for(int c=0; c<2; ++c) {
+		int cx, cy;
+		//we can't assume that the closest points are on the lines _skeleton_ - they're definitely
+		//on the lines but not necessarily on the skeleton which is "thinner"
+		found = find_closest_point(width, height, xs[c*2], ys[c*2], cx, cy, [&](int x, int y) {
+			return lines_skeleton[width*y + x];
+		});
+		//printf("closest on lines was %d %d -> on the skeleton %d %d\n", xs[c*2], ys[c*2], cx, cy);
+		if(!found) {
+			*maxarr[c] = 0;
+			continue;
+		}
+		int i;
+		int maxc = *maxarr[c];
+		int px = cx, py = cy; //remember the previous non-zero neighbor to not traverse it again
+		for(i=0; i<maxc; ++i) {
+			//if we have a single non-zero neighbor, add it to the coordinate array
+			int nzx = 0;
+			int nzy = 0;
+			int num_nz = 0;
+			for(int yo=-1; yo<=1; ++yo) {
+				for(int xo=-1; xo<=1; ++xo) {
+					int x = cx + xo;
+					int y = cy + yo;
+					if(x < 0 || x >= width || y < 0 || y >= height) {
+						continue;
+					}
+					if((x == cx && y == cy) || (x == px && y == py)) {
+						continue;
+					}
+					if(lines_skeleton[width*y + x]) {
+						//printf("nz: %d %d - %d %d \n", x, y, yo, xo);
+						num_nz++;
+						nzx = x;
+						nzy = y;
+					}
+					else {
+						//printf("z: %d %d - ls %d color %d [%d]\n", x, y, lines_skeleton[width*y + x], skeleton[sk_stride*y + x] == region_color[c], skeleton[sk_stride*y + x]);
+					}
+				}
+			}
+			if(num_nz == 1) {
+				xarr[c][i] = nzx;
+				yarr[c][i] = nzy;
+				px = cx;
+				py = cy;
+				cx = nzx;
+				cy = nzy;
+			}
+			else {  //if we have no non-zero neighbors, we obviously can't add any more
+			        //coordinates for line fitting; if we have more than one neighbor,
+			        //it's a "fork" and we can't guess which path to take
+			        //printf("c=%d quitting at i=%d x=%d y=%d found %d non-zero neighbors\n", c, i, cx, cy, num_nz);
+				break;
+			}
+		}
+		*maxarr[c] = i;
+	}
+	//for debugging
+	//for(int y=0; y<height; ++y) {
+	//	for(int x=0; x<width; ++x) {
+	//		skeleton[sk_stride*y + x] = lines_skeleton[width*y + x];
+	//	}
+	//}
 
 	return 3;
 }
