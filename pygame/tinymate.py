@@ -1639,6 +1639,7 @@ garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE*2))
 zoom_cursor = load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*2))
 pan_cursor = load_cursor('pan.png', hot_spot=(0.5, 0.5), size=int(CURSOR_SIZE*2))
+finger_cursor = load_cursor('finger.png', hot_spot=(0.85, 0.17))
 
 # for locked screen
 empty_cursor = pg.cursors.Cursor((0,0), pg.Surface((10,10), pg.SRCALPHA))
@@ -1648,12 +1649,21 @@ empty_cursor = pg.cursors.Cursor((0,0), pg.Surface((10,10), pg.SRCALPHA))
 # we reset it again before entering the event loop.
 # if the cursors cannot be set the selected tool can still be inferred by
 # the darker background of the tool selection button.
+prev_cursor = None
+curr_cursor = None
 def try_set_cursor(c):
     try:
+        global curr_cursor
+        global prev_cursor
         pg.mouse.set_cursor(c)
+        prev_cursor = curr_cursor
+        curr_cursor = c
     except:
         pass
 try_set_cursor(pencil_cursor[0])
+
+def restore_cursor():
+    try_set_cursor(prev_cursor)
 
 def bounding_rectangle_of_a_boolean_mask(mask):
     # Sum along the vertical and horizontal axes
@@ -3092,9 +3102,12 @@ class TimelineArea:
             return
         if self.update_hold(x,y):
             return
+        try_set_cursor(finger_cursor[0])
         self.prevx = x
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
+        if self.prevx:
+            restore_cursor()
     def on_mouse_move(self,x,y):
         timeline_move_timer.start()
         self._on_mouse_move(x,y)
@@ -3264,8 +3277,11 @@ class LayersArea:
         f = self.y2frame(y)
         if f == movie.layer_pos:
             self.prevy = y
+            try_set_cursor(finger_cursor[0])
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
+        if self.prevy:
+            restore_cursor()
     def on_mouse_move(self,x,y):
         self.redraw = False
         if self.prevy is None:
@@ -3426,12 +3442,14 @@ class MovieListArea:
         left, _, _, _ = self.rect
         return (x-left) // movie_list.images[0].get_width()
     def on_mouse_down(self,x,y):
+        self.prevx = None
         if layout.new_delete_tool():
             if self.x2frame(x) == 0:
                 layout.tool.clip_func()
             return
         self.prevx = x
         self.show_pos = movie_list.clip_pos
+        try_set_cursor(finger_cursor[0])
     def on_mouse_move(self,x,y):
         self.redraw = False
         if self.prevx is None:
@@ -3457,6 +3475,8 @@ class MovieListArea:
         # opening a movie is a slow operation so we don't want it to be "too interactive"
         # (like timeline scrolling) - we wait for the mouse-up event to actually open the clip
         movie_list.open_clip(self.show_pos)
+        if self.prevx is not None:
+            restore_cursor()
         self.prevx = None
         self.show_pos = None
 
