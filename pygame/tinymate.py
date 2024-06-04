@@ -2686,11 +2686,22 @@ class DrawingArea:
         m = self.scale_and_cache(self.fading_mask, key)
         m.set_alpha(self.fading_mask.get_alpha())
         return m
+    def get_zoom_pan_params(self):
+        return self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale
+    def restore_zoom_pan_params(self, params):
+        self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale = params
+    def reset_zoom_pan_params(self):
+        self.set_xyoffset(0, 0)
+        self.set_zoom(1)
     def draw(self):
         drawing_area_draw_timer.start()
 
         self._internal_layout()
         left, bottom, width, height = self.rect
+
+        if layout.is_playing:
+            zoom_params = self.get_zoom_pan_params()
+            self.reset_zoom_pan_params()
 
         def draw_margin(margin_color):
             pygame.gfxdraw.box(self.subsurface, (0, 0, width, self.ymargin), margin_color)
@@ -2734,6 +2745,9 @@ class DrawingArea:
         else:
             margin_color = UNDRAWABLE if layout.is_playing else MARGIN
             draw_margin(margin_color)
+
+        if layout.is_playing:
+            self.restore_zoom_pan_params(zoom_params)
 
         drawing_area_draw_timer.stop()
 
@@ -3336,8 +3350,7 @@ class MovieList:
     def open_history(self, clip_pos):
         global history
         history = self.histories.get(self.clips[clip_pos], History())
-        layout.drawing_area().set_xyoffset(0,0)
-        layout.drawing_area().set_zoom(1)
+        layout.drawing_area().reset_zoom_pan_params()
     def save_history(self):
         if self.clips:
             self.histories[self.clips[self.clip_pos]] = history
@@ -4219,7 +4232,8 @@ def init_layout():
                 if col == 0:
                     tool = TOOLS['zoom']
                 elif col == 1:
-                    tool = TOOLS['pan']
+                    continue
+                    #tool = TOOLS['pan']
                 elif col == 2:
                     continue
             if not tool:
