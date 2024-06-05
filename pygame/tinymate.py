@@ -2891,6 +2891,30 @@ class TimelineArea:
 
         self.toggle_hold_boundaries = (0,0,0,0)
         self.loop_boundaries = (0,0,0,0)
+        
+        self.surface = pg.Surface((self.subsurface.get_width(), self.subsurface.get_height()), pg.SRCALPHA)
+        self._prepare_scroll_surfaces()
+
+    def _prepare_scroll_surfaces(self):
+        h = self.subsurface.get_height()
+        scroll_size = (int(h*.35), h*2)
+        self.scroll_left = pg.Surface(scroll_size, pg.SRCALPHA)
+        self.scroll_right = pg.Surface(scroll_size, pg.SRCALPHA)
+
+        rgb_left = pg.surfarray.pixels3d(self.scroll_left)
+        rgb_right = pg.surfarray.pixels3d(self.scroll_right)
+
+        y, x = np.meshgrid(np.arange(scroll_size[1]), np.arange(scroll_size[0]))
+        rgb_left[:,:,0] = 255*(1 - np.abs(y - h)/(h))
+        rgb_left[:,:,1] = 128 + 127*(np.abs(y - h)/(h))
+        rgb_left[:,:,2] = 255*(1 - np.abs(y - h)/(h))
+
+        rgb_right[:] = rgb_left
+
+        alpha_left = pg.surfarray.pixels_alpha(self.scroll_left)
+        alpha_right = pg.surfarray.pixels_alpha(self.scroll_right)
+        alpha_left[:] = 255*(x/scroll_size[0])
+        alpha_right[:] = 255*(1-x/scroll_size[0])
 
     def light_table_positions(self):
         # TODO: order 
@@ -2965,6 +2989,8 @@ class TimelineArea:
     def draw(self):
         timeline_area_draw_timer.start()
 
+        self.surface.fill(UNDRAWABLE)
+
         left, bottom, width, height = self.rect
         left = 0
         frame_width = movie.curr_frame().get_width()
@@ -2979,19 +3005,19 @@ class TimelineArea:
 
         def draw_frame(pos, pos_dist, x, thumb_width):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
-            self.subsurface.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
+            self.surface.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             border = 1 + 2*(pos==movie.pos)
-            pygame.draw.rect(self.subsurface, PEN, (x, bottom, thumb_width, height), border)
+            pygame.draw.rect(self.surface, PEN, (x, bottom, thumb_width, height), border)
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
                 eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
                 eye_x = x + 2 if pos_dist < 0 else x+thumb_width-eye.get_width() - 2
-                self.subsurface.blit(eye, (eye_x, bottom), eye.get_rect())
+                self.surface.blit(eye, (eye_x, bottom), eye.get_rect())
                 self.eye_boundaries.append((eye_x, bottom, eye_x+eye.get_width(), bottom+eye.get_height(), pos_dist))
             elif len(movie.frames)>1:
                 mode = self.loop_icon if self.loop_mode else self.arrow_icon
                 mode_x = x + thumb_width - mode.get_width() - 2
-                self.subsurface.blit(mode, (mode_x, bottom), mode.get_rect())
+                self.surface.blit(mode, (mode_x, bottom), mode.get_rect())
                 self.loop_boundaries = (mode_x, bottom, mode_x+mode.get_width(), bottom+mode.get_height())
 
         def thumb_width(factor):
@@ -3042,6 +3068,8 @@ class TimelineArea:
 
         self.draw_hold()
 
+        self.subsurface.blit(self.surface, (0,0))
+
         timeline_area_draw_timer.stop()
 
     def draw_hold(self):
@@ -3058,7 +3086,7 @@ class TimelineArea:
                 continue
             hold_left = left-hold.get_width()/2
             hold_bottom = bottom if pos == movie.pos else bottom+height-hold.get_height()
-            self.subsurface.blit(hold, (hold_left, hold_bottom), hold.get_rect())
+            self.surface.blit(hold, (hold_left, hold_bottom), hold.get_rect())
             if pos == movie.pos:
                 self.toggle_hold_boundaries = (hold_left, hold_bottom, hold_left+hold.get_width(), hold_bottom+hold.get_height())
 
@@ -3128,6 +3156,7 @@ class TimelineArea:
             pos_dist = prev_pos - curr_pos
         else:
             pos_dist = -1 if x > self.prevx else 1
+        px = self.prevx
         self.prevx = x
         if pos_dist != 0:
             self.redraw = True
@@ -3137,6 +3166,14 @@ class TimelineArea:
             else:
                 new_pos = min(max(0, movie.pos + pos_dist), len(movie.frames)-1)
             movie.seek_frame(new_pos)
+        else:
+            y = min(max(y, 0), self.surface.get_height()-1)
+            box = (x-15, 0, 30, self.surface.get_height())
+            self.subsurface.blit(self.surface, (0, 0))
+            scroll = self.scroll_left if px < x else self.scroll_right
+            startx = x - self.scroll_right.get_width()//2 #if px < x else x
+            self.subsurface.blit(scroll.subsurface(0, self.surface.get_height()-y, scroll.get_width(), scroll.get_height()//2), (startx, 0))
+            #pygame.gfxdraw.box(self.subsurface, box, PROGRESS)
 
 class LayersArea:
     def init(self):
