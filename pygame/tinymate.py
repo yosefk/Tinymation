@@ -2809,6 +2809,55 @@ class DrawingArea:
     def on_mouse_move(self,x,y):
         layout.tool.on_mouse_move(*self.fix_xy(x,y))
 
+class ScrollIndicator:
+    def __init__(self, w, h):
+        self.surface = pg.Surface((w, h), pg.SRCALPHA)
+        scroll_size = (int(h*.35), h*2)
+        self.scroll_left = pg.Surface(scroll_size, pg.SRCALPHA)
+        self.scroll_right = pg.Surface(scroll_size, pg.SRCALPHA)
+
+        rgb_left = pg.surfarray.pixels3d(self.scroll_left)
+        rgb_right = pg.surfarray.pixels3d(self.scroll_right)
+
+        y, x = np.meshgrid(np.arange(scroll_size[1]), np.arange(scroll_size[0]))
+        yhdist = np.abs(y-h)/h
+        rgb_left[:,:,0] = 255*(1 - yhdist)
+        rgb_left[:,:,1] = 128 + 127*yhdist
+        rgb_left[:,:,2] = 255*(1 - yhdist)
+
+        rgb_right[:] = rgb_left
+
+        alpha_left = pg.surfarray.pixels_alpha(self.scroll_left)
+        alpha_right = pg.surfarray.pixels_alpha(self.scroll_right)
+        alpha_left[:] = 255*(x/scroll_size[0])
+        alpha_right[:] = 255*(1-x/scroll_size[0])
+
+        self.prev_draw_rect = None
+        self.last_dir_change_x = None
+        self.last_dir_is_left = None
+
+    def draw(self, surface, px, x, y):
+        if self.prev_draw_rect is not None:
+            try:
+                surface.blit(self.surface.subsurface(self.prev_draw_rect), (self.prev_draw_rect[0], 0))
+            except:
+                surface.blit(self.surface, (0, 0))
+        y = min(max(y, 0), surface.get_height()-1)
+        if self.last_dir_change_x is None:
+            left = px < x
+            self.last_dir_change_x = px
+        else:
+            if abs(x - self.last_dir_change_x) < self.scroll_left.get_width()//4:
+                left = self.last_dir_is_left
+            else:
+                left = self.last_dir_change_x < x
+                self.last_dir_change_x = x
+        scroll = self.scroll_left if left else self.scroll_right
+        startx = x - self.scroll_right.get_width()//2
+        surface.blit(scroll.subsurface(0, surface.get_height()-y, scroll.get_width(), scroll.get_height()//2), (startx, 0))
+        self.prev_draw_rect = (startx, 0, scroll.get_width(), scroll.get_height()//2)
+        self.last_dir_is_left = left
+
 class TimelineArea:
     def _calc_factors(self):
         _, _, width, height = self.rect
@@ -2892,29 +2941,7 @@ class TimelineArea:
         self.toggle_hold_boundaries = (0,0,0,0)
         self.loop_boundaries = (0,0,0,0)
         
-        self.surface = pg.Surface((self.subsurface.get_width(), self.subsurface.get_height()), pg.SRCALPHA)
-        self._prepare_scroll_surfaces()
-
-    def _prepare_scroll_surfaces(self):
-        h = self.subsurface.get_height()
-        scroll_size = (int(h*.35), h*2)
-        self.scroll_left = pg.Surface(scroll_size, pg.SRCALPHA)
-        self.scroll_right = pg.Surface(scroll_size, pg.SRCALPHA)
-
-        rgb_left = pg.surfarray.pixels3d(self.scroll_left)
-        rgb_right = pg.surfarray.pixels3d(self.scroll_right)
-
-        y, x = np.meshgrid(np.arange(scroll_size[1]), np.arange(scroll_size[0]))
-        rgb_left[:,:,0] = 255*(1 - np.abs(y - h)/(h))
-        rgb_left[:,:,1] = 128 + 127*(np.abs(y - h)/(h))
-        rgb_left[:,:,2] = 255*(1 - np.abs(y - h)/(h))
-
-        rgb_right[:] = rgb_left
-
-        alpha_left = pg.surfarray.pixels_alpha(self.scroll_left)
-        alpha_right = pg.surfarray.pixels_alpha(self.scroll_right)
-        alpha_left[:] = 255*(x/scroll_size[0])
-        alpha_right[:] = 255*(1-x/scroll_size[0])
+        self.scroll_indicator = ScrollIndicator(self.subsurface.get_width(), self.subsurface.get_height())
 
     def light_table_positions(self):
         # TODO: order 
@@ -2989,7 +3016,8 @@ class TimelineArea:
     def draw(self):
         timeline_area_draw_timer.start()
 
-        self.surface.fill(UNDRAWABLE)
+        surface = self.scroll_indicator.surface
+        surface.fill(UNDRAWABLE)
 
         left, bottom, width, height = self.rect
         left = 0
@@ -3005,19 +3033,19 @@ class TimelineArea:
 
         def draw_frame(pos, pos_dist, x, thumb_width):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
-            self.surface.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
+            surface.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             border = 1 + 2*(pos==movie.pos)
-            pygame.draw.rect(self.surface, PEN, (x, bottom, thumb_width, height), border)
+            pygame.draw.rect(surface, PEN, (x, bottom, thumb_width, height), border)
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
                 eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
                 eye_x = x + 2 if pos_dist < 0 else x+thumb_width-eye.get_width() - 2
-                self.surface.blit(eye, (eye_x, bottom), eye.get_rect())
+                surface.blit(eye, (eye_x, bottom), eye.get_rect())
                 self.eye_boundaries.append((eye_x, bottom, eye_x+eye.get_width(), bottom+eye.get_height(), pos_dist))
             elif len(movie.frames)>1:
                 mode = self.loop_icon if self.loop_mode else self.arrow_icon
                 mode_x = x + thumb_width - mode.get_width() - 2
-                self.surface.blit(mode, (mode_x, bottom), mode.get_rect())
+                surface.blit(mode, (mode_x, bottom), mode.get_rect())
                 self.loop_boundaries = (mode_x, bottom, mode_x+mode.get_width(), bottom+mode.get_height())
 
         def thumb_width(factor):
@@ -3068,7 +3096,7 @@ class TimelineArea:
 
         self.draw_hold()
 
-        self.subsurface.blit(self.surface, (0,0))
+        self.subsurface.blit(surface, (0,0))
 
         timeline_area_draw_timer.stop()
 
@@ -3086,7 +3114,7 @@ class TimelineArea:
                 continue
             hold_left = left-hold.get_width()/2
             hold_bottom = bottom if pos == movie.pos else bottom+height-hold.get_height()
-            self.surface.blit(hold, (hold_left, hold_bottom), hold.get_rect())
+            self.scroll_indicator.surface.blit(hold, (hold_left, hold_bottom), hold.get_rect())
             if pos == movie.pos:
                 self.toggle_hold_boundaries = (hold_left, hold_bottom, hold_left+hold.get_width(), hold_bottom+hold.get_height())
 
@@ -3167,13 +3195,7 @@ class TimelineArea:
                 new_pos = min(max(0, movie.pos + pos_dist), len(movie.frames)-1)
             movie.seek_frame(new_pos)
         else:
-            y = min(max(y, 0), self.surface.get_height()-1)
-            box = (x-15, 0, 30, self.surface.get_height())
-            self.subsurface.blit(self.surface, (0, 0))
-            scroll = self.scroll_left if px < x else self.scroll_right
-            startx = x - self.scroll_right.get_width()//2 #if px < x else x
-            self.subsurface.blit(scroll.subsurface(0, self.surface.get_height()-y, scroll.get_width(), scroll.get_height()//2), (startx, 0))
-            #pygame.gfxdraw.box(self.subsurface, box, PROGRESS)
+            self.scroll_indicator.draw(self.subsurface, px, x, y)
 
 class LayersArea:
     def init(self):
@@ -3445,11 +3467,15 @@ class MovieList:
         self.exporting_processes = {}
 
 class MovieListArea:
-    def __init__(self):
+    def init(self):
         self.show_pos = None
         self.prevx = None
+        self.scroll_indicator = ScrollIndicator(self.subsurface.get_width(), self.subsurface.get_height())
     def draw(self):
         movie_list_area_draw_timer.start()
+
+        surface = self.scroll_indicator.surface
+        surface.fill(UNDRAWABLE)
 
         _, _, width, _ = self.rect
         left = 0
@@ -3466,11 +3492,13 @@ class MovieListArea:
                 except:
                     pass
             first = False
-            self.subsurface.blit(image, (left, 0), image.get_rect()) 
-            pygame.draw.rect(self.subsurface, PEN, (left, 0, image.get_width(), image.get_height()), border)
+            surface.blit(image, (left, 0), image.get_rect()) 
+            pygame.draw.rect(surface, PEN, (left, 0, image.get_width(), image.get_height()), border)
             left += image.get_width()
             if left >= width:
                 break
+
+        self.subsurface.blit(surface, (0, 0))
 
         movie_list_area_draw_timer.stop()
     def x2frame(self, x):
@@ -3495,6 +3523,7 @@ class MovieListArea:
             self.show_pos = movie_list.clip_pos
         if layout.new_delete_tool():
             return
+        self.scroll_indicator.draw(self.subsurface, self.prevx-self.rect[0], x-self.rect[0], y-self.rect[1])
         prev_pos = self.x2frame(self.prevx)
         curr_pos = self.x2frame(x)
         if prev_pos is None and curr_pos is None:
@@ -3509,6 +3538,7 @@ class MovieListArea:
         self.show_pos = min(max(0, self.show_pos + pos_dist), len(movie_list.clips)-1) 
     def on_mouse_up(self,x,y):
         self.on_mouse_move(x,y)
+        self.subsurface.blit(self.scroll_indicator.surface, (0, 0))
         # opening a movie is a slow operation so we don't want it to be "too interactive"
         # (like timeline scrolling) - we wait for the mouse-up event to actually open the clip
         movie_list.open_clip(self.show_pos)
