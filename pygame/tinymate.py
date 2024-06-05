@@ -2010,26 +2010,6 @@ class PenTool(Button):
         self.prev_drawn = (x,y) 
         pen_move_timer.stop()
 
-class PanTool(Button):
-    def on_mouse_down(self, x, y):
-        self.start = (x,y)
-        da = layout.drawing_area()
-        self.sxo = da.xoffset
-        self.syo = da.yoffset
-        da.set_zoom_center((x,y))
-    def on_mouse_up(self, x, y):
-        layout.drawing_area().draw()
-    def on_mouse_move(self, x, y):
-        px, py = self.start
-        da = layout.drawing_area()
-        da.set_xyoffset(self.sxo - (x - px), self.syo - (y - py))
-    def draw(*args):
-        if layout.drawing_area().zoom > 1: # can't pan at zoom==1
-            Button.draw(*args)
-    def hit(*args):
-        if layout.drawing_area().zoom > 1:
-            return Button.hit(*args)
-
 MIN_ZOOM, MAX_ZOOM = 1, 5
 
 class ZoomTool(Button):
@@ -2569,7 +2549,7 @@ class Layout:
         return self.elems[1]
 
     def new_delete_tool(self): return isinstance(self.tool, NewDeleteTool) 
-    def zoom_pan_tool(self): return isinstance(self.tool, ZoomTool) or isinstance(self.tool, PanTool)
+    def zoom_pan_tool(self): return isinstance(self.tool, ZoomTool)
 
     def toggle_playing(self):
         self.is_playing = not self.is_playing
@@ -2591,6 +2571,7 @@ class DrawingArea:
         self.xoffset = 0
         self.yoffset = 0
         self.fading_mask_version = 0
+        self.restore_tool_on_mouse_up = False
     def _internal_layout(self):
         if self.iwidth and self.iheight:
             return
@@ -2827,10 +2808,8 @@ class ScrollIndicator:
             x, y = y, x
             s = w
         yhdist = np.abs(y-s)/s
-        rgb_left[:,:,0] = 255*(1 - yhdist)
-        rgb_left[:,:,1] = 128 + 127*yhdist
-        rgb_left[:,:,2] = 255*(1 - yhdist)
-
+        for i in range(3):
+            rgb_left[:,:,i] = SELECTED[i]*yhdist + PROGRESS[i]*(1-yhdist)
         rgb_right[:] = rgb_left
 
         alpha_left = pg.surfarray.pixels_alpha(self.scroll_left)
@@ -2861,7 +2840,6 @@ class ScrollIndicator:
         scroll = self.scroll_left if left else self.scroll_right
         if self.vertical:
             starty = x - scroll.get_height()//2
-            print(x, starty)
             surface.blit(scroll.subsurface(surface.get_width()-y, 0, scroll.get_width()//2, scroll.get_height()), (0, starty))
             self.prev_draw_rect = (0, starty, scroll.get_width()//2, scroll.get_height())
         else:
@@ -3189,6 +3167,7 @@ class TimelineArea:
             return
         prev_pos = self.x2frame(self.prevx)
         curr_pos = self.x2frame(x)
+        self.scroll_indicator.draw(self.subsurface, self.prevx, x, y)
         if prev_pos is None and curr_pos is None:
             self.prevx = x
             return
@@ -3196,7 +3175,6 @@ class TimelineArea:
             pos_dist = prev_pos - curr_pos
         else:
             pos_dist = -1 if x > self.prevx else 1
-        px = self.prevx
         self.prevx = x
         if pos_dist != 0:
             self.redraw = True
@@ -3206,8 +3184,6 @@ class TimelineArea:
             else:
                 new_pos = min(max(0, movie.pos + pos_dist), len(movie.frames)-1)
             movie.seek_frame(new_pos)
-        else:
-            self.scroll_indicator.draw(self.subsurface, px, x, y)
 
 class LayersArea:
     def init(self):
@@ -3611,8 +3587,6 @@ class Movie(MovieData):
             init_layout()
         self.edited_since_export = True # MovieList can set it safely to false - we don't know
         # if the last exporting process is done or not
-        self.below_image = None
-        self.above_image = None
 
     def toggle_hold(self):
         pos = self.pos
@@ -3874,15 +3848,20 @@ class Movie(MovieData):
                 if not highlight:
                     s.blit(layers, (0, 0))
                     return s
+
                 layers.set_alpha(128)
-                if self.below_image is None:
-                    da = layout.drawing_area()
-                    self.below_image = pg.Surface((da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2), pg.SRCALPHA)
-                    self.below_image.set_alpha(128)
-                    self.below_image.fill(LAYERS_BELOW)
+                da = layout.drawing_area()
+                w, h = da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2
+                class BelowImage:
+                    def compute_key(_): return tuple(), ('below-image', w, h)
+                    def compute_value(_):
+                        below_image = pg.Surface((w, h), pg.SRCALPHA)
+                        below_image.set_alpha(128)
+                        below_image.fill(LAYERS_BELOW)
+                        return below_image
                 rgba = np.copy(rgba_array(layers)[0]) # funnily enough, this is much faster than calling array_alpha()
                 # to save a copy of just the alpha pixels [those we really need]...
-                layers.blit(self.below_image, (0,0), (0, 0, width, height))
+                layers.blit(cache.fetch(BelowImage()), (0,0))
                 rgba_array(layers)[0][:,:,3] = rgba[:,:,3]
                 self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
@@ -3907,13 +3886,17 @@ class Movie(MovieData):
                 layers.set_alpha(128)
                 s = pg.Surface((width, height), pg.SRCALPHA)
                 s.fill(BACKGROUND)
-                if self.above_image is None:
-                    da = layout.drawing_area()
-                    self.above_image = pg.Surface((da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2), pg.SRCALPHA)
-                    self.above_image.set_alpha(128)
-                    self.above_image.fill(LAYERS_ABOVE)
+                da = layout.drawing_area()
+                w, h = da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2
+                class AboveImage:
+                    def compute_key(_): return tuple(), ('above-image', w, h)
+                    def compute_value(_):
+                        above_image = pg.Surface((w, h), pg.SRCALPHA)
+                        above_image.set_alpha(128)
+                        above_image.fill(LAYERS_ABOVE)
+                        return above_image
                 rgba = np.copy(rgba_array(layers)[0])
-                layers.blit(self.above_image, (0,0), (0, 0, width, height))
+                layers.blit(cache.fetch(AboveImage()), (0,0))
                 self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
                 rgba_array(s)[0][:,:,3] = rgba[:,:,3]
@@ -4132,7 +4115,6 @@ def toggle_layer_lock():
     history.append_item(ToggleHistoryItem(layer.toggle_locked))
 
 TOOLS = {
-    'pan': Tool(PanTool(), pan_cursor, 'xX'),
     'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
     'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
@@ -4194,15 +4176,13 @@ class Palette:
         s = load_image(filename)
         color_hist = {}
         first_color_hit = {}
-        white = (255,255,255)
         for y in range(s.get_height()):
             for x in range(s.get_width()):
                 r,g,b,a = s.get_at((x,y))
                 color = r,g,b
                 if color not in first_color_hit:
                     first_color_hit[color] = (y / (s.get_height()/3))*s.get_width() + x
-                if color != white:
-                    color_hist[color] = color_hist.get(color,0) + 1
+                color_hist[color] = color_hist.get(color,0) + 1
 
         colors = [[None for col in range(columns)] for row in range(rows)]
         color2popularity = dict(list(reversed(sorted(list(color_hist.items()), key=lambda x: x[1])))[:rows*columns])
@@ -4212,16 +4192,13 @@ class Palette:
         col = 0
         for hit, color in hit2color:
             if color in color2popularity:
-                if row == 0 and col == 0:
-                    row += 1
-                    continue
                 colors[row][col] = color + (255,)
                 row+=1
                 if row == rows:
                     col += 1
                     row = 0
 
-        colors[0][0] = BACKGROUND+(0,)
+        self.bg_color = BACKGROUND+(0,)
 
         self.rows = rows
         self.columns = columns
@@ -4236,9 +4213,9 @@ class Palette:
             for col in range(self.columns):
                 sc = color_image(s, self.colors[row][col])
                 self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), color_image(paint_bucket_cursor[1], self.colors[row][col]))
-                if self.colors[row][col][-1] == 0: # water tool
-                    self.cursors[row][col] = (self.cursors[row][col][0], scale_image(load_image('water-tool.png'), self.cursors[row][col][1].get_width()))
 
+        cursor = (pg.cursors.Cursor((0,sc.get_height()-1), sc), color_image(paint_bucket_cursor[1], self.bg_color))
+        self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width()))
 
 palette = Palette('palette.png')
 
@@ -4341,9 +4318,8 @@ def init_layout():
                 if col == 0:
                     tool = TOOLS['zoom']
                 elif col == 1:
-                    continue
-                    #tool = TOOLS['pan']
-                elif col == 2:
+                    tool = Tool(PaintBucketTool(palette.bg_color), palette.bg_cursor, '')
+                else:
                     continue
             if not tool:
                 tool = Tool(PaintBucketTool(palette.colors[len(palette.colors)-row-1][col]), palette.cursors[len(palette.colors)-row-1][col], '')
@@ -4617,11 +4593,16 @@ def process_keyup_event(event):
         try_set_cursor(flashlight_cursor[0])
 
 def process_keydown_event(event):
+    alt = event.mod & pg.KMOD_ALT
     ctrl = event.mod & pg.KMOD_CTRL
     shift = event.mod & pg.KMOD_SHIFT
 
     if ctrl and isinstance(layout.tool, FlashlightTool):
         try_set_cursor(needle_cursor[0])
+
+    if alt and not layout.restore_tool_on_mouse_up:
+        set_tool(TOOLS['zoom'])
+        layout.restore_tool_on_mouse_up = True
 
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
     if event.key == pg.K_SPACE:
