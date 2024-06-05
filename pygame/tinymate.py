@@ -1562,13 +1562,13 @@ def cv2_resize_surface(src, dst):
     optr, ostride, owidth, oheight, obgr = color_c_params(pg.surfarray.pixels3d(dst))
     assert ibgr == obgr
 
-    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iwidth * istride * 4))).contents
+    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iheight * istride * 4))).contents
 
     # reinterpret the array as RGBA height x width (this "transposes" the image and flips R and B channels,
     # in order to fit the data into the layout cv2 expects)
     iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
 
-    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (owidth * ostride * 4))).contents
+    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (oheight * ostride * 4))).contents
 
     oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer, strides=(ostride, 4, 1))
 
@@ -1593,6 +1593,7 @@ def scale_image(surface, width=None, height=None):
     ret = pg.Surface((width, height), pg.SRCALPHA)
     cv2_resize_surface(surface, ret)
     ret.set_alpha(surface.get_alpha())
+    #ret = pg.transform.smoothscale(surface, (width, height))
 
     return ret
 
@@ -2810,9 +2811,10 @@ class DrawingArea:
         layout.tool.on_mouse_move(*self.fix_xy(x,y))
 
 class ScrollIndicator:
-    def __init__(self, w, h):
+    def __init__(self, w, h, vertical=False):
+        self.vertical = vertical
         self.surface = pg.Surface((w, h), pg.SRCALPHA)
-        scroll_size = (int(h*.35), h*2)
+        scroll_size = (w*2, int(w*.2)) if vertical else (int(h*.35), h*2)
         self.scroll_left = pg.Surface(scroll_size, pg.SRCALPHA)
         self.scroll_right = pg.Surface(scroll_size, pg.SRCALPHA)
 
@@ -2820,7 +2822,11 @@ class ScrollIndicator:
         rgb_right = pg.surfarray.pixels3d(self.scroll_right)
 
         y, x = np.meshgrid(np.arange(scroll_size[1]), np.arange(scroll_size[0]))
-        yhdist = np.abs(y-h)/h
+        s = h
+        if vertical:
+            x, y = y, x
+            s = w
+        yhdist = np.abs(y-s)/s
         rgb_left[:,:,0] = 255*(1 - yhdist)
         rgb_left[:,:,1] = 128 + 127*yhdist
         rgb_left[:,:,2] = 255*(1 - yhdist)
@@ -2829,33 +2835,39 @@ class ScrollIndicator:
 
         alpha_left = pg.surfarray.pixels_alpha(self.scroll_left)
         alpha_right = pg.surfarray.pixels_alpha(self.scroll_right)
-        alpha_left[:] = 255*(x/scroll_size[0])
-        alpha_right[:] = 255*(1-x/scroll_size[0])
+        alpha_left[:] = 255*(x/scroll_size[self.vertical])
+        alpha_right[:] = 255*(1-x/scroll_size[self.vertical])
 
         self.prev_draw_rect = None
         self.last_dir_change_x = None
         self.last_dir_is_left = None
 
-    def draw(self, surface, px, x, y):
+    def draw(self, surface, px, x, y): # or py, y, x for vertical scroll indicators
         if self.prev_draw_rect is not None:
             try:
-                surface.blit(self.surface.subsurface(self.prev_draw_rect), (self.prev_draw_rect[0], 0))
+                surface.blit(self.surface.subsurface(self.prev_draw_rect), (self.prev_draw_rect[0], self.prev_draw_rect[1]))
             except:
                 surface.blit(self.surface, (0, 0))
-        y = min(max(y, 0), surface.get_height()-1)
+        y = min(max(y, 0), (surface.get_height() if not self.vertical else surface.get_width())-1)
         if self.last_dir_change_x is None:
             left = px < x
             self.last_dir_change_x = px
         else:
-            if abs(x - self.last_dir_change_x) < self.scroll_left.get_width()//4:
+            if abs(x - self.last_dir_change_x) < (self.scroll_left.get_width() if not self.vertical else self.scroll_left.get_height())//4:
                 left = self.last_dir_is_left
             else:
                 left = self.last_dir_change_x < x
                 self.last_dir_change_x = x
         scroll = self.scroll_left if left else self.scroll_right
-        startx = x - self.scroll_right.get_width()//2
-        surface.blit(scroll.subsurface(0, surface.get_height()-y, scroll.get_width(), scroll.get_height()//2), (startx, 0))
-        self.prev_draw_rect = (startx, 0, scroll.get_width(), scroll.get_height()//2)
+        if self.vertical:
+            starty = x - scroll.get_height()//2
+            print(x, starty)
+            surface.blit(scroll.subsurface(surface.get_width()-y, 0, scroll.get_width()//2, scroll.get_height()), (0, starty))
+            self.prev_draw_rect = (0, starty, scroll.get_width()//2, scroll.get_height())
+        else:
+            startx = x - scroll.get_width()//2
+            surface.blit(scroll.subsurface(0, surface.get_height()-y, scroll.get_width(), scroll.get_height()//2), (startx, 0))
+            self.prev_draw_rect = (startx, 0, scroll.get_width(), scroll.get_height()//2)
         self.last_dir_is_left = left
 
 class TimelineArea:
@@ -3217,6 +3229,8 @@ class LayersArea:
         self.eye_boundaries = []
         self.lit_boundaries = []
         self.lock_boundaries = []
+
+        self.scroll_indicator = ScrollIndicator(self.subsurface.get_width(), self.subsurface.get_height(), vertical=True)
     
     def cached_image(self, layer_pos, layer):
         class CachedLayerThumbnail(CachedItem):
@@ -3257,36 +3271,43 @@ class LayersArea:
     def draw(self):
         layers_area_draw_timer.start()
 
+        surface = self.scroll_indicator.surface
+        surface.fill(UNDRAWABLE)
+
         self.eye_boundaries = []
         self.lit_boundaries = []
         self.lock_boundaries = []
 
         left, bottom, width, height = self.rect
+        blit_bottom = 0
 
         for layer_pos, layer in reversed(list(enumerate(movie.layers))):
             border = 1 + (layer_pos == movie.layer_pos)*2
             image = self.cached_image(layer_pos, layer)
-            image_left = left + (width - image.get_width())/2
-            pygame.draw.rect(screen, BACKGROUND, (image_left, bottom, image.get_width(), image.get_height()))
-            screen.blit(image, (image_left, bottom), image.get_rect()) 
-            pygame.draw.rect(screen, PEN, (image_left, bottom, image.get_width(), image.get_height()), border)
+            image_left = (width - image.get_width())/2
+            pygame.draw.rect(surface, BACKGROUND, (image_left, blit_bottom, image.get_width(), image.get_height()))
+            surface.blit(image, (image_left, blit_bottom), image.get_rect()) 
+            pygame.draw.rect(surface, PEN, (image_left, blit_bottom, image.get_width(), image.get_height()), border)
 
             max_border = 3
             if len(movie.frames) > 1 and layer.visible and layout.timeline_area().combined_light_table_mask():
                 lit = self.light_on if layer.lit else self.light_off
-                screen.blit(lit, (left + width - lit.get_width() - max_border, bottom))
+                surface.blit(lit, (width - lit.get_width() - max_border, blit_bottom))
                 self.lit_boundaries.append((left + width - lit.get_width() - max_border, bottom, left+width, bottom+lit.get_height(), layer_pos))
                
             eye = self.eye_open if layer.visible else self.eye_shut
-            screen.blit(eye, (left + width - eye.get_width() - max_border, bottom + image.get_height() - eye.get_height() - max_border))
+            surface.blit(eye, (width - eye.get_width() - max_border, blit_bottom + image.get_height() - eye.get_height() - max_border))
             self.eye_boundaries.append((left + width - eye.get_width() - max_border, bottom + image.get_height() - eye.get_height() - max_border, left+width, bottom+image.get_height(), layer_pos))
 
             lock = self.locked if layer.locked else self.unlocked
-            lock_start = bottom + self.thumbnail_height/2 - lock.get_height()/2
-            screen.blit(lock, (left, lock_start))
-            self.lock_boundaries.append((left, lock_start, left+lock.get_width(), lock_start+lock.get_height(), layer_pos))
+            lock_start = self.thumbnail_height/2 - lock.get_height()/2
+            surface.blit(lock, (0, blit_bottom + lock_start))
+            self.lock_boundaries.append((left, bottom + lock_start, left+lock.get_width(), bottom + lock_start+lock.get_height(), layer_pos))
 
             bottom += image.get_height()
+            blit_bottom += image.get_height()
+
+        self.subsurface.blit(surface, (0, 0))
 
         layers_area_draw_timer.stop()
 
@@ -3347,6 +3368,7 @@ class LayersArea:
             return
         if layout.new_delete_tool():
             return
+        self.scroll_indicator.draw(self.subsurface, self.prevy-self.rect[1], y-self.rect[1], x-self.rect[0])
         prev_pos = self.y2frame(self.prevy)
         curr_pos = self.y2frame(y)
         if curr_pos is None or curr_pos < 0 or curr_pos >= len(movie.layers):
