@@ -31,14 +31,38 @@ if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
 # we use a subprocess for an open file dialog since using tkinter together with pygame
 # causes issues for the latter after the first use of the former
 
-def dir_path_dialog():
+def tkinter_dir_path_dialog():
     import tkinter
     import tkinter.filedialog
 
     tk_root = tkinter.Tk()
     tk_root.withdraw()  # Hide the main window
 
-    file_path = tkinter.filedialog.askdirectory(title="Select a Tinymate clips directory")
+    return tkinter.filedialog.askdirectory(title="Select a Tinymate clips directory")
+
+# tkinter is a 200MB dependency
+# pygame_gui has non-trivial i18n issues
+# on Windows,
+#   GetOpenFileName doesn't support selecting directories
+#   IFileOpenDialog involves COM, which I felt is potentially too bug-prone (at my level) to depend on
+# so we use SHBrowseForFolder
+def windows_dir_path_dialog():
+    import win32gui, win32con
+    file_types = "'Open' selects current folder\0*.xxxxxxx\0"
+    fname, customfilter, flags = win32gui.GetOpenFileNameW(
+        InitialDir=os.getcwd(),
+        Flags=win32con.OFN_EXPLORER | win32con.OFN_NOCHANGEDIR,
+        Title="Go INTO a folder and click 'Open' to select it",
+        File="Go to folder",
+        Filter=file_types
+    )
+    return os.path.dirname(fname)
+
+def dir_path_dialog():
+    if on_windows:
+        file_path = windows_dir_path_dialog()
+    else:
+        file_path = tkinter_dir_path_dialog()
     if file_path:
         sys.stdout.write(repr(file_path.encode()))
 
@@ -2598,6 +2622,7 @@ class DrawingArea:
             rgb[:,:,i] = (BACKGROUND[i]*grad +MARGIN[i]*(1-grad))
         alpha[:] = MARGIN[-1]*norm_dist
     def set_xyoffset(self, xoffset, yoffset):
+        self._internal_layout()
         prevxo, prevyo = self.xoffset, self.yoffset
         self.xoffset = min(max(xoffset, 0), self.iwidth*(self.zoom - 1))
         self.yoffset = min(max(yoffset, 0), self.iheight*(self.zoom - 1))
