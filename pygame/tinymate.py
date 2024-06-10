@@ -1346,7 +1346,9 @@ fit_curve_timer = timers.add('bspline_interp', indent=2)
 pen_suggestions_timer = timers.add('pen suggestions', indent=1)
 eraser_timer = timers.add('eraser',indent=1)
 pen_fading_mask_timer = timers.add('fading_mask', indent=1)
-paint_bucket_timer = timers.add('PaintBucketTool.on_mouse_down')
+paint_bucket_timer = timers.add('PaintBucketTool.fill_and_time')
+bucket_points_near_line_timer = timers.add('integer_points_near_line_segment', indent=1)
+bucket_flood_fill_timer = timers.add('flood_fill_color_based_on_lines', indent=1)
 timeline_down_timer = timers.add('TimelineArea.on_mouse_down')
 timeline_move_timer = timers.add('TimelineArea.on_mouse_move')
 flashlight_timer = timers.add('Flashlight')
@@ -1763,21 +1765,25 @@ class HistoryItem:
 
         redo.optimize()
         return redo
-    def optimize(self):
+    def optimize(self, bbox=None):
         if self.optimized:
             return
 
-        mask = self.saved_alpha != pg.surfarray.pixels_alpha(self.curr_surface())
-        if self.saved_rgb is not None:
-            mask |= np.any(self.saved_rgb != pg.surfarray.pixels3d(self.curr_surface()), axis=2)
-        brect = bounding_rectangle_of_a_boolean_mask(mask)
+        if bbox:
+            self.minx, self.miny, self.maxx, self.maxy = bbox
+        else:
+            mask = self.saved_alpha != pg.surfarray.pixels_alpha(self.curr_surface())
+            if self.saved_rgb is not None:
+                mask |= np.any(self.saved_rgb != pg.surfarray.pixels3d(self.curr_surface()), axis=2)
+            brect = bounding_rectangle_of_a_boolean_mask(mask)
 
-        if brect is None: # this can happen eg when drawing lines on an already-filled-with-lines area
-            self.saved_alpha = None
-            self.saved_rgb = None
-            return
-        
-        self.minx, self.maxx, self.miny, self.maxy = brect
+            if brect is None: # this can happen eg when drawing lines on an already-filled-with-lines area
+                self.saved_alpha = None
+                self.saved_rgb = None
+                return
+
+            self.minx, self.maxx, self.miny, self.maxy = brect
+
         self.saved_alpha = self.saved_alpha[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
         if self.saved_rgb is not None:
             self.saved_rgb = self.saved_rgb[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
@@ -2123,20 +2129,57 @@ def flood_fill_color_based_on_lines(color_rgba, lines, x, y, bucket_color, bbox_
 
     return bbox_retval
 
+def point_line_distance_vectorized(px, py, x1, y1, x2, y2):
+    """ Vectorized calculation of distance from multiple points (px, py) to the line segment (x1, y1)-(x2, y2) """
+    line_mag = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    if line_mag < 1e-8:
+        # The line segment is a point
+        return np.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+    
+    # Projection of points on the line segment
+    u = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / (line_mag ** 2)
+    u = np.clip(u, 0, 1)  # Clamping the projection
+    
+    # Coordinates of the projection points
+    ix = x1 + u * (x2 - x1)
+    iy = y1 + u * (y2 - y1)
+    
+    # Distance from points to the projection points
+    return np.sqrt((px - ix) ** 2 + (py - iy) ** 2)
+
+def integer_points_near_line_segment(x1, y1, x2, y2, distance):
+    """ Vectorized find all integer coordinates within a given distance from the line segment (x1, y1)-(x2, y2) """
+    # Determine the bounding box
+    xmin = np.floor(min(x1, x2) - distance)
+    xmax = np.ceil(max(x1, x2) + distance)
+    ymin = np.floor(min(y1, y2) - distance)
+    ymax = np.ceil(max(y1, y2) + distance)
+    
+    # Generate grid of integer points within the bounding box
+    x = np.arange(xmin, xmax + 1)
+    y = np.arange(ymin, ymax + 1)
+    xx, yy = np.meshgrid(x, y)
+    
+    # Flatten the grids to get coordinates
+    px, py = xx.ravel(), yy.ravel()
+    
+    # Compute distances using vectorized function
+    distances = point_line_distance_vectorized(px, py, x1, y1, x2, y2)
+    
+    # Filter points within the specified distance
+    mask = distances <= distance
+    result_points = np.vstack((px[mask], py[mask])).T
+    
+    return result_points
+
 class PaintBucketTool(Button):
     def __init__(self,color):
         Button.__init__(self)
         self.color = color
-    def fill(self, x, y):
-        if curr_layer_locked():
-            return
-        x, y = layout.drawing_area().xy2frame(x,y)
-        x, y = round(x), round(y)
-        color_surface = movie.edit_curr_frame().surf_by_id('color')
-        color_rgb = pg.surfarray.pixels3d(color_surface)
-        color_alpha = pg.surfarray.pixels_alpha(color_surface)
-        lines = pygame.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
-
+        self.px = None
+        self.py = None
+        self.bboxes = []
+    def fill(self, x, y, color_rgb, color_alpha, lines):
         if x < 0 or y < 0 or x >= lines.shape[0] or y >= lines.shape[1]:
             return
         
@@ -2144,22 +2187,63 @@ class PaintBucketTool(Button):
             return # we never flood the lines themselves - they keep the PEN color in a separate layer;
             # and there's no point in flooding with the color the pixel already has
 
-        def make_history_item(bbox):
-            return HistoryItem('color', bbox)
+        with bucket_flood_fill_timer:
+            bbox = flood_fill_color_based_on_lines(color_rgb, lines, x, y, self.color)
+        self.bboxes.append(bbox)
 
-        history_item = flood_fill_color_based_on_lines(color_rgb, lines, x, y, self.color, make_history_item)
-        history.append_item(history_item)
+    def fill_and_time(self, x, y):
+        if curr_layer_locked():
+            return
+        paint_bucket_timer.start()
 
+        x, y = layout.drawing_area().xy2frame(x,y)
+        x, y = round(x), round(y)
+
+        if self.px is None:
+            self.px = x
+            self.py = y
+
+        color_surface = movie.edit_curr_frame().surf_by_id('color')
+        color_rgb = pg.surfarray.pixels3d(color_surface)
+        color_alpha = pg.surfarray.pixels_alpha(color_surface)
+        lines = pygame.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
+
+        radius = MEDIUM_ERASER_WIDTH//2 * layout.drawing_area().xscale
+        with bucket_points_near_line_timer:
+            points = integer_points_near_line_segment(self.px, self.py, x, y, radius)
+        # TODO: move the loop to C
+        for xi, yi in points: 
+            self.fill(int(xi), int(yi), color_rgb, color_alpha, lines)
+        self.px = x
+        self.py = y
+
+        # TODO: only redraw within the bbox?
         layout.drawing_area().draw()
         
-    def fill_and_time(self, x, y):
-        paint_bucket_timer.start()
-        self.fill(x, y)
         paint_bucket_timer.stop()
 
-    def on_mouse_down(self, x, y): self.fill_and_time(x,y)
+    def on_mouse_down(self, x, y):
+        self.history_item = HistoryItem('color')
+        self.bboxes = []
+        self.px = None
+        self.py = None
+        self.yes = True
+        self.fill_and_time(x,y)
     def on_mouse_move(self, x, y): self.fill_and_time(x,y)
-    def on_mouse_up(self, x, y): self.fill_and_time(x,y)
+    def on_mouse_up(self, x, y):
+        self.yes = True
+        self.fill_and_time(x,y)
+        if self.bboxes: # we had changes
+            inf = 10**9
+            minx, miny, maxx, maxy = inf, inf, -inf, -inf
+            for iminx, iminy, imaxx, imaxy in self.bboxes:
+                minx = min(iminx, minx)
+                miny = min(iminy, miny)
+                maxx = max(imaxx, maxx)
+                maxy = max(imaxy, maxy)
+            self.history_item.optimize((minx, miny, maxx, maxy))
+            history.append_item(self.history_item)
+        self.history_item = None
 
 NO_PATH_DIST = 10**6
 
@@ -4244,15 +4328,17 @@ class Palette:
         self.init_cursors()
 
     def init_cursors(self):
-        s = paint_bucket_cursor[0]
+        radius = MEDIUM_ERASER_WIDTH//2
+        def bucket(color): return add_circle(color_image(paint_bucket_cursor[0], color), radius)
+
         self.cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
         for row in range(self.rows):
             for col in range(self.columns):
-                sc = color_image(s, self.colors[row][col])
-                self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), color_image(paint_bucket_cursor[1], self.colors[row][col]))
+                sc = bucket(self.colors[row][col])
+                self.cursors[row][col] = (pg.cursors.Cursor((radius,sc.get_height()-radius-1), sc), color_image(paint_bucket_cursor[1], self.colors[row][col]))
 
-        sc = color_image(s, self.bg_color)
-        cursor = (pg.cursors.Cursor((0,sc.get_height()-1), sc), color_image(paint_bucket_cursor[1], self.bg_color))
+        sc = bucket(self.bg_color)
+        cursor = (pg.cursors.Cursor((radius,sc.get_height()-radius-1), sc), color_image(paint_bucket_cursor[1], self.bg_color))
         self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width()))
 
 palette = Palette('palette.png')
