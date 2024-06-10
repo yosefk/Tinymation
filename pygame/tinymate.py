@@ -492,7 +492,15 @@ class MovieData:
 
     def gif_path(self): return os.path.realpath(self.dir)+'-GIF.gif'
     def mp4_path(self): return os.path.realpath(self.dir)+'-MP4.mp4'
-    def png_path(self, i): return os.path.join(self.dir, FRAME_FMT%i)
+    def png_path(self, i): return os.path.join(os.path.realpath(self.dir), FRAME_FMT%i)
+
+    def exported_files_exist(self):
+        if not os.path.exists(self.gif_path()) or not os.path.exists(self.mp4_path()):
+            return False
+        for i in range(len(self.frames)):
+            if not os.path.exists(self.png_path(i)):
+                return False
+        return True
 
     def _blit_layers(self, layers, pos, transparent=False, include_invisible=False, width=None, height=None, roi=None):
         if not width: width=IWIDTH
@@ -2000,6 +2008,7 @@ class PenTool(Button):
         if expose_other_layers:
             color = (255,0,0,0)
         roi, (xstart, ystart, iwidth, iheight) = drawing_area.frame_and_subsurface_roi()
+        # FIXME we get an exception here sometimes [in subsurface() - rectangle outside surface area]
         draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface.subsurface((xstart, ystart, iwidth, iheight))
         ox,oy = (0,0) if not expose_other_layers else (xstart, ystart)
         if self.prev_drawn:
@@ -2118,11 +2127,7 @@ class PaintBucketTool(Button):
     def __init__(self,color):
         Button.__init__(self)
         self.color = color
-    def on_mouse_down(self, x, y):
-        paint_bucket_timer.start()
-        self._on_mouse_down(x, y)
-        paint_bucket_timer.stop()
-    def _on_mouse_down(self, x, y):
+    def fill(self, x, y):
         if curr_layer_locked():
             return
         x, y = layout.drawing_area().xy2frame(x,y)
@@ -2144,11 +2149,17 @@ class PaintBucketTool(Button):
 
         history_item = flood_fill_color_based_on_lines(color_rgb, lines, x, y, self.color, make_history_item)
         history.append_item(history_item)
+
+        layout.drawing_area().draw()
         
-    def on_mouse_up(self, x, y):
-        pass
-    def on_mouse_move(self, x, y):
-        pass
+    def fill_and_time(self, x, y):
+        paint_bucket_timer.start()
+        self.fill(x, y)
+        paint_bucket_timer.stop()
+
+    def on_mouse_down(self, x, y): self.fill_and_time(x,y)
+    def on_mouse_move(self, x, y): self.fill_and_time(x,y)
+    def on_mouse_up(self, x, y): self.fill_and_time(x,y)
 
 NO_PATH_DIST = 10**6
 
@@ -3952,13 +3963,14 @@ class Movie(MovieData):
             for frame in layer.frames:
                 frame.wait_for_compression_to_finish()
 
-        # remove old pngs so we don't have stale ones lying around that don't correspond to a valid frame;
-        # also, we use them for getting the status of the export progress...
-        for f in os.listdir(self.dir):
-            if is_exported_png(f):
-                os.unlink(os.path.join(self.dir, f))
+        if self.edited_since_export or not self.exported_files_exist():
 
-        if self.edited_since_export:
+            # remove old pngs so we don't have stale ones lying around that don't correspond to a valid frame;
+            # also, we use them for getting the status of the export progress...
+            for f in os.listdir(self.dir):
+                if is_exported_png(f):
+                    os.unlink(os.path.join(self.dir, f))
+
             movie_list.start_export()
 
     def save_before_closing(self):
@@ -4239,6 +4251,7 @@ class Palette:
                 sc = color_image(s, self.colors[row][col])
                 self.cursors[row][col] = (pg.cursors.Cursor((0,sc.get_height()-1), sc), color_image(paint_bucket_cursor[1], self.colors[row][col]))
 
+        sc = color_image(s, self.bg_color)
         cursor = (pg.cursors.Cursor((0,sc.get_height()-1), sc), color_image(paint_bucket_cursor[1], self.bg_color))
         self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width()))
 
@@ -4584,7 +4597,7 @@ def paste_frame():
 
 def open_explorer(path):
     if on_windows:
-        subprocess.Popen('explorer /select,'+path)
+        subprocess.Popen(['explorer', '/select,'+path])
     else:
         subprocess.Popen(['nautilus', '-s', path])
 
@@ -4592,6 +4605,7 @@ def export_and_open_explorer():
     movie.save_and_start_export()
     movie_list.wait_for_all_exporting_to_finish() # wait for this movie and others if we
     # were still exporting them - so that when we open explorer all the exported data is up to date
+    movie.edited_since_export = False
 
     open_explorer(movie.gif_path())
 
