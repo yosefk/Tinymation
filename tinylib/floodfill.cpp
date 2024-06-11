@@ -159,3 +159,42 @@ extern "C" void fill_color_based_on_mask(int* color, const unsigned char* mask,
 		}
 	}
 }
+
+//mask is modified by this operation (the input is 1s where lines are and 0s where there aren't,
+//and we fill some of the 0s with 2s; though we get "2" is the mask_new_val parameter.)
+//the region we return is xmin, xmax, ymin, ymax [exclusive], differently
+//from flood_fill_mask()
+extern "C" void flood_fill_color_based_on_mask_many_seeds(int* color, unsigned char* mask,
+		int color_stride, int mask_stride, int width, int height,
+		int* region, int _8_connectivity,
+		int mask_new_val, int new_color_value,
+		const int* seed_x, const int* seed_y, int num_seeds)
+{
+	region[0] = region[1] = 1000000;
+	region[2] = region[3] = -1;
+	int fills = 0;
+	for(int i=0; i<num_seeds; ++i) {
+		int x = seed_x[i];
+		int y = seed_y[i];
+		if(x < 0 || y < 0 || x >= width || y >= height) {
+			continue;
+		}
+		//don't fill regions already having the right color value;
+		//don't fill inside the lines
+		if(color[(color_stride/4)*y + x] == new_color_value || mask[mask_stride*y + x] == 1) {
+			continue;
+		}
+		fills++;
+		int curr_region[4];
+		flood_fill_mask(mask, mask_stride, width, height, x, y, mask_new_val, curr_region, _8_connectivity);
+
+		fill_color_based_on_mask(color, mask, color_stride, mask_stride, width, height, curr_region, new_color_value, mask_new_val);
+
+		region[0] = std::min(region[0], curr_region[0]);
+		region[1] = std::min(region[1], curr_region[1]);
+		region[2] = std::max(region[2], curr_region[2]+curr_region[0]);
+		region[3] = std::max(region[3], curr_region[3]+curr_region[1]);
+	}
+}
+
+

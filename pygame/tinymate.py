@@ -2129,6 +2129,29 @@ def flood_fill_color_based_on_lines(color_rgba, lines, x, y, bucket_color, bbox_
 
     return bbox_retval
 
+def flood_fill_color_based_on_mask_many_seeds(color_rgba, pen_mask, xs, ys, bucket_color):
+    mask_ptr, mask_stride, width, height = greyscale_c_params(pen_mask, is_alpha=False)
+    flood_code = 2
+
+    color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color_rgba)
+    assert color_width == width and color_height == height
+    new_color_value = make_color_int(bucket_color, bgr)
+
+    rect = np.zeros(4, dtype=np.int32)
+    region = arr_base_ptr(rect)
+
+    assert len(xs) == len(ys)
+    assert xs.strides == (4,)
+    assert ys.strides == (4,)
+    x_ptr = arr_base_ptr(xs)
+    y_ptr = arr_base_ptr(ys)
+
+    tinylib.flood_fill_color_based_on_mask_many_seeds(color_ptr, mask_ptr, color_stride, mask_stride,
+        width, height, region, 0, flood_code, new_color_value, x_ptr, y_ptr, len(xs))
+    xmin, ymin, xmax, ymax = rect
+    if xmax >= 0 and ymax >= 0:
+        return xmin, ymin, xmax-1, ymax-1
+
 def point_line_distance_vectorized(px, py, x1, y1, x2, y2):
     """ Vectorized calculation of distance from multiple points (px, py) to the line segment (x1, y1)-(x2, y2) """
     line_mag = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
@@ -2170,7 +2193,7 @@ def integer_points_near_line_segment(x1, y1, x2, y2, distance):
     mask = distances <= distance
     result_points = np.vstack((px[mask], py[mask])).T
     
-    return result_points
+    return result_points.astype(np.int32)
 
 class PaintBucketTool(Button):
     def __init__(self,color):
@@ -2179,6 +2202,7 @@ class PaintBucketTool(Button):
         self.px = None
         self.py = None
         self.bboxes = []
+        self.pen_mask = None
     def fill(self, x, y, color_rgb, color_alpha, lines):
         if x < 0 or y < 0 or x >= lines.shape[0] or y >= lines.shape[1]:
             return
@@ -2203,19 +2227,19 @@ class PaintBucketTool(Button):
             self.px = x
             self.py = y
 
-        color_surface = movie.edit_curr_frame().surf_by_id('color')
-        color_rgb = pg.surfarray.pixels3d(color_surface)
-        color_alpha = pg.surfarray.pixels_alpha(color_surface)
-        lines = pygame.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
-
         radius = MEDIUM_ERASER_WIDTH//2 * layout.drawing_area().xscale
         with bucket_points_near_line_timer:
             points = integer_points_near_line_segment(self.px, self.py, x, y, radius)
-        # TODO: move the loop to C
-        for xi, yi in points: 
-            self.fill(int(xi), int(yi), color_rgb, color_alpha, lines)
+            xs = points[:,0]
+            ys = points[:,1]
         self.px = x
         self.py = y
+        
+        with bucket_flood_fill_timer:
+            color_rgba = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+            bbox = flood_fill_color_based_on_mask_many_seeds(color_rgba, self.pen_mask, xs, ys, self.color)
+        if bbox:
+            self.bboxes.append(bbox)
 
         # TODO: only redraw within the bbox?
         layout.drawing_area().draw()
@@ -2227,11 +2251,12 @@ class PaintBucketTool(Button):
         self.bboxes = []
         self.px = None
         self.py = None
-        self.yes = True
+        lines = pg.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
+        self.pen_mask = lines == 255
+
         self.fill_and_time(x,y)
     def on_mouse_move(self, x, y): self.fill_and_time(x,y)
     def on_mouse_up(self, x, y):
-        self.yes = True
         self.fill_and_time(x,y)
         if self.bboxes: # we had changes
             inf = 10**9
@@ -2244,6 +2269,7 @@ class PaintBucketTool(Button):
             self.history_item.optimize((minx, miny, maxx, maxy))
             history.append_item(self.history_item)
         self.history_item = None
+        self.pen_mask = None
 
 NO_PATH_DIST = 10**6
 
@@ -4515,7 +4541,7 @@ def byte_size(history_item):
     return getattr(history_item, 'byte_size', lambda: 128)()
 
 def nop(history_item):
-    return getattr(history_item, 'nop', lambda: False)()
+    return history_item is None or getattr(history_item, 'nop', lambda: False)()
 
 def is_drawing_change(history_item):
     return getattr(history_item, 'is_drawing_change', lambda: False)()
@@ -4585,7 +4611,8 @@ class History:
 
             redo = last_op.undo()
             History.byte_size += byte_size(redo) - byte_size(last_op)
-            self.redo.append(redo)
+            if redo is not None:
+                self.redo.append(redo)
             self.undo.pop()
 
         layout.drawing_area().clear_fading_mask() # changing canvas state invalidates old skeletons
@@ -4595,7 +4622,8 @@ class History:
             last_op = self.redo[-1]
             undo = last_op.undo()
             History.byte_size += byte_size(undo) - byte_size(last_op)
-            self.undo.append(undo)
+            if undo is not None:
+                self.undo.append(undo)
             self.redo.pop()
 
     def clear(self):

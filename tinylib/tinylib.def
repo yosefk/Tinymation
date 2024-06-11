@@ -1,0 +1,10 @@
+LIBRARY tinylib
+EXPORTS
+	flood_fill_mask @1
+	fill_color_based_on_mask @2
+	flood_fill_color_based_on_mask_many_seeds @3
+	splev @4
+	image_dijkstra @5
+	patch_hole @6
+	;skeletonize @4
+
