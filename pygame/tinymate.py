@@ -2931,6 +2931,10 @@ class DrawingArea:
         left, bottom, _, _ = self.rect
         return (x-left), (y-bottom)
     def on_mouse_down(self,x,y):
+        alt = pg.key.get_mods() & pg.KMOD_ALT
+        if alt:
+            set_tool(TOOLS['zoom'])
+            layout.restore_tool_on_mouse_up = True
         layout.tool.on_mouse_down(*self.fix_xy(x,y))
     def on_mouse_up(self,x,y):
         layout.tool.on_mouse_up(*self.fix_xy(x,y))
@@ -4746,16 +4750,11 @@ def process_keyup_event(event):
         try_set_cursor(flashlight_cursor[0])
 
 def process_keydown_event(event):
-    alt = event.mod & pg.KMOD_ALT
     ctrl = event.mod & pg.KMOD_CTRL
     shift = event.mod & pg.KMOD_SHIFT
 
     if ctrl and isinstance(layout.tool, FlashlightTool):
         try_set_cursor(needle_cursor[0])
-
-    if alt and not layout.restore_tool_on_mouse_up:
-        set_tool(TOOLS['zoom'])
-        layout.restore_tool_on_mouse_up = True
 
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
     if event.key == pg.K_SPACE:
