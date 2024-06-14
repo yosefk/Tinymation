@@ -147,7 +147,8 @@ class Cache:
                 return 0
     def lock(self): self.locked = True
     def unlock(self): self.locked = False
-    def fetch(self, cached_item):
+    def fetch(self, cached_item): return self.fetch_kv(cached_item)[1]
+    def fetch_kv(self, cached_item):
         key = (cached_item.compute_key(), (IWIDTH, IHEIGHT))
         value = self.key2value.get(key, Cache.MISS)
         if value is Cache.MISS:
@@ -155,7 +156,7 @@ class Cache:
             vsize = self.size(value)
             self.computed_bytes += vsize
             if self.locked:
-                return value
+                return key[0], value
             self.cache_size += vsize
             self._evict_lru_as_needed()
             self.key2value[key] = value
@@ -168,7 +169,7 @@ class Cache:
                 if not np.array_equal(pg.surfarray.pixels3d(ref), pg.surfarray.pixels3d(value)) or not np.array_equal(pg.surfarray.pixels_alpha(ref), pg.surfarray.pixels_alpha(value)):
                     print('HIT BUG!',key)
                 self.last_check[key] = self.gc_iter
-        return value
+        return key[0], value
 
     def _evict_lru_as_needed(self):
         while self.cache_size > MAX_CACHE_BYTE_SIZE or len(self.key2value) > MAX_CACHED_ITEMS:
@@ -1248,6 +1249,7 @@ WIDTH = 3 # the smallest width where you always have a pure pen color rendered a
 # the line path, making our naive flood fill work well...
 MEDIUM_ERASER_WIDTH = 5*WIDTH
 BIG_ERASER_WIDTH = 20*WIDTH
+PAINT_BUCKET_WIDTH = 3*WIDTH
 CURSOR_SIZE = int(screen.get_width() * 0.07)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
 MAX_CACHE_BYTE_SIZE = 1*1024**3
@@ -1346,7 +1348,7 @@ fit_curve_timer = timers.add('bspline_interp', indent=2)
 pen_suggestions_timer = timers.add('pen suggestions', indent=1)
 eraser_timer = timers.add('eraser',indent=1)
 pen_fading_mask_timer = timers.add('fading_mask', indent=1)
-paint_bucket_timer = timers.add('PaintBucketTool.fill_and_time')
+paint_bucket_timer = timers.add('PaintBucketTool.fill')
 bucket_points_near_line_timer = timers.add('integer_points_near_line_segment', indent=1)
 bucket_flood_fill_timer = timers.add('flood_fill_color_based_on_lines', indent=1)
 timeline_down_timer = timers.add('TimelineArea.on_mouse_down')
@@ -2203,19 +2205,7 @@ class PaintBucketTool(Button):
         self.py = None
         self.bboxes = []
         self.pen_mask = None
-    def fill(self, x, y, color_rgb, color_alpha, lines):
-        if x < 0 or y < 0 or x >= lines.shape[0] or y >= lines.shape[1]:
-            return
-        
-        if (np.array_equal(color_rgb[x,y,:], np.array(self.color[0:3])) and color_alpha[x,y] == self.color[3]) or lines[x,y] == 255:
-            return # we never flood the lines themselves - they keep the PEN color in a separate layer;
-            # and there's no point in flooding with the color the pixel already has
-
-        with bucket_flood_fill_timer:
-            bbox = flood_fill_color_based_on_lines(color_rgb, lines, x, y, self.color)
-        self.bboxes.append(bbox)
-
-    def fill_and_time(self, x, y):
+    def fill(self, x, y):
         if curr_layer_locked():
             return
         paint_bucket_timer.start()
@@ -2227,7 +2217,7 @@ class PaintBucketTool(Button):
             self.px = x
             self.py = y
 
-        radius = MEDIUM_ERASER_WIDTH//2 * layout.drawing_area().xscale
+        radius = (PAINT_BUCKET_WIDTH//2) * layout.drawing_area().xscale
         with bucket_points_near_line_timer:
             points = integer_points_near_line_segment(self.px, self.py, x, y, radius)
             xs = points[:,0]
@@ -2254,10 +2244,14 @@ class PaintBucketTool(Button):
         lines = pg.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
         self.pen_mask = lines == 255
 
-        self.fill_and_time(x,y)
-    def on_mouse_move(self, x, y): self.fill_and_time(x,y)
+        self.fill(x,y)
+    def on_mouse_move(self, x, y):
+        if self.pen_mask is None: # pen_mask is None has been known to happen in flood_fill_color_based_on_mask_many_seeds...
+            self.on_mouse_down(x,y)
+        else:
+            self.fill(x,y)
     def on_mouse_up(self, x, y):
-        self.fill_and_time(x,y)
+        self.on_mouse_move(x,y)
         if self.bboxes: # we had changes
             inf = 10**9
             minx, miny, maxx, maxy = inf, inf, -inf, -inf
@@ -2603,7 +2597,13 @@ class Layout:
             if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
                 if self.hidden(elem):
                     continue
-                elem.draw()
+                try:
+                    elem.draw()
+                except:
+                    import traceback
+                    traceback.print_exc()
+                    pygame.draw.rect(screen, (255,0,0), elem.rect, 3, 3)
+                    continue
                 if elem.draw_border:
                     pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
 
@@ -2801,9 +2801,7 @@ class DrawingArea:
         if self.zoom == 1:
             return surface
         return surface.subsurface((self.xoffset, self.yoffset, self.iwidth, self.iheight))
-    def scale_and_cache(self, surface, key):
-        if surface is None:
-            return None
+    def scale_and_cache(self, surface, key, get_key=False):
         self._internal_layout()
         class ScaledSurface:
             def compute_key(_):
@@ -2812,6 +2810,10 @@ class DrawingArea:
             def compute_value(_):
                 frame_roi, (_, _, iwidth, iheight) = self.frame_and_subsurface_roi()
                 return scale_image(surface.subsurface(frame_roi), iwidth, iheight)
+        if get_key:
+            return ScaledSurface().compute_key()
+        if surface is None:
+            return None
         return cache.fetch(ScaledSurface())
     def set_fading_mask(self, fading_mask, skeleton=None):
         self.fading_mask_version += 1
@@ -3117,20 +3119,23 @@ class TimelineArea:
             yield (pos, color, transparency)
 
     def combined_light_table_mask(self):
-        class CachedCombinedMask:
-            def compute_key(_):
-                id2version = []
-                computation = []
-                for pos, color, transparency in self.light_table_positions():
-                    i2v, c = movie.get_mask(pos, color, transparency, key=True)
-                    id2version += i2v
-                    computation.append(c)
-                return tuple(id2version), ('combined-mask', tuple(computation))
-                
-            def compute_value(_):
-                masks = []
-                for pos, color, transparency in self.light_table_positions():
-                    masks.append(movie.get_mask(pos, color, transparency))
+        # there are 2 kinds of frame positions: those where the frame of the current layer (at movie.layer_pos) is the same
+        # as the frame in the current position (at movie.pos) in that layer due to holds, and those where it's not.
+        # for the latter kind, we can combine all their masks produced by movie.get_mask together.
+        # for the former kind, we don't get_mask to recompute each position's mask when the current layer changes.
+        # so instead we do this:
+        #   - we combine all the masks containing all the layers *except* the current one
+        #   - we additionally combine all the masks containing all the layers *above* the current one
+        #   - we then use the first combined mask at the pixels not covered by the current layer's lines/color alpha at movie.pos,
+        #     and we use the second combined mask at the pxiels covered by the current layer's lines/color alpha at movie.pos.
+        light_table_positions = list(self.light_table_positions())
+        curr_frame = movie.curr_frame()
+        curr_layer = movie.layers[movie.layer_pos]
+        curr_lit = curr_layer.lit and curr_layer.visible
+        held_positions = [(pos,c,t) for pos,c,t in light_table_positions if curr_lit and movie.frame(pos) is curr_frame]
+        rest_positions = [(pos,c,t) for pos,c,t in light_table_positions if not (curr_lit and movie.frame(pos) is curr_frame)]
+
+        def combine_masks(masks):
                 if len(masks) == 0:
                     return None
                 elif len(masks) == 1:
@@ -3141,13 +3146,86 @@ class TimelineArea:
                     for m in masks[1:]:
                         alphas.append(m.get_alpha())
                         m.set_alpha(255) # TODO: this assumes the same transparency in all masks - might want to change
-                    mask.blits([(m, (0, 0), (0, 0, mask.get_width(), mask.get_height())) for m in masks[1:]])
+                    mask.blits([(m, (0, 0)) for m in masks[1:]])
                     for m,a in zip(masks[1:],alphas):
                         m.set_alpha(a)
                     return mask
 
-        cached_combined_mask = CachedCombinedMask()
-        return layout.drawing_area().scale_and_cache(cache.fetch(cached_combined_mask), cached_combined_mask.compute_key())
+        class CachedCombinedMask:
+            def __init__(s, light_table_positions, skip_layer=None, lowest_layer_pos=None):
+                s.light_table_positions = light_table_positions
+                s.skip_layer = skip_layer
+                s.lowest_layer_pos = lowest_layer_pos
+
+            def compute_key(s):
+                id2version = []
+                computation = []
+                for pos, color, transparency in s.light_table_positions:
+                    i2v, c = movie.get_mask(pos, color, transparency, key=True, lowest_layer_pos=s.lowest_layer_pos, skip_layer=s.skip_layer)
+                    id2version += i2v
+                    computation.append(c)
+                return tuple(id2version), ('combined-mask', tuple(computation))
+                
+            def compute_value(s):
+                masks = []
+                for pos, color, transparency in s.light_table_positions:
+                    masks.append(movie.get_mask(pos, color, transparency, lowest_layer_pos=s.lowest_layer_pos, skip_layer=s.skip_layer))
+                return combine_masks(masks)
+
+        rest_mask = CachedCombinedMask(rest_positions)
+        held_mask_outside = CachedCombinedMask(held_positions, skip_layer=movie.layer_pos)
+        held_mask_inside = CachedCombinedMask(held_positions, lowest_layer_pos=movie.layer_pos+1)
+        da = layout.drawing_area()
+
+        def scaled_key(cached_mask): return da.scale_and_cache(None, cached_mask.compute_key(), get_key=True)
+        def scaled(cached_mask):
+            k, v = cache.fetch_kv(cached_mask)
+            return da.scale_and_cache(v, k)
+
+        class AllPosMask:
+            def compute_key(_):
+                keys = [scaled_key(m) for m in (rest_mask, held_mask_outside, held_mask_inside)]
+                id2vs, comps = zip(*keys)
+                id2vs = sum(id2vs,(curr_frame.cache_id_version(),) if held_positions else tuple())
+                return id2vs, ('all-pos-mask', tuple(comps))
+
+            def compute_value(_):
+                if not held_positions:
+                    return scaled(rest_mask)
+
+                held_outside = scaled(held_mask_outside)
+                held_inside = scaled(held_mask_inside)
+                
+                if held_inside or held_outside:
+                    roi, sub_roi = da.frame_and_subsurface_roi() 
+                    iwidth, iheight = sub_roi[2], sub_roi[3]
+
+                    scaled_layer = movie.get_thumbnail(movie.pos, iwidth, iheight, transparent_single_layer=movie.layer_pos, roi=roi)
+                    alpha = pg.surfarray.pixels_alpha(scaled_layer)
+
+                masks = []
+
+                if held_inside:
+                    inside = held_inside.copy()
+                    ialpha = pg.surfarray.pixels_alpha(inside)
+                    ialpha[:] = np.minimum(alpha, ialpha)
+                    del ialpha
+                    masks.append(inside)
+
+                if held_outside:
+                    outside = held_outside.copy()
+                    oalpha = pg.surfarray.pixels_alpha(outside)
+                    oalpha[:] = np.minimum(255-alpha, oalpha)
+                    del oalpha
+                    masks.append(outside)
+                
+                rest = scaled(rest_mask)
+                if rest:
+                    masks.append(rest)
+
+                return combine_masks(masks)
+                
+        return cache.fetch(AllPosMask())
 
     def x2frame(self, x):
         for left, right, pos in self.frame_boundaries:
@@ -3416,7 +3494,7 @@ class LayersArea:
             pygame.draw.rect(surface, PEN, (image_left, blit_bottom, image.get_width(), image.get_height()), border)
 
             max_border = 3
-            if len(movie.frames) > 1 and layer.visible and layout.timeline_area().combined_light_table_mask():
+            if len(movie.frames) > 1 and layer.visible and list(layout.timeline_area().light_table_positions()):
                 lit = self.light_on if layer.lit else self.light_off
                 surface.blit(lit, (width - lit.get_width() - max_border, blit_bottom))
                 self.lit_boundaries.append((left + width - lit.get_width() - max_border, bottom, left+width, bottom+lit.get_height(), layer_pos))
@@ -3754,9 +3832,11 @@ class Movie(MovieData):
     def frame(self, pos):
         return self.layers[self.layer_pos].frame(pos)
 
-    def get_mask(self, pos, rgb, transparency, key=False):
+    def get_mask(self, pos, rgb, transparency, key=False, lowest_layer_pos=None, skip_layer=None):
         # ignore invisible layers
-        layers = [layer for layer in self.layers if layer.visible]
+        if lowest_layer_pos is None:
+            lowest_layer_pos = 0
+        layers = [layer for i,layer in enumerate(self.layers) if layer.visible and i>=lowest_layer_pos and i!=skip_layer]
         # ignore the layers where the frame at the current position is an alias for the frame at the requested position
         # (it's visually noisy to see the same lines colored in different colors all over)
         def lines_lit(layer): return layer.lit and layer.surface_pos(self.pos) != layer.surface_pos(pos)
@@ -3784,7 +3864,7 @@ class Movie(MovieData):
                 return id2version, ('mask', rgb, transparency, computation)
             def compute_value(_):
                 mask_surface = pygame.Surface((empty_frame().get_width(), empty_frame().get_height()), pygame.SRCALPHA)
-                pygame.surfarray.pixels3d(mask_surface)[:] = np.array(rgb)
+                mask_surface.fill(rgb)
                 pg.surfarray.pixels_alpha(mask_surface)[:] = cache.fetch(CachedMaskAlpha())
                 mask_surface.set_alpha(int(transparency*255))
                 return mask_surface
@@ -4358,7 +4438,7 @@ class Palette:
         self.init_cursors()
 
     def init_cursors(self):
-        radius = MEDIUM_ERASER_WIDTH//2
+        radius = PAINT_BUCKET_WIDTH//2
         def bucket(color): return add_circle(color_image(paint_bucket_cursor[0], color), radius)
 
         self.cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
