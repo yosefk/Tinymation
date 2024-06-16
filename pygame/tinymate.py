@@ -2069,16 +2069,20 @@ class ZoomTool(Button):
     def on_mouse_move(self, x, y):
         px, py = self.start
         up = y < py
-        if (up and self.max_up_dist == 0) or (not up and self.max_down_dist == 0):
-            return
-
         da = layout.drawing_area()
-        dist = abs(py - y) #math.sqrt(sqdist((x,y), (px,py)))#abs(y - py)
-        ratio = min(1, max(0, dist/(self.max_up_dist if up else self.max_down_dist)))
-        zoom_change = ratio*((MAX_ZOOM - self.orig_zoom) if up else (self.orig_zoom - MIN_ZOOM))
-        if not up:
-            zoom_change = -zoom_change
-        new_zoom = max(MIN_ZOOM,min(self.orig_zoom + zoom_change, MAX_ZOOM))
+        if up and self.max_up_dist == 0:
+            new_zoom = MAX_ZOOM
+            ratio = 0
+        elif not up and self.max_down_dist == 0:
+            new_zoom = MIN_ZOOM
+            ratio = 1
+        else:
+            dist = abs(py - y) #math.sqrt(sqdist((x,y), (px,py)))#abs(y - py)
+            ratio = min(1, max(0, dist/(self.max_up_dist if up else self.max_down_dist)))
+            zoom_change = ratio*((MAX_ZOOM - self.orig_zoom) if up else (self.orig_zoom - MIN_ZOOM))
+            if not up:
+                zoom_change = -zoom_change
+            new_zoom = max(MIN_ZOOM,min(self.orig_zoom + zoom_change, MAX_ZOOM))
         da.set_zoom(new_zoom)
 
         # we want xy2frame(self.start) to return the same value at the beginnig of the zooming [if possible]
