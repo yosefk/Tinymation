@@ -1714,7 +1714,12 @@ def bounding_rectangle_of_a_boolean_mask(mask):
 
     return minx, maxx, miny, maxy
 
-class HistoryItem:
+class HistoryItemBase:
+    def is_drawing_change(self): return False
+    def byte_size(history_item): return 128
+    def nop(history_item): return False
+
+class HistoryItem(HistoryItemBase):
     def __init__(self, surface_id, bbox=None):
         self.surface_id = surface_id
         if not bbox:
@@ -1804,7 +1809,7 @@ class HistoryItemSet:
         self.items = [item for item in items if item is not None]
     def is_drawing_change(self):
         for item in self.items:
-            if not is_drawing_change(item):
+            if not item.is_drawing_change():
                 return False
         return True
     def nop(self):
@@ -1830,8 +1835,18 @@ def scale_and_preserve_aspect_ratio(w, h, width, height):
         scaled_width = w*scaled_height/h
     return round(scaled_width), round(scaled_height)
 
-class Button:
+class LayoutElemBase:
+    def __init__(self): self.redraw = True
+    def init(self): pass
+    def hit(self, x, y): return True
+    def draw(self): pass
+    def on_mouse_down(self, x, y): pass
+    def on_mouse_move(self, x, y): pass
+    def on_mouse_up(self, x, y): pass
+
+class Button(LayoutElemBase):
     def __init__(self):
+        LayoutElemBase.__init__(self)
         self.button_surface = None
         self.only_hit_non_transparent = False
     def draw(self, rect, cursor_surface):
@@ -2577,7 +2592,7 @@ class Layout:
         elem.rect = srect
         elem.subsurface = screen.subsurface(srect)
         elem.draw_border = draw_border
-        getattr(elem, 'init', lambda: None)()
+        elem.init()
         self.elems.append(elem)
 
     def draw_locked(self):
@@ -2591,7 +2606,7 @@ class Layout:
         if self.is_pressed:
             if self.focus_elem is self.drawing_area():
                 return
-            if not getattr(self.focus_elem,'redraw',True):
+            if not self.focus_elem.redraw:
                 return
 
         layout_draw_timer.start()
@@ -2659,7 +2674,7 @@ class Layout:
                 if not self.is_playing or isinstance(elem, TogglePlaybackButton):
                     if self.hidden(elem):
                         continue
-                    if getattr(elem, 'hit', lambda x,y: True)(x,y):
+                    if elem.hit(x,y):
                         self._dispatch_event(elem, event, x, y)
                         dispatched = True
                         break
@@ -2704,8 +2719,8 @@ class Layout:
         self.is_playing = not self.is_playing
         self.playing_index = 0
             
-class DrawingArea:
-    def __init__(self):
+class DrawingArea(LayoutElemBase):
+    def init(self):
         self.fading_mask = None
         self.fading_func = None
         self.fade_per_frame = 0
@@ -3004,7 +3019,7 @@ class ScrollIndicator:
             self.prev_draw_rect = (startx, 0, scroll.get_width(), scroll.get_height()//2)
         self.last_dir_is_left = left
 
-class TimelineArea:
+class TimelineArea(LayoutElemBase):
     def _calc_factors(self):
         _, _, width, height = self.rect
         factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.15]
@@ -3417,7 +3432,7 @@ class TimelineArea:
                 new_pos = min(max(0, movie.pos + pos_dist), len(movie.frames)-1)
             movie.seek_frame(new_pos)
 
-class LayersArea:
+class LayersArea(LayoutElemBase):
     def init(self):
         left, bottom, width, height = self.rect
         max_height = height / MAX_LAYERS
@@ -3696,7 +3711,7 @@ class MovieList:
 
         self.exporting_processes = {}
 
-class MovieListArea:
+class MovieListArea(LayoutElemBase):
     def init(self):
         self.show_pos = None
         self.prevx = None
@@ -3777,8 +3792,9 @@ class MovieListArea:
         self.prevx = None
         self.show_pos = None
 
-class ToolSelectionButton:
+class ToolSelectionButton(LayoutElemBase):
     def __init__(self, tool):
+        LayoutElemBase.__init__(self)
         self.tool = tool
     def draw(self):
         pg.draw.rect(screen, SELECTED if self.tool is layout.full_tool else UNDRAWABLE, self.rect)
@@ -4186,7 +4202,7 @@ class Movie(MovieData):
             for frame in layer.frames:
                 frame.fit_to_resolution()
 
-class SeekFrameHistoryItem:
+class SeekFrameHistoryItem(HistoryItemBase):
     def __init__(self, pos, layer_pos):
         self.pos = pos
         self.layer_pos = layer_pos
@@ -4196,7 +4212,7 @@ class SeekFrameHistoryItem:
         return redo
     def __str__(self): return f'SeekFrameHistoryItem(restoring pos to {self.pos} and layer_pos to {self.layer_pos})'
 
-class InsertFrameHistoryItem:
+class InsertFrameHistoryItem(HistoryItemBase):
     def __init__(self, pos): self.pos = pos
     def undo(self):
         # normally remove_frame brings you to the next frame after the one you removed.
@@ -4208,7 +4224,7 @@ class InsertFrameHistoryItem:
     def __str__(self):
         return f'InsertFrameHistoryItem(removing at pos {self.pos})'
 
-class RemoveFrameHistoryItem:
+class RemoveFrameHistoryItem(HistoryItemBase):
     def __init__(self, pos, removed_frame_data):
         self.pos = pos
         self.removed_frame_data = removed_frame_data
@@ -4221,7 +4237,7 @@ class RemoveFrameHistoryItem:
         frames, holds = self.removed_frame_data
         return sum([f.size() for f in frames])
 
-class InsertLayerHistoryItem:
+class InsertLayerHistoryItem(HistoryItemBase):
     def __init__(self, layer_pos): self.layer_pos = layer_pos
     def undo(self):
         removed_layer = movie.remove_layer(at_pos=self.layer_pos, new_pos=max(0, self.layer_pos-1))
@@ -4229,7 +4245,7 @@ class InsertLayerHistoryItem:
     def __str__(self):
         return f'InsertLayerHistoryItem(removing layer {self.layer_pos})'
 
-class RemoveLayerHistoryItem:
+class RemoveLayerHistoryItem(HistoryItemBase):
     def __init__(self, layer_pos, removed_layer):
         self.layer_pos = layer_pos
         self.removed_layer = removed_layer
@@ -4241,7 +4257,7 @@ class RemoveLayerHistoryItem:
     def byte_size(self):
         return sum([f.size() for f in self.removed_layer.frames])
 
-class ToggleHoldHistoryItem:
+class ToggleHoldHistoryItem(HistoryItemBase):
     def __init__(self, pos, layer_pos):
         self.pos = pos
         self.layer_pos = layer_pos
@@ -4254,7 +4270,7 @@ class ToggleHoldHistoryItem:
     def __str__(self):
         return f'ToggleHoldHistoryItem(toggling hold at frame {self.pos} layer {self.layer_pos})'
 
-class ToggleHistoryItem:
+class ToggleHistoryItem(HistoryItemBase):
     def __init__(self, toggle_func): self.toggle_func = toggle_func
     def undo(self):
         self.toggle_func()
@@ -4477,11 +4493,8 @@ MAX_LAYERS = 8
 
 layout = None
 
-class EmptyElem:
+class EmptyElem(LayoutElemBase):
     def draw(self): pg.draw.rect(screen, UNUSED, self.rect)
-    def on_mouse_down(self,x,y): pass
-    def on_mouse_up(self,x,y): pass
-    def on_mouse_move(self,x,y): pass
 
 def init_layout():
     global layout
@@ -4604,7 +4617,7 @@ def load_clips_dir():
 
 load_clips_dir()
 
-class SwapWidthHeightHistoryItem:
+class SwapWidthHeightHistoryItem(HistoryItemBase):
     def undo(self):
         swap_width_height(from_history=True)
         return SwapWidthHeightHistoryItem()
@@ -4625,14 +4638,6 @@ def swap_width_height(from_history=False):
 # what you've done on some frame when you visit it and press undo one time
 # too many
 #
-def byte_size(history_item):
-    return getattr(history_item, 'byte_size', lambda: 128)()
-
-def nop(history_item):
-    return history_item is None or getattr(history_item, 'nop', lambda: False)()
-
-def is_drawing_change(history_item):
-    return getattr(history_item, 'is_drawing_change', lambda: False)()
 
 class History:
     # a history is kept per movie. the size of the history is global - we don't
@@ -4647,7 +4652,7 @@ class History:
 
     def __del__(self):
         for op in self.undo + self.redo:
-            History.byte_size -= byte_size(op)
+            History.byte_size -= op.byte_size()
 
     def _merge_prev_suggestions(self):
         if self.suggestions: # merge them into one
@@ -4671,16 +4676,16 @@ class History:
             self.suggestions = items
 
     def append_item(self, item):
-        if nop(item):
+        if item is None or item.nop():
             return
 
         self._merge_prev_suggestions()
 
         self.undo.append(item)
-        History.byte_size += byte_size(item) - sum([byte_size(op) for op in self.redo])
+        History.byte_size += item.byte_size() - sum([op.byte_size() for op in self.redo])
         self.redo = [] # forget the redo stack
         while self.undo and History.byte_size > MAX_HISTORY_BYTE_SIZE:
-            History.byte_size -= byte_size(self.undo[0])
+            History.byte_size -= self.undo[0].byte_size()
             del self.undo[0]
 
         layout.drawing_area().clear_fading_mask() # new operations invalidate old skeletons
@@ -4694,11 +4699,11 @@ class History:
 
         if self.undo:
             last_op = self.undo[-1]
-            if drawing_changes_only and not is_drawing_change(last_op):
+            if drawing_changes_only and not last_op.is_drawing_change():
                 return
 
             redo = last_op.undo()
-            History.byte_size += byte_size(redo) - byte_size(last_op)
+            History.byte_size += redo.byte_size() - last_op.byte_size()
             if redo is not None:
                 self.redo.append(redo)
             self.undo.pop()
@@ -4709,13 +4714,13 @@ class History:
         if self.redo:
             last_op = self.redo[-1]
             undo = last_op.undo()
-            History.byte_size += byte_size(undo) - byte_size(last_op)
+            History.byte_size += undo.byte_size() - last_op.byte_size()
             if undo is not None:
                 self.undo.append(undo)
             self.redo.pop()
 
     def clear(self):
-        History.byte_size -= sum([byte_size(op) for op in self.undo+self.redo])
+        History.byte_size -= sum([op.byte_size() for op in self.undo+self.redo])
         self.undo = []
         self.redo = []
         self.suggestions = None
