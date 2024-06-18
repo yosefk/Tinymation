@@ -2984,7 +2984,7 @@ class ScrollIndicator:
     def __init__(self, w, h, vertical=False):
         self.vertical = vertical
         self.surface = pg.Surface((w, h), pg.SRCALPHA)
-        scroll_size = (w*2, int(w*.2)) if vertical else (int(h*.35), h*2)
+        scroll_size = (w*2, int(w*2)) if vertical else (int(h*2), h*2)
         self.scroll_left = pg.Surface(scroll_size, pg.SRCALPHA)
         self.scroll_right = pg.Surface(scroll_size, pg.SRCALPHA)
 
@@ -2997,14 +2997,25 @@ class ScrollIndicator:
             x, y = y, x
             s = w
         yhdist = np.abs(y-s)/s
-        for i in range(3):
-            rgb_left[:,:,i] = SELECTED[i]*yhdist + PROGRESS[i]*(1-yhdist)
-        rgb_right[:] = rgb_left
-
         alpha_left = pg.surfarray.pixels_alpha(self.scroll_left)
         alpha_right = pg.surfarray.pixels_alpha(self.scroll_right)
-        alpha_left[:] = 255*(x/scroll_size[self.vertical])
-        alpha_right[:] = 255*(1-x/scroll_size[self.vertical])
+        dist = np.sqrt((y-s)**2 + (x+s/9)**2) # defines the center offset
+        dist = np.abs(s/0.78-dist) # defines the ring radius
+        dist = np.minimum(dist, s/4.5) # defines the ring width
+        mdist = np.max(dist)
+        dist /= mdist
+        alpha_left[:] = 255*(1-dist)
+
+        dist = np.minimum(dist, 0.5) * 2
+        for i in range(3):
+            rgb_left[:,:,i] = SELECTED[i]*dist + PROGRESS[i]*(1-dist)
+
+        if not vertical:
+            rgb_right[:] = rgb_left[::-1,:,:]
+            alpha_right[:] = alpha_left[::-1,:]
+        else:
+            rgb_right[:] = rgb_left[:,::-1,:]
+            alpha_right[:] = alpha_left[:,::-1]
 
         self.prev_draw_rect = None
         self.last_dir_change_x = None
@@ -3021,7 +3032,7 @@ class ScrollIndicator:
             left = px < x
             self.last_dir_change_x = px
         else:
-            if abs(x - self.last_dir_change_x) < (self.scroll_left.get_width() if not self.vertical else self.scroll_left.get_height())//4:
+            if abs(x - self.last_dir_change_x) < 10:
                 left = self.last_dir_is_left
             else:
                 left = self.last_dir_change_x < x
