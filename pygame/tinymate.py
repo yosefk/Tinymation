@@ -2683,6 +2683,11 @@ class Layout:
         if event.type not in [pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION]:
             return
 
+        if event.type in [pg.MOUSEMOTION, pg.MOUSEBUTTONUP] and not self.is_pressed:
+            return # this guards against processing mouse-up with a button pressed which isn't button 0,
+            # as well as, hopefully, against various mysterious occurences observed in the wild where
+            # we eg are drawing a line even though we aren't actually trying
+
         x, y = event.pos
 
         dispatched = False
@@ -3004,11 +3009,11 @@ class ScrollIndicator:
         dist = np.minimum(dist, s/4.5) # defines the ring width
         mdist = np.max(dist)
         dist /= mdist
-        alpha_left[:] = 255*(1-dist)
+        alpha_left[:] = 192*(1-dist)
 
         dist = np.minimum(dist, 0.5) * 2
         for i in range(3):
-            rgb_left[:,:,i] = SELECTED[i]*dist + PROGRESS[i]*(1-dist)
+            rgb_left[:,:,i] = SELECTED[i]*dist + BACKGROUND[i]*(1-dist)
 
         if not vertical:
             rgb_right[:] = rgb_left[::-1,:,:]
@@ -5001,6 +5006,11 @@ try:
         events = [pygame.event.wait()]
         for event in events:
             if event.type not in interesting_events:
+                continue
+            
+            if event.type in [pg.MOUSEBUTTONDOWN, pg.MOUSEBUTTONUP] and event.button != 1:
+                continue
+            if event.type == pg.MOUSEMOTION and event.buttons != (1, 0, 0):
                 continue
 
             if screen_lock.is_locked():
