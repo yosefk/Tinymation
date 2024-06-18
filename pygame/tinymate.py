@@ -1715,22 +1715,27 @@ def bounding_rectangle_of_a_boolean_mask(mask):
     return minx, maxx, miny, maxy
 
 class HistoryItemBase:
-    def __init__(self, pos=None, layer_pos=None):
-        self.pos_before_undo = pos
-        self.layer_pos_before_undo = layer_pos
+    def __init__(self, restore_pos_before_undo=True):
+        self.restore_pos_before_undo = restore_pos_before_undo
+        self.pos_before_undo = movie.pos
+        self.layer_pos_before_undo = movie.layer_pos
+        self.zoom_before_undo = layout.drawing_area().get_zoom_pan_params()
     def is_drawing_change(self): return False
+    def from_curr_pos(self): return self.pos_before_undo == movie.pos and self.layer_pos_before_undo == movie.layer_pos
     def byte_size(history_item): return 128
     def nop(history_item): return False
     def make_undone_changes_visible(self):
-        seek_pos = self.pos_before_undo is not None and movie.pos != self.pos_before_undo
-        seek_layer = self.layer_pos_before_undo is not None and movie.layer_pos != self.layer_pos_before_undo
-        if seek_pos or seek_layer:
+        if not self.restore_pos_before_undo:
+            return
+        da = layout.drawing_area()
+        if movie.pos != self.pos_before_undo or movie.layer_pos != self.layer_pos_before_undo or da.get_zoom_pan_params() != self.zoom_before_undo:
             movie.seek_frame_and_layer(self.pos_before_undo, self.layer_pos_before_undo)
+            da.restore_zoom_pan_params(self.zoom_before_undo)
             return True
 
 class HistoryItem(HistoryItemBase):
     def __init__(self, surface_id, bbox=None):
-        HistoryItemBase.__init__(self, movie.pos, movie.layer_pos)
+        HistoryItemBase.__init__(self)
         self.surface_id = surface_id
         if not bbox:
             surface = self.curr_surface().copy()
@@ -1814,6 +1819,7 @@ class HistoryItem(HistoryItemBase):
 
 class HistoryItemSet(HistoryItemBase):
     def __init__(self, items):
+        HistoryItemBase.__init__(self)
         self.items = [item for item in items if item is not None]
     def is_drawing_change(self):
         for item in self.items:
@@ -4214,7 +4220,7 @@ class Movie(MovieData):
 
 class InsertFrameHistoryItem(HistoryItemBase):
     def __init__(self):
-        HistoryItemBase.__init__(self, movie.pos, movie.layer_pos)
+        HistoryItemBase.__init__(self)
     def undo(self):
         # normally remove_frame brings you to the next frame after the one you removed.
         # but when undoing insert_frame, we bring you to the previous frame after the one
@@ -4227,7 +4233,7 @@ class InsertFrameHistoryItem(HistoryItemBase):
 
 class RemoveFrameHistoryItem(HistoryItemBase):
     def __init__(self, pos, removed_frame_data):
-        HistoryItemBase.__init__(self)
+        HistoryItemBase.__init__(self, restore_pos_before_undo=False)
         self.pos = pos
         self.removed_frame_data = removed_frame_data
     def undo(self):
@@ -4241,7 +4247,7 @@ class RemoveFrameHistoryItem(HistoryItemBase):
 
 class InsertLayerHistoryItem(HistoryItemBase):
     def __init__(self):
-        HistoryItemBase.__init__(self, movie.pos, movie.layer_pos)
+        HistoryItemBase.__init__(self)
     def undo(self):
         removed_layer = movie.remove_layer(at_pos=self.layer_pos_before_undo, new_pos=max(0, self.layer_pos_before_undo-1))
         return RemoveLayerHistoryItem(self.layer_pos_before_undo, removed_layer)
@@ -4250,7 +4256,7 @@ class InsertLayerHistoryItem(HistoryItemBase):
 
 class RemoveLayerHistoryItem(HistoryItemBase):
     def __init__(self, layer_pos, removed_layer):
-        HistoryItemBase.__init__(self)
+        HistoryItemBase.__init__(self, restore_pos_before_undo=False)
         self.layer_pos = layer_pos
         self.removed_layer = removed_layer
     def undo(self):
@@ -4262,7 +4268,7 @@ class RemoveLayerHistoryItem(HistoryItemBase):
         return sum([f.size() for f in self.removed_layer.frames])
 
 class ToggleHoldHistoryItem(HistoryItemBase):
-    def __init__(self): HistoryItemBase.__init__(self, movie.pos, movie.layer_pos)
+    def __init__(self): HistoryItemBase.__init__(self)
     def undo(self):
         movie.toggle_hold()
         return self
@@ -4271,7 +4277,7 @@ class ToggleHoldHistoryItem(HistoryItemBase):
 
 class ToggleHistoryItem(HistoryItemBase):
     def __init__(self, toggle_func):
-        HistoryItemBase.__init__(self, movie.pos, movie.layer_pos) # ATM the toggles we use require to seek
+        HistoryItemBase.__init__(self) # ATM the toggles we use require to seek
         # to the original movie position before undoing - could make this more parameteric if needed
         self.toggle_func = toggle_func
     def undo(self):
@@ -4612,7 +4618,7 @@ def load_clips_dir():
 load_clips_dir()
 
 class SwapWidthHeightHistoryItem(HistoryItemBase):
-    def __init__(self): HistoryItemBase.__init__(self)
+    def __init__(self): HistoryItemBase.__init__(self, restore_pos_before_undo=False)
     def undo(self):
         swap_width_height(from_history=True)
         return SwapWidthHeightHistoryItem()
@@ -4694,7 +4700,7 @@ class History:
 
         if self.undo:
             last_op = self.undo[-1]
-            if drawing_changes_only and not last_op.is_drawing_change():
+            if drawing_changes_only and (not last_op.is_drawing_change() or not last_op.from_curr_pos()):
                 return
 
             if last_op.make_undone_changes_visible():
