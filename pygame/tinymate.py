@@ -704,6 +704,93 @@ def unzip_files(zip_file, on_progress):
             if not os.path.exists(os.path.join(WD, f.filename)):
                 zip_ref.extract(f, WD)
     
+# logging
+
+if on_windows:
+    import winpath
+    MY_DOCUMENTS = winpath.get_my_documents()
+else:
+    MY_DOCUMENTS = os.path.expanduser('~')
+
+def set_wd(wd):
+    global WD
+    WD = wd
+    if not os.path.exists(WD):
+        os.makedirs(WD)
+    
+set_wd(os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymate'))
+
+LOGDIR = os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Logs-Tinymate')
+if not os.path.exists(LOGDIR):
+    os.makedirs(LOGDIR)
+
+import datetime
+def format_now(): return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+import logging
+import time
+from logging.handlers import RotatingFileHandler
+
+class StreamLogger:
+    def __init__(self, stream, logger):
+        self.stream = stream
+        self.logger = logger
+        self.lastline = ''
+    def write(self, buf):
+        self.stream.write(buf)
+        if '\n' in buf:
+            self.stream.flush()
+        self.logger.log(logging.INFO, buf)
+    def flush(self):
+        self.stream.flush()
+        
+def make_rotating_logger(name, max_bytes):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(os.path.join(LOGDIR, name+'.txt'), maxBytes=max_bytes, backupCount=5)
+    handler.terminator = ''
+    logger.addHandler(handler)
+    return logger
+
+prints_logger = make_rotating_logger('prints', max_bytes=1024**2)
+sys.stdout = StreamLogger(sys.stdout, prints_logger)
+sys.stderr = StreamLogger(sys.stderr, prints_logger)
+
+events_logger = make_rotating_logger('events', max_bytes=1024**2)
+last_event_us = 0
+def log_event(d):
+    global last_event_us
+    now = int(time.time_ns() * 0.001)
+    d['usd'] = now - last_event_us
+    last_event_us = now
+    events_logger.log(logging.INFO, json.dumps(d)+'\n')
+
+print('>>> STARTING',format_now())
+
+class ReplayedEvent:
+    def __init__(self, d):
+        self.__dict__ = d
+        self.rep = 1
+class ReplayedEventLog:
+    def __init__(self, width, height, events):
+        self.width = width
+        self.height = height
+        self.events = events
+    def screen_dimensions(self): return self.width, self.height
+
+def parse_replay_log():
+    logfiles = reversed(sorted([f for f in os.listdir(LOGDIR) if f.startswith('events.txt')]))
+    log = sum([open(os.path.join(LOGDIR, f)).read().splitlines() for f in logfiles], [])
+    start = None
+    for i, line in enumerate(log):
+        if 'STARTING' in line:
+            start = i
+    if start is None:
+        raise Exception('failed to parse the event log')
+    d = json.loads(log[start])
+    events = [ReplayedEvent(json.loads(line)) for line in log[start+1:]]
+    replayed = ReplayedEventLog(d['width'], d['height'], events)
+    return replayed
 
 # Student server & teacher client: turn screen on/off, save/restore backups
 
@@ -1017,7 +1104,6 @@ class TeacherClient:
                     if not line:
                         break
                     print(student, line)
-                    sys.stdout.flush()
                     if line.endswith('<br>'):
                         self.student2progress[student] = [int(t) for t in line.split()[:2]]
                     else:
@@ -1064,7 +1150,6 @@ class TeacherClient:
                     self.student2progress[student] = (len(backup_base64)*5/8, total)
                     backup_base64 += line
                     print(student, 'sent', int(len(backup_base64)*5/8), '/', total)
-                    sys.stdout.flush()
 
                 data = base64.b64decode(backup_base64)
                 info = backup_info[student]
@@ -1210,10 +1295,7 @@ def start_teacher_client():
 
 import subprocess
 import pygame.gfxdraw
-if on_windows:
-    import winpath
 import math
-import datetime
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib
@@ -1227,10 +1309,19 @@ from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closin
 pg = pygame
 pg.init()
 
-#screen = pygame.display.set_mode((800, 350*2), pygame.RESIZABLE)
-#screen = pygame.display.set_mode((350, 800), pygame.RESIZABLE)
-#screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
-screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+replay_log = None
+if len(sys.argv) > 1 and sys.argv[1] == 'replay':
+    print('replaying events from log')
+    replay_log = parse_replay_log()
+    screen = pg.display.set_mode(replay_log.screen_dimensions(), pg.RESIZABLE)
+else:
+    #screen = pygame.display.set_mode((800, 350*2), pygame.RESIZABLE)
+    #screen = pygame.display.set_mode((350, 800), pygame.RESIZABLE)
+    #screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
+    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+
+log_event(dict(STARTING=True, width=screen.get_width(), height=screen.get_height()))
+
 screen.fill(BACKGROUND)
 pygame.display.flip()
 pygame.display.set_caption("Tinymate")
@@ -1255,21 +1346,8 @@ MAX_HISTORY_BYTE_SIZE = 1*1024**3
 MAX_CACHE_BYTE_SIZE = 1*1024**3
 MAX_CACHED_ITEMS = 2000
 
-if on_windows:
-    MY_DOCUMENTS = winpath.get_my_documents()
-else:
-    MY_DOCUMENTS = os.path.expanduser('~')
-
-def set_wd(wd):
-    global WD
-    WD = wd
-    if not os.path.exists(WD):
-        os.makedirs(WD)
-    
-set_wd(os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymate'))
 print('clips read from, and saved to',WD)
 
-import time
 # add tdiff() to printouts to see how many ms passed since the last call to tdiff()
 prevts=time.time_ns()
 def tdiff():
@@ -2039,6 +2117,14 @@ class PenTool(Button):
         pen_move_timer.start()
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
+
+        # no idea why this happens for fast pen motions, but it's been known to happen - we see the first coordinate repeated for some reason
+        # note that sometimes you get something close but not quite equal to the first coordinate and it's clearly wrong because it's an outlier
+        # relatively to the rest of the points; not sure if we should try to second-guess the input device enough to handle it...
+        if len(self.points) < 6 and (cx, cy) in self.points:
+            pen_move_timer.stop()
+            return
+
         if self.eraser and self.bucket_color is None:
             nx, ny = round(cx), round(cy)
             if nx>=0 and ny>=0 and nx<self.lines_array.shape[0] and ny<self.lines_array.shape[1] and self.lines_array[nx,ny] == 0:
@@ -3683,6 +3769,8 @@ class MovieList:
             fulldir = os.path.join(WD, clipdir)
             frame_file = os.path.join(fulldir, CURRENT_FRAME_FILE)
             image = load_image(frame_file) if os.path.exists(frame_file) else new_frame()
+            # FIXME: take the aspect ratio from the json file into account
+            # TODO: avoid reloading images if the file didn't change since the last time
             self.images.append(scale_image(image, height=single_image_height))
             self.clips.append(fulldir)
         self.clip_pos = 0 
@@ -4609,7 +4697,6 @@ def init_layout():
 
     set_tool(last_tool if last_tool else TOOLS['pencil'])
 
-def format_now(): return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 def new_movie_clip_dir(): return os.path.join(WD, format_now())
 
 def default_clip_dir():
@@ -4780,6 +4867,7 @@ timer_events = [
 REDRAW_LAYOUT_EVENT = pygame.USEREVENT + 4
 RELOAD_MOVIE_LIST_EVENT = pygame.USEREVENT + 5
 
+interesting_event_attrs = 'type pos key mod rep'.split() # rep means "replayed event" - we log these same as others
 interesting_events = [
     pygame.KEYDOWN,
     pygame.KEYUP,
@@ -4996,25 +5084,40 @@ class ScreenLock:
             self.locked = False
         return False
 
-sys.stdout.flush()
+replayed_event_index = 0
 
 try:
     screen_lock = ScreenLock()
     while not escape: 
-        # pygame.event.get() returns an empty list when there are no events,
-        # so a loop using it uses 100% of CPU
-        events = [pygame.event.wait()]
+        try:
+            event = replay_log.events[replayed_event_index]
+            replayed_event_index += 1
+            events = [event]
+            if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                raise Exception('not quitting')
+        except:
+            # pygame.event.get() returns an empty list when there are no events,
+            # so a loop using it uses 100% of CPU
+            events = [pygame.event.wait()]
         for event in events:
             if event.type not in interesting_events:
                 continue
             
-            if event.type in [pg.MOUSEBUTTONDOWN, pg.MOUSEBUTTONUP] and event.button != 1:
+            if event.type in [pg.MOUSEBUTTONDOWN, pg.MOUSEBUTTONUP] and getattr(event, 'button', 1) != 1:
                 continue
-            if event.type == pg.MOUSEMOTION and event.buttons != (1, 0, 0):
+            if event.type == pg.MOUSEMOTION and getattr(event, 'buttons', (1,0,0)) != (1,0,0):
                 continue
 
             if screen_lock.is_locked():
                 continue
+
+            event_attrs = {}
+            for attr in interesting_event_attrs:
+                val = getattr(event, attr, None)
+                if val is not None:
+                    event_attrs[attr] = val
+            log_event(event_attrs)
+            #pickle.dump(event_attrs, event_log)
 
             timer = event2timer[event.type]
             #if event.type not in timer_events:
@@ -5091,3 +5194,5 @@ pygame.display.quit()
 pygame.quit()
 if student_server:
     student_server.stop()
+
+print('>>> QUITTING',format_now())
