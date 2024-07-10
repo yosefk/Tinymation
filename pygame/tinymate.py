@@ -1518,7 +1518,7 @@ def should_make_closed(curve_length, bbox_length, endpoints_dist):
     else: # "long and curvy" - only make closed when the endpoints are close relatively to the bbox length
         return endpoints_dist / bbox_length < 0.1
 
-def bspline_interp(points, suggest_options, existing_lines):
+def bspline_interp(points, suggest_options, existing_lines, zoom):
     fit_curve_timer.start()
     x = np.array([1.*p[0] for p in points])
     y = np.array([1.*p[1] for p in points])
@@ -1539,7 +1539,8 @@ def bspline_interp(points, suggest_options, existing_lines):
         new_points = splev(np.arange(ufirst, ulast+step, step), tck)
         results.append(new_points)
 
-    tck, u = splprep([x, y], s=len(x)/5)
+    smoothing = len(x) / (2*zoom)
+    tck, u = splprep([x, y], s=smoothing)
     add_result(tck, u[0], u[-1])
 
     if not suggest_options:
@@ -1586,14 +1587,14 @@ def bspline_interp(points, suggest_options, existing_lines):
     make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
 
     if make_closed:
-        tck, u = splprep([x, y], s=len(x)/5, per=True)
+        tck, u = splprep([x, y], s=smoothing, per=True)
         add_result(tck, u[0], u[-1])
         return reversed(results)
 
     fit_curve_timer.stop()
     return results
 
-def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points):
+def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points, zoom):
     results = []
     def add_results(px, py):
         minx = math.floor(max(0, np.min(px) - pwidth - 1))
@@ -1619,7 +1620,7 @@ def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_
         eps = 0.001
         points = [(x+eps, y+eps)] + points
     try:
-        for path in bspline_interp(points, suggest_options, existing_lines):
+        for path in bspline_interp(points, suggest_options, existing_lines, zoom):
             px, py = filter_points(path[0], path[1])
             add_results(px, py)
     except:
@@ -1629,7 +1630,7 @@ def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_
 
     return results
 
-def drawLines(image_height, image_width, points, width, suggest_options, existing_lines, filter_points=lambda px, py: (px, py)):
+def drawLines(image_height, image_width, points, width, suggest_options, existing_lines, zoom, filter_points=lambda px, py: (px, py)):
     global fig_dict
     global ax_dict
     global fig
@@ -1659,7 +1660,7 @@ def drawLines(image_height, image_width, points, width, suggest_options, existin
     pwidth = width
     width *= 72 / fig.get_dpi()
 
-    return plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points)
+    return plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points, zoom)
 
 def drawCircle( screen, x, y, color, width):
     pygame.draw.circle( screen, color, ( x, y ), width/2 )
@@ -2032,7 +2033,7 @@ class PenTool(Button):
 
         line_width = self.width * (1 if self.width == WIDTH else drawing_area.xscale)
         pen_draw_lines_timer.start()
-        line_options = drawLines(frame.get_width(), frame.get_height(), self.points, line_width, suggest_options=not self.eraser, existing_lines=lines)
+        line_options = drawLines(frame.get_width(), frame.get_height(), self.points, line_width, suggest_options=not self.eraser, existing_lines=lines, zoom=drawing_area.zoom)
         pen_draw_lines_timer.stop()
 
         # note that theoretically we might have a line intersecting the image but we'll ignore it because no point
@@ -2589,7 +2590,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
                 end = i
                 break
         return px[start:end], py[start:end]
-    new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines, filter_points=filter_points)[0]
+    new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines, zoom=1, filter_points=filter_points)[0]
 
     history_item = HistoryItem('lines', bbox)
     (minx, miny, maxx, maxy) = bbox
@@ -3253,7 +3254,7 @@ class TimelineArea(LayoutElemBase):
                 num = num_enabled_neg
                 curr_neg += 1
             brightness = int((200 * (num - curr - 1) / (num - 1)) + 55 if num > 1 else 255)
-            color = (brightness,0,0) if pos_dist < 0 else (0,int(brightness*0.7),0)
+            color = (brightness,0,0) if pos_dist < 0 else (0,int(brightness*0.5),0)
             transparency = 0.3
             yield (pos, color, transparency)
 
