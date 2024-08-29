@@ -1,0 +1,10 @@
+{
+  global:
+    flood_fill_mask;
+    fill_color_based_on_mask;
+    flood_fill_color_based_on_mask_many_seeds;
+    splev;
+    image_dijkstra;
+    patch_hole;
+  local: *;
+};

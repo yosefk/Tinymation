@@ -77,8 +77,8 @@ void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_
 	//printf("max_allowed_parallelism %d\n", threads);
 	//oneapi::tbb::global_control global_limit(oneapi::tbb::global_control::max_allowed_parallelism, threads);
 
-	int skipped = 0;
-	int total = 0;
+	//int skipped = 0;
+	//int total = 0;
 
 	while(pixel_removed) {
 		pixel_removed = false;

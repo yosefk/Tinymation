@@ -14,7 +14,7 @@ struct IDPoint
 };
 
 //returns the maximum path length from the non-zero point closest to (cx,cy) or NO_PATH_DIST if there's no such point
-int image_dijkstra(const uint8_t* image, int im_stride, float* dist, int d_stride, int width, int height, int cx, int cy)
+extern "C" int image_dijkstra(const uint8_t* image, int im_stride, float* dist, int d_stride, int width, int height, int cx, int cy)
 {
 	std::fill(dist, dist+d_stride*height, NO_PATH_DIST);
 	std::vector<bool> enqueued(width*height);

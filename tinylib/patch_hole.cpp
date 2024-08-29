@@ -65,7 +65,7 @@ void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_
 //writes coordinates of the points to draw a line through into xs[] and ys[]
 //returns a non-zero number of coordinates iff there's a hole to patch
 //and there was enough room in xs[] and ys[] for the output
-int patch_hole(uint8_t* lines, int lines_stride, uint8_t* skeleton, int sk_stride, int width, int height, int cx, int cy,
+extern "C" int patch_hole(uint8_t* lines, int lines_stride, uint8_t* skeleton, int sk_stride, int width, int height, int cx, int cy,
 	       int patch_region_w, int patch_region_h, int* xs, int* ys, int max_coord,
 	       int* xs1, int* ys1, int *max1, int* xs2, int* ys2, int *max2)
 {

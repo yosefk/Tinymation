@@ -1,4 +1,4 @@
 #!/bin/bash
 set -ex
-g++ -shared -o tinylib.so -O3 -g tinylib.cpp floodfill.cpp fitpack.cpp splev.cpp fpbspl.cpp -Wall -Werror -fPIC
+g++ -shared -o tinylib.so -O3 -g *.cpp -Wall -Werror -fPIC -Wl,--version-script=tinylib.expmap
 mv tinylib.so ../pygame
