@@ -471,13 +471,13 @@ void Brush::paintAt(const SamplePoint& p)
 
 //extern "C" API
 
-extern "C" Brush* brush_init_paint(double x, double y, double time, double lineWidth, int erase, unsigned char* image, int width, int height, int xstride, int ystride)
+extern "C" Brush* brush_init_paint(double x, double y, double time, double lineWidth, double smoothDist, int erase, unsigned char* image, int width, int height, int xstride, int ystride)
 {
     Brush& brush = *new Brush;
     brush._smoothing = Smoothing::WEIGHTED;
-    brush._smoothDist = 25.9;
-    brush._tailAggressiveness = 0.19;
     brush._lineWidth = lineWidth;
+    brush._smoothDist = smoothDist;
+    brush._tailAggressiveness = 0; //since we don't have pressure values, this parameter has no effect anyway
     
     ImagePainter& painter = *new ImagePainter;
     painter._image = image;
@@ -494,10 +494,12 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double lineW
 }
 
 //TODO: return affected ROI
-extern "C" void brush_paint(Brush* brush, double x, double y, double time, double zoom)
+extern "C" void brush_paint(Brush* brush, double* x, double* y, double time, double zoom)
 {
-    SamplePoint s{{x,y},time};
+    SamplePoint s{{*x,*y},time};
     brush->paint(s, zoom);
+    *x = s.pos.x;
+    *y = s.pos.y;
 }
 
 //TODO: return affected ROI

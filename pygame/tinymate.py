@@ -1480,6 +1480,11 @@ import numpy.ctypeslib as npct
 import ctypes
 tinylib = npct.load_library('tinylib','.')
 
+tinylib.brush_init_paint.argtypes = [ctypes.c_double]*5 + [ctypes.c_int, ctypes.c_void_p] + [ctypes.c_int]*4
+tinylib.brush_init_paint.restype = ctypes.c_void_p
+tinylib.brush_paint.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_double]*2
+tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]
+
 def rgba_array(surface):
     ptr, ystride, width, height, bgr = color_c_params(pg.surfarray.pixels3d(surface))
     buffer = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * (width * ystride * 4))).contents
@@ -1940,6 +1945,7 @@ class LayoutElemBase:
     def on_mouse_down(self, x, y): pass
     def on_mouse_move(self, x, y): pass
     def on_mouse_up(self, x, y): pass
+    def on_painting_timer(self): pass
 
 class Button(LayoutElemBase):
     def __init__(self):
@@ -2009,6 +2015,17 @@ class PenTool(Button):
                 da = layout.drawing_area()
                 self.alpha_surface = pg.Surface((da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2), pg.SRCALPHA)
             pg.surfarray.pixels_red(self.alpha_surface)[:] = 0
+
+        drawing_area = layout.drawing_area()
+        cx, cy = drawing_area.xy2frame(x, y)
+        ptr, ystride, width, height = greyscale_c_params(self.lines_array)
+        smoothDist = 40
+        lineWidth = 2.5 if self.width == WIDTH else self.width*drawing_area.xscale
+        self.brush = tinylib.brush_init_paint(cx, cy, time.time_ns()*1000000, lineWidth, smoothDist, 1 if self.eraser else 0, ptr, width, height, 4, ystride)
+
+        self.lines_history_item = HistoryItem('lines')
+
+        self.prev_drawn = (x,y) # Krita feeds the first x,y twice - in init-paint and in paint, here we do, too
         self.on_mouse_move(x,y)
         pen_down_timer.stop()
 
@@ -2016,6 +2033,8 @@ class PenTool(Button):
         if not self.eraser: return
         for cx, cy in reversed(self.points):
             x, y = round(cx), round(cy)
+            # FIXME: should use a different list of points because we're correcting the coordinates (?)
+            # - currently occasionally we don't manage to flood the path
             if x >= 0 and y >= 0 and x < IWIDTH and y < IHEIGHT:
                 return x, y
 
@@ -2023,29 +2042,21 @@ class PenTool(Button):
         if curr_layer_locked():
             return
         pen_up_timer.start()
-        self.lines_array = None
-        drawing_area = layout.drawing_area()
-        cx, cy = drawing_area.xy2frame(x, y)
-        self.points.append((cx,cy))
-        self.prev_drawn = None
-        frame = movie.edit_curr_frame().surf_by_id('lines')
-        lines = pygame.surfarray.pixels_alpha(frame)
 
-        line_width = self.width * (1 if self.width == WIDTH else drawing_area.xscale)
-        pen_draw_lines_timer.start()
-        line_options = drawLines(frame.get_width(), frame.get_height(), self.points, line_width, suggest_options=not self.eraser, existing_lines=lines, zoom=drawing_area.zoom)
-        pen_draw_lines_timer.stop()
+        pg.time.set_timer(PAINTING_TIMER_EVENT, 0, 0)
+
+        tinylib.brush_end_paint(self.brush)
+        self.brush = 0
+        self.prev_drawn = None
+
+        history_item = self.lines_history_item
+        history_item.optimize() # TODO: pass it the bbox
 
         # note that theoretically we might have a line intersecting the image but we'll ignore it because no point
         # in self.points is in the image; doesn't seem a likely enough to case add code that doesn't lose the line in this case
         flood_fill_point = self.find_flood_fill_point()
         if self.eraser and flood_fill_point:
             eraser_timer.start()
-
-            new_lines,(minx,miny,maxx,maxy) = line_options[0]
-            bbox = (minx, miny, maxx, maxy)
-            lines_history_item = HistoryItem('lines', bbox)
-            lines[minx:maxx+1, miny:maxy+1] = np.minimum(255-new_lines, lines[minx:maxx+1, miny:maxy+1])
 
             def make_color_history_item(bbox):
                 return HistoryItem('color', bbox)
@@ -2055,66 +2066,21 @@ class PenTool(Button):
             color_alpha = pg.surfarray.pixels_alpha(color)
             bucket_color = self.bucket_color if self.bucket_color else BACKGROUND+(0,) 
             fx, fy = flood_fill_point
-            color_history_item = flood_fill_color_based_on_lines(color_rgb, lines, round(fx), round(fy), bucket_color, make_color_history_item)
-            history_item = HistoryItemSet([lines_history_item, color_history_item])
+            color_history_item = flood_fill_color_based_on_lines(color_rgb, self.lines_array, fx, fy, bucket_color, make_color_history_item)
+            history_item = HistoryItemSet([self.lines_history_item, color_history_item])
 
-            history.append_item(history_item)
-
-            eraser_timer.stop()
-        elif not self.eraser:
-            pen_suggestions_timer.start()
-
-            prev_history_item = None
-            items = []
-
-            for new_lines,(minx,miny,maxx,maxy) in line_options:
-                bbox = (minx, miny, maxx, maxy)
-                if prev_history_item:
-                    bbox = (min(prev_history_item.minx,minx), min(prev_history_item.miny,miny), max(prev_history_item.maxx,maxx), max(prev_history_item.maxy,maxy))
-                history_item = HistoryItem('lines', bbox)
-                if prev_history_item:
-                    prev_history_item.undo()
-
-                lines[minx:maxx+1, miny:maxy+1] = np.maximum(new_lines, lines[minx:maxx+1, miny:maxy+1])
-
-                items.append(history_item)
-                if not prev_history_item:
-                    prev_history_item = history_item
-
-            history.append_suggestions(items)
-
-            pen_suggestions_timer.stop()
-        
-        if len(line_options)>1:
-            pen_fading_mask_timer.start()
-            if self.suggestion_mask is None or (self.suggestion_mask.get_width() != IWIDTH or self.suggestion_mask.get_height() != IHEIGHT):
-                self.suggestion_mask = pg.Surface((IWIDTH, IHEIGHT), pg.SRCALPHA)
-                self.suggestion_mask.fill((0,255,0))
-            alt_option, (minx,miny,maxx,maxy) = line_options[-2]
-            alpha = pg.surfarray.pixels_alpha(self.suggestion_mask)
-            alpha[:] = 0
-            alpha[minx:maxx+1,miny:maxy+1] = alt_option
-            self.suggestion_mask.set_alpha(10)
-            drawing_area.set_fading_mask(self.suggestion_mask)
-            class Fading:
-                def __init__(self):
-                    self.i = 0
-                def fade(self, alpha, _):
-                    self.i += 1
-                    if self.i == 1:
-                        return 10
-                    if self.i == 2:
-                        return 130
-                    else:
-                        return 110-self.i*10
-            drawing_area.fading_func = Fading().fade
-            pen_fading_mask_timer.stop()
+        history.append_item(history_item)
+        self.lines_array = None
 
         pen_up_timer.stop()
 
-    def on_mouse_move(self, x, y):
+    def on_painting_timer(self):
+        self.on_mouse_move(*self.prev_drawn,from_timer=True)
+
+    def on_mouse_move(self, x, y, from_timer=False):
         if curr_layer_locked():
             return
+
         pen_move_timer.start()
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
@@ -2125,6 +2091,19 @@ class PenTool(Button):
         if len(self.points) < 6 and (cx, cy) in self.points:
             pen_move_timer.stop()
             return
+
+        if not from_timer:
+            # if we get no mouse-move events in the next 20 ms, it means the pen stopped; since we're smoothing the pen
+            # points by averaging with past points, the line will have stopped before we reach the cursor. this timer will
+            # call on_mouse_move with from_timer=True and we'll then keep "hammering" the last point until the line
+            # gets close enough to that point.
+            #
+            # TODO: in Krita things work differently; there seems to be a 7ms timer repeating the point if no new event
+            # is found but seemingly _not_ to address the issue above [then for what? airbrushing?..] - with a timer like
+            # that "hammering" the point you'd see the line approaching the cursor, the larger the smoothing distance the
+            # more time it would take - we can implement a 7ms timer here and see the effect, and this also happens with OpenToonz
+            # smoothing brushes, but not in Krita. How do things work in Krita then?..
+            pg.time.set_timer(PAINTING_TIMER_EVENT, 20, 1)
 
         if self.eraser and self.bucket_color is None:
             nx, ny = round(cx), round(cy)
@@ -2140,9 +2119,22 @@ class PenTool(Button):
         draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface.subsurface((xstart, ystart, iwidth, iheight))
         ox,oy = (0,0) if not expose_other_layers else (xstart, ystart)
         if self.prev_drawn:
-            drawLine(draw_into, (self.prev_drawn[0]-ox, self.prev_drawn[1]-oy), (x-ox,y-oy), color, self.width)
-        # FIXME: adapt brush width to scale?..
-        drawCircle(draw_into, x-ox, y-oy, color, self.circle_width)
+            close_enough = False
+            while not close_enough:
+                xarr = np.array([cx])
+                yarr = np.array([cy])
+                tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), time.time_ns()*1000000, drawing_area.xscale)
+                if from_timer:
+                    # "keep hammering the point or stop?"
+                    dx = xarr[0] - cx
+                    dy = yarr[0] - cy
+                    close_enough = math.sqrt(dx*dx + dy*dy) < 1
+                else:
+                    break
+            
+            #drawLine(draw_into, (self.prev_drawn[0]-ox, self.prev_drawn[1]-oy), (x-ox,y-oy), color, self.width)
+        #drawCircle(draw_into, x-ox, y-oy, color, self.circle_width)
+        #self.lines_array[round(cx),round(cy)] = 255
         if expose_other_layers:
             alpha = pg.surfarray.pixels_red(draw_into)
             w, h = self.lines_array.shape
@@ -2428,6 +2420,28 @@ def fixed_size_image_region(x, y, w, h):
 SK_WIDTH = 350
 SK_HEIGHT = 350
 
+# we use a 4-connectivity flood fill so the following 4-pixel pattern is "not a hole":
+#
+# 0 1
+# 1 0
+#
+# however skeletonize considers this a connected component, so we detect and close such "holes."
+# this shouldn't result in closing a 4-connectivity hole like this:
+#
+# 0 1 0
+# 0 0 0
+# 1 1 1
+#
+# since whatever the x values, the middle 0 cannot be closed, only the zeros around it,
+# which still leaves a "4-connected hole" that skeletonize will treat as a hole
+def close_diagonal_holes(mask):
+    diag1 = mask[1:,:-1] & mask[:-1,1:] & ~mask[1:,1:]
+    diag2 = mask[:-1,:-1] & mask[1:,1:] & ~mask[:-1,1:]
+
+    # FIXME: handle the full range
+    mask[:-1,:-1] |= diag1
+    mask[1:,:-1] |= diag2 
+
 def skeletonize_color_based_on_lines(color, lines, x, y):
     mask_timer.start()
     pen_mask = lines == 255
@@ -2435,6 +2449,8 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
     if pen_mask[x,y]:
         flashlight_timer.stop()
         return
+
+    close_diagonal_holes(pen_mask)
 
     ff_timer.start()
     flood_code = 2
@@ -2518,16 +2534,16 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     lines_ptr, lines_stride, width, height = greyscale_c_params(lines_patch.T, is_alpha=False)
     
     npoints = 3
-    xs = np.zeros(npoints, int)
-    ys = np.zeros(npoints, int)
+    xs = np.zeros(npoints, np.int32)
+    ys = np.zeros(npoints, np.int32)
 
     nextra = 100
-    xs1 = np.zeros(nextra, int)
-    ys1 = np.zeros(nextra, int)
-    n1 = np.array([nextra], int)
-    xs2 = np.zeros(nextra, int)
-    ys2 = np.zeros(nextra, int)
-    n2 = np.array([nextra], int)
+    xs1 = np.zeros(nextra, np.int32)
+    ys1 = np.zeros(nextra, np.int32)
+    n1 = np.array([nextra], np.int32)
+    xs2 = np.zeros(nextra, np.int32)
+    ys2 = np.zeros(nextra, np.int32)
+    n2 = np.array([nextra], np.int32)
 
     # TODO: if the closest point on the skeleton is near invisible (due to the past distance computation),
     # maybe better to recompute the distances and repaint instead of going ahead and patching?..
@@ -2590,6 +2606,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
                 end = i
                 break
         return px[start:end], py[start:end]
+    # TODO: use the brush instead
     new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines, zoom=1, filter_points=filter_points)[0]
 
     history_item = HistoryItem('lines', bbox)
@@ -2756,16 +2773,20 @@ class Layout:
             # when zooming/panning, we redraw at the playback rate [instead of per mouse event,
             # which can create a "backlog" where we keep redrawing after the mouse stops moving because we
             # lag after mouse motion.] TODO: do we want to use a similar approach elsewhere?..
-            elif self.is_pressed and self.zoom_pan_tool() and self.focus_elem is self.drawing_area():
+            elif self.is_pressed: # FIXME and self.zoom_pan_tool() and self.focus_elem is self.drawing_area():
                 cache.lock() # the chance to need to redraw with the same intermediate zoom/pan is low
                 self.drawing_area().draw()
                 cache.unlock()
+                pg.display.flip()
 
         if event.type == FADING_TIMER_EVENT:
             self.drawing_area().update_fading_mask()
 
         if event.type == SAVING_TIMER_EVENT:
             movie.frame(movie.pos).save()
+
+        if event.type == PAINTING_TIMER_EVENT:
+            self.tool.on_painting_timer()
 
         if event.type not in [pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION]:
             return
@@ -2893,6 +2914,21 @@ class DrawingArea(LayoutElemBase):
         self.xscale = IWIDTH/(self.iwidth * self.zoom)
         self.yscale = IHEIGHT/(self.iheight * self.zoom)
     def set_zoom_center(self, center): self.zoom_center = center
+    def set_zoom_to_film_res(self, center):
+        cx, cy = center
+        framex, framey = self.xy2frame(cx, cy)
+
+        # in this class, "zoom=1" is zooming to iwidth,iheight; this is zooming to IWIDTH,IHEIGHT - what would normally be called "1x zoom"
+        self.xscale = 1
+        self.yscale = 1
+        self.zoom = IWIDTH / self.iwidth
+
+        # set xyoffset s.t. the center stays at the same screen location (=we zoom around the center)
+        xoffset = framex + self.xmargin - cx
+        yoffset = framey + self.ymargin - cy
+        self.set_xyoffset(xoffset, yoffset)
+
+        self.set_zoom_center(center)
     def frame_and_subsurface_roi(self):
         # ignoring margins, the roi in the drawing area shows the frame scaled by zoom and then cut
         # to the subsurface xoffset, yoffset, iwidth, iheight
@@ -4470,6 +4506,12 @@ def toggle_layer_lock():
     layer.toggle_locked()
     history.append_item(ToggleHistoryItem(layer.toggle_locked))
 
+def zoom_to_film_res():
+    x, y = pg.mouse.get_pos()
+    da = layout.drawing_area()
+    left, bottom, width, height = da.rect
+    da.set_zoom_to_film_res((x-left,y-bottom))
+
 TOOLS = {
     'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
@@ -4498,6 +4540,7 @@ FUNCTIONS = {
     'toggle-loop-mode': (toggle_loop_mode, 'c', None),
     'toggle-frame-hold': (toggle_frame_hold, 'h', None),
     'toggle-layer-lock': (toggle_layer_lock, 'l', None),
+    'zoom-to-film-res': (zoom_to_film_res, '1', None),
 }
 
 tool_change = 0
@@ -4854,19 +4897,21 @@ escape = False
 PLAYBACK_TIMER_EVENT = pygame.USEREVENT + 1
 SAVING_TIMER_EVENT = pygame.USEREVENT + 2
 FADING_TIMER_EVENT = pygame.USEREVENT + 3
+PAINTING_TIMER_EVENT = pygame.USEREVENT + 4
 
 pygame.time.set_timer(PLAYBACK_TIMER_EVENT, 1000//FRAME_RATE) # we play back at 12 fps
 pygame.time.set_timer(SAVING_TIMER_EVENT, 15*1000) # we save the current frame every 15 seconds
-pygame.time.set_timer(FADING_TIMER_EVENT, 1000//FADING_RATE) # we save a copy of the current clip every 15 seconds
+pygame.time.set_timer(FADING_TIMER_EVENT, 1000//FADING_RATE)
 
 timer_events = [
     PLAYBACK_TIMER_EVENT,
     SAVING_TIMER_EVENT,
     FADING_TIMER_EVENT,
+    PAINTING_TIMER_EVENT,
 ]
 
-REDRAW_LAYOUT_EVENT = pygame.USEREVENT + 4
-RELOAD_MOVIE_LIST_EVENT = pygame.USEREVENT + 5
+REDRAW_LAYOUT_EVENT = pygame.USEREVENT + 5
+RELOAD_MOVIE_LIST_EVENT = pygame.USEREVENT + 6
 
 interesting_event_attrs = 'type pos key mod rep'.split() # rep means "replayed event" - we log these same as others
 interesting_events = [
@@ -4880,7 +4925,7 @@ interesting_events = [
 ] + timer_events
 
 event2timer = {}
-event_names = 'KEYDOWN KEYUP MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING'.split()
+event_names = 'KEYDOWN KEYUP MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING PAINTING'.split()
 for i,event in enumerate(interesting_events):
     event2timer[event] = timers.add(event_names[i])
 
