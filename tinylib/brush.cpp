@@ -95,6 +95,10 @@ class ImagePainter
     int _ystride = 0;
     bool _erase = false;
 
+    virtual ~ImagePainter() {}
+    virtual void onPixelPainted(int x, int y, int value) {}
+    virtual void onLinePainted(const Point2D& start, const Point2D& end) {}
+
     void drawLine(const Point2D& start, const Point2D& end, double width);
 };
 
@@ -160,8 +164,10 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
             else {
                 _image[ind] = std::max(grey, (int)_image[ind]);
             }
+            onPixelPainted(x, y, _image[ind]);
         }
     }
+    onLinePainted(start, end);
 }
 
 struct SamplePoint
@@ -510,3 +516,67 @@ extern "C" void brush_end_paint(Brush* brush)
     delete brush;
 }
 
+//flood-filling color as the lines are erased
+
+extern "C" void flood_fill_color_based_on_mask_many_seeds(int* color, unsigned char* mask,
+		int color_stride, int mask_stride, int width, int height,
+		int* region, int _8_connectivity,
+		int mask_new_val, int new_color_value,
+		const int* seed_x, const int* seed_y, int num_seeds);
+
+class FloodFillingPainter : public ImagePainter
+{
+  public:
+    int* _color;
+    unsigned char* _mask;
+    int _color_stride;
+    int _mask_stride;
+    int _8_connectivity;
+    int _mask_new_val;
+    int _new_color_value;
+    
+    std::vector<int> _seeds_x;
+    std::vector<int> _seeds_y;
+
+    virtual void onPixelPainted(int x, int y, int value)
+    {
+        if(value < 255) {
+            _mask[_mask_stride*y + x] = 0;
+            _seeds_x.push_back(x);
+            _seeds_y.push_back(y);
+        }
+    }
+    virtual void onLinePainted(const Point2D& start, const Point2D& end)
+    {
+        //theoretically just one of the points should suffice...
+        int region[4];
+        flood_fill_color_based_on_mask_many_seeds(_color, _mask, _color_stride, _mask_stride, _width, _height, region, _8_connectivity, _mask_new_val, _new_color_value,
+                &_seeds_x[0], &_seeds_y[0], _seeds_x.size());
+        _seeds_x.clear();
+        _seeds_y.clear();
+    }
+};
+
+//TODO: return affected ROI
+extern "C" void brush_flood_fill_color_based_on_mask(Brush* brush, int* color, unsigned char* mask,
+        int color_stride, int mask_stride, int _8_connectivity, int mask_new_val, int new_color_value)
+{
+    FloodFillingPainter* painter = new FloodFillingPainter;
+    painter->_image = brush->_painter->_image;
+    painter->_width = brush->_painter->_width;
+    painter->_height = brush->_painter->_height;
+    painter->_xstride = brush->_painter->_xstride;
+    painter->_ystride = brush->_painter->_ystride;
+    painter->_erase = brush->_painter->_erase;
+
+    painter->_color = color;
+    painter->_mask = mask;
+    painter->_color_stride = color_stride;
+    painter->_mask_stride = mask_stride;
+    painter->_8_connectivity = _8_connectivity;
+    painter->_mask_new_val = mask_new_val;
+    painter->_new_color_value = new_color_value;
+
+    delete brush->_painter;
+    brush->_painter = painter;
+}

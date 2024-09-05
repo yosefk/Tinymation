@@ -1484,6 +1484,7 @@ tinylib.brush_init_paint.argtypes = [ctypes.c_double]*5 + [ctypes.c_int, ctypes.
 tinylib.brush_init_paint.restype = ctypes.c_void_p
 tinylib.brush_paint.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_double]*2
 tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]
+tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_int]*5
 
 def rgba_array(surface):
     ptr, ystride, width, height, bgr = color_c_params(pg.surfarray.pixels3d(surface))
@@ -1999,9 +2000,17 @@ class PenTool(Button):
         self.circle_width = (width//2)*2
         self.points = []
         self.lines_array = None
-        self.suggestion_mask = None
-        if self.eraser:
-            self.alpha_surface = None
+
+    def brush_flood_fill_color_based_on_mask(self):
+        mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
+        flood_code = 2
+
+        color = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+        color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color)
+        assert color_width == width and color_height == height
+        new_color_value = make_color_int(self.bucket_color if self.bucket_color else (0,0,0,0), bgr)
+
+        tinylib.brush_flood_fill_color_based_on_mask(self.brush, color_ptr, mask_ptr, color_stride, mask_stride, 0, flood_code, new_color_value)
 
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
@@ -2010,11 +2019,7 @@ class PenTool(Button):
         self.points = []
         self.bucket_color = None
         self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
-        if self.eraser:
-            if not self.alpha_surface:
-                da = layout.drawing_area()
-                self.alpha_surface = pg.Surface((da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2), pg.SRCALPHA)
-            pg.surfarray.pixels_red(self.alpha_surface)[:] = 0
+        self.pen_mask = self.lines_array == 255
 
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
@@ -2022,21 +2027,15 @@ class PenTool(Button):
         smoothDist = 40
         lineWidth = 2.5 if self.width == WIDTH else self.width*drawing_area.xscale
         self.brush = tinylib.brush_init_paint(cx, cy, time.time_ns()*1000000, lineWidth, smoothDist, 1 if self.eraser else 0, ptr, width, height, 4, ystride)
+        if self.eraser:
+            self.brush_flood_fill_color_based_on_mask()
 
         self.lines_history_item = HistoryItem('lines')
+        self.color_history_item = HistoryItem('color')
 
         self.prev_drawn = (x,y) # Krita feeds the first x,y twice - in init-paint and in paint, here we do, too
         self.on_mouse_move(x,y)
         pen_down_timer.stop()
-
-    def find_flood_fill_point(self):
-        if not self.eraser: return
-        for cx, cy in reversed(self.points):
-            x, y = round(cx), round(cy)
-            # FIXME: should use a different list of points because we're correcting the coordinates (?)
-            # - currently occasionally we don't manage to flood the path
-            if x >= 0 and y >= 0 and x < IWIDTH and y < IHEIGHT:
-                return x, y
 
     def on_mouse_up(self, x, y):
         if curr_layer_locked():
@@ -2049,25 +2048,8 @@ class PenTool(Button):
         self.brush = 0
         self.prev_drawn = None
 
-        history_item = self.lines_history_item
+        history_item = HistoryItemSet([self.lines_history_item, self.color_history_item])
         history_item.optimize() # TODO: pass it the bbox
-
-        # note that theoretically we might have a line intersecting the image but we'll ignore it because no point
-        # in self.points is in the image; doesn't seem a likely enough to case add code that doesn't lose the line in this case
-        flood_fill_point = self.find_flood_fill_point()
-        if self.eraser and flood_fill_point:
-            eraser_timer.start()
-
-            def make_color_history_item(bbox):
-                return HistoryItem('color', bbox)
-
-            color = movie.edit_curr_frame().surf_by_id('color')
-            color_rgb = pg.surfarray.pixels3d(color)
-            color_alpha = pg.surfarray.pixels_alpha(color)
-            bucket_color = self.bucket_color if self.bucket_color else BACKGROUND+(0,) 
-            fx, fy = flood_fill_point
-            color_history_item = flood_fill_color_based_on_lines(color_rgb, self.lines_array, fx, fy, bucket_color, make_color_history_item)
-            history_item = HistoryItemSet([self.lines_history_item, color_history_item])
 
         history.append_item(history_item)
         self.lines_array = None
@@ -2109,15 +2091,9 @@ class PenTool(Button):
             nx, ny = round(cx), round(cy)
             if nx>=0 and ny>=0 and nx<self.lines_array.shape[0] and ny<self.lines_array.shape[1] and self.lines_array[nx,ny] == 0:
                 self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((cx,cy))
+                self.brush_flood_fill_color_based_on_mask()
         self.points.append((cx,cy))
-        color = self.color if not self.eraser else (self.bucket_color if self.bucket_color else (255,255,255,0))
-        expose_other_layers = self.eraser and color[3]==0 #TODO: maybe expose other layers for non-transparent colors, too?
-        if expose_other_layers:
-            color = (255,0,0,0)
-        roi, (xstart, ystart, iwidth, iheight) = drawing_area.frame_and_subsurface_roi()
-        # FIXME we get an exception here sometimes [in subsurface() - rectangle outside surface area]
-        draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface.subsurface((xstart, ystart, iwidth, iheight))
-        ox,oy = (0,0) if not expose_other_layers else (xstart, ystart)
+
         if self.prev_drawn:
             close_enough = False
             while not close_enough:
@@ -2132,10 +2108,13 @@ class PenTool(Button):
                 else:
                     break
             
-            #drawLine(draw_into, (self.prev_drawn[0]-ox, self.prev_drawn[1]-oy), (x-ox,y-oy), color, self.width)
-        #drawCircle(draw_into, x-ox, y-oy, color, self.circle_width)
         #self.lines_array[round(cx),round(cy)] = 255
-        if expose_other_layers:
+        if False and expose_other_layers:
+            roi, (xstart, ystart, iwidth, iheight) = drawing_area.frame_and_subsurface_roi()
+            # FIXME we get an exception here sometimes [in subsurface() - rectangle outside surface area]
+            draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface.subsurface((xstart, ystart, iwidth, iheight))
+            ox,oy = (0,0) if not expose_other_layers else (xstart, ystart)
+
             alpha = pg.surfarray.pixels_red(draw_into)
             w, h = self.lines_array.shape
             def clipw(val): return max(0, min(val, w))
@@ -2347,8 +2326,9 @@ class PaintBucketTool(Button):
         if bbox:
             self.bboxes.append(bbox)
 
+        # not redrawing - using the "is_pressed" workaround PenTool uses, too until we learn to redraw only a part of the region
         # TODO: only redraw within the bbox?
-        layout.drawing_area().draw()
+        #layout.drawing_area().draw()
         
         paint_bucket_timer.stop()
 
@@ -2554,8 +2534,8 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     if found < 3:
         return False
-    n1 = n1[0]
-    n2 = n2[0]
+    n1 = n1[0] * 0
+    n2 = n2[0] * 0
     xs1 = xs1[:n1]
     ys1 = ys1[:n1]
     xs2 = xs2[:n2]
@@ -2572,8 +2552,9 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     if n1 == 0 and n2 == 0: #  just 3 points - create 5 points to fit a curve
         # through the point on the skeleton and the 2 endpoints
-        xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]
-        ys = [ys[0], ys[0]*0.9 + ys[1]*0.1, ys[1], ys[1]*0.1 + ys[2]*0.9, ys[2]]
+        pass
+        #xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]
+        #ys = [ys[0], ys[0]*0.9 + ys[1]*0.1, ys[1], ys[1]*0.1 + ys[2]*0.9, ys[2]]
     else: # we have enough points to not depend on the exact point
         # on the skeleton
         def pad(c, n): # a crude way to add weight to a "lone endpoint",
@@ -2607,12 +2588,29 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
                 break
         return px[start:end], py[start:end]
     # TODO: use the brush instead
-    new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines, zoom=1, filter_points=filter_points)[0]
+    history_item = HistoryItem('lines') # TODO: pass bbox
 
-    history_item = HistoryItem('lines', bbox)
-    (minx, miny, maxx, maxy) = bbox
-    lines[minx:maxx+1, miny:maxy+1] = np.maximum(new_lines, lines[minx:maxx+1, miny:maxy+1])
+    ptr, ystride, width, height = greyscale_c_params(lines)
+    brush = tinylib.brush_init_paint(points[0][0], points[1][1], 0, 2.5, 0, 0, ptr, width, height, 4, ystride)
+    xarr = np.zeros(1)
+    yarr = np.zeros(1)
+    t = 0
+    for x,y in points:
+        xarr[0] = x
+        yarr[0] = y
+        tinylib.brush_paint(brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1)
+        t += 7
+
+    tinylib.brush_end_paint(brush)
+    
     history.append_item(history_item)
+
+    #new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines, zoom=1, filter_points=filter_points)[0]
+
+    #history_item = HistoryItem('lines', bbox)
+    #(minx, miny, maxx, maxy) = bbox
+    #lines[minx:maxx+1, miny:maxy+1] = np.maximum(new_lines, lines[minx:maxx+1, miny:maxy+1])
+    #history.append_item(history_item)
 
     return True
 
