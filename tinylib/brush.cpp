@@ -95,12 +95,37 @@ class ImagePainter
     int _ystride = 0;
     bool _erase = false;
 
+    int _xmin;
+    int _ymin;
+    int _xmax;
+    int _ymax;
+
+    ImagePainter() { resetROI(); }
+
     virtual ~ImagePainter() {}
     virtual void onPixelPainted(int x, int y, int value) {}
     virtual void onLinePainted(const Point2D& start, const Point2D& end) {}
 
+    void resetROI();
+    void getROI(int* region);
     void drawLine(const Point2D& start, const Point2D& end, double width);
 };
+
+void ImagePainter::resetROI()
+{
+    _xmin = 1000000;
+    _ymin = 1000000;
+    _xmax = -1;
+    _ymax = -1;
+}
+
+void ImagePainter::getROI(int* region)
+{
+    region[0] = _xmin;
+    region[1] = _ymin;
+    region[2] = _xmax;
+    region[3] = _ymax;
+}
 
 //TODO: LUT
 double sigmoid(double x) { return 1 / (1 + exp(-x)); }
@@ -158,13 +183,22 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
                 grey = 255;
             }
             int ind = y*_ystride + x*_xstride;
+            int oldVal = _image[ind];
+            int newVal;
             if(_erase) {
-                _image[ind] = std::min(255-grey, (int)_image[ind]);
+                newVal = std::min(255-grey, oldVal);
             }
             else {
-                _image[ind] = std::max(grey, (int)_image[ind]);
+                newVal = std::max(grey, oldVal);
             }
-            onPixelPainted(x, y, _image[ind]);
+            if(newVal != oldVal) {
+                _image[ind] = newVal;
+                _xmin = std::min(_xmin, x);
+                _ymin = std::min(_ymin, y);
+                _xmax = std::max(_xmax, x);
+                _ymax = std::max(_ymax, y);
+                onPixelPainted(x, y, _image[ind]);
+            }
         }
     }
     onLinePainted(start, end);
@@ -499,19 +533,21 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double lineW
     return &brush;
 }
 
-//TODO: return affected ROI
-extern "C" void brush_paint(Brush* brush, double* x, double* y, double time, double zoom)
+extern "C" void brush_paint(Brush* brush, double* x, double* y, double time, double zoom, int* region)
 {
     SamplePoint s{{*x,*y},time};
+    brush->_painter->resetROI();
     brush->paint(s, zoom);
     *x = s.pos.x;
     *y = s.pos.y;
+    brush->_painter->getROI(region);
 }
 
-//TODO: return affected ROI
-extern "C" void brush_end_paint(Brush* brush)
+extern "C" void brush_end_paint(Brush* brush, int* region)
 {
+    brush->_painter->resetROI();
     brush->endPaint();
+    brush->_painter->getROI(region);
     delete brush->_painter;
     delete brush;
 }
@@ -552,12 +588,18 @@ class FloodFillingPainter : public ImagePainter
         int region[4];
         flood_fill_color_based_on_mask_many_seeds(_color, _mask, _color_stride, _mask_stride, _width, _height, region, _8_connectivity, _mask_new_val, _new_color_value,
                 &_seeds_x[0], &_seeds_y[0], _seeds_x.size());
+        if(region[3] >= 0) {
+            _xmin = std::min(region[0], _xmin);
+            _ymin = std::min(region[1], _ymin);
+            //here, max values are inclusive
+            _xmax = std::max(region[2]-1, _xmax);
+            _ymax = std::max(region[3]-1, _ymax);
+        }
         _seeds_x.clear();
         _seeds_y.clear();
     }
 };
 
-//TODO: return affected ROI
 extern "C" void brush_flood_fill_color_based_on_mask(Brush* brush, int* color, unsigned char* mask,
         int color_stride, int mask_stride, int _8_connectivity, int mask_new_val, int new_color_value)
 {

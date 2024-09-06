@@ -1918,9 +1918,9 @@ class HistoryItemSet(HistoryItemBase):
         return True
     def undo(self):
         return HistoryItemSet(list(reversed([item.undo() for item in self.items])))
-    def optimize(self):
+    def optimize(self, bbox=None):
         for item in self.items:
-            item.optimize()
+            item.optimize(bbox)
         self.items = [item for item in self.items if not item.nop()]
     def byte_size(self):
         return sum([item.byte_size() for item in self.items])
@@ -2000,6 +2000,9 @@ class PenTool(Button):
         self.circle_width = (width//2)*2
         self.points = []
         self.lines_array = None
+        self.rect = np.zeros(4, dtype=np.int32)
+        self.region = arr_base_ptr(self.rect)
+        self.bbox = None
 
     def brush_flood_fill_color_based_on_mask(self):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
@@ -2030,12 +2033,19 @@ class PenTool(Button):
         if self.eraser:
             self.brush_flood_fill_color_based_on_mask()
 
+        self.bbox = (1000000, 1000000, -1, -1)
+
         self.lines_history_item = HistoryItem('lines')
         self.color_history_item = HistoryItem('color')
 
         self.prev_drawn = (x,y) # Krita feeds the first x,y twice - in init-paint and in paint, here we do, too
         self.on_mouse_move(x,y)
         pen_down_timer.stop()
+
+    def update_bbox(self):
+        xmin, ymin, xmax, ymax = self.bbox
+        rxmin, rymin, rxmax, rymax = self.rect
+        self.bbox = (min(xmin, rxmin), min(ymin, rymin), max(xmax, rxmax), max(ymax, rymax))
 
     def on_mouse_up(self, x, y):
         if curr_layer_locked():
@@ -2044,14 +2054,15 @@ class PenTool(Button):
 
         pg.time.set_timer(PAINTING_TIMER_EVENT, 0, 0)
 
-        tinylib.brush_end_paint(self.brush)
+        tinylib.brush_end_paint(self.brush, self.region)
+        self.update_bbox()
         self.brush = 0
         self.prev_drawn = None
 
         history_item = HistoryItemSet([self.lines_history_item, self.color_history_item])
-        history_item.optimize() # TODO: pass it the bbox
-
-        history.append_item(history_item)
+        if self.bbox[-1] >= 0:
+            history_item.optimize(self.bbox)
+            history.append_item(history_item)
         self.lines_array = None
 
         pen_up_timer.stop()
@@ -2099,7 +2110,8 @@ class PenTool(Button):
             while not close_enough:
                 xarr = np.array([cx])
                 yarr = np.array([cy])
-                tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), time.time_ns()*1000000, drawing_area.xscale)
+                tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), time.time_ns()*1000000, drawing_area.xscale, self.region)
+                self.update_bbox()
                 if from_timer:
                     # "keep hammering the point or stop?"
                     dx = xarr[0] - cx
@@ -2534,8 +2546,8 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     if found < 3:
         return False
-    n1 = n1[0] * 0
-    n2 = n2[0] * 0
+    n1 = n1[0] #* 0
+    n2 = n2[0] #* 0
     xs1 = xs1[:n1]
     ys1 = ys1[:n1]
     xs2 = xs2[:n2]
