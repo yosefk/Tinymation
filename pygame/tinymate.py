@@ -1341,7 +1341,7 @@ WIDTH = 3 # the smallest width where you always have a pure pen color rendered a
 MEDIUM_ERASER_WIDTH = 5*WIDTH
 BIG_ERASER_WIDTH = 20*WIDTH
 PAINT_BUCKET_WIDTH = 3*WIDTH
-CURSOR_SIZE = int(screen.get_width() * 0.07)
+CURSOR_SIZE = int(screen.get_width() * 0.055)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
 MAX_CACHE_BYTE_SIZE = 1*1024**3
 MAX_CACHED_ITEMS = 2000
@@ -1947,6 +1947,7 @@ class LayoutElemBase:
     def on_mouse_move(self, x, y): pass
     def on_mouse_up(self, x, y): pass
     def on_painting_timer(self): pass
+    def on_history_timer(self): pass
 
 class Button(LayoutElemBase):
     def __init__(self):
@@ -2003,6 +2004,7 @@ class PenTool(Button):
         self.rect = np.zeros(4, dtype=np.int32)
         self.region = arr_base_ptr(self.rect)
         self.bbox = None
+        self.history_time_period = 1000 if eraser else 500
 
     def brush_flood_fill_color_based_on_mask(self):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
@@ -2033,14 +2035,17 @@ class PenTool(Button):
         if self.eraser:
             self.brush_flood_fill_color_based_on_mask()
 
-        self.bbox = (1000000, 1000000, -1, -1)
-
-        self.lines_history_item = HistoryItem('lines')
-        self.color_history_item = HistoryItem('color')
+        self.new_history_item()
 
         self.prev_drawn = (x,y) # Krita feeds the first x,y twice - in init-paint and in paint, here we do, too
         self.on_mouse_move(x,y)
+        pg.time.set_timer(HISTORY_TIMER_EVENT, self.history_time_period, 1)
         pen_down_timer.stop()
+
+    def new_history_item(self):
+        self.bbox = (1000000, 1000000, -1, -1)
+        self.lines_history_item = HistoryItem('lines')
+        self.color_history_item = HistoryItem('color')
 
     def update_bbox(self):
         xmin, ymin, xmax, ymax = self.bbox
@@ -2053,22 +2058,33 @@ class PenTool(Button):
         pen_up_timer.start()
 
         pg.time.set_timer(PAINTING_TIMER_EVENT, 0, 0)
+        pg.time.set_timer(HISTORY_TIMER_EVENT, 0, 0)
 
         tinylib.brush_end_paint(self.brush, self.region)
         self.update_bbox()
         self.brush = 0
         self.prev_drawn = None
 
-        history_item = HistoryItemSet([self.lines_history_item, self.color_history_item])
-        if self.bbox[-1] >= 0:
-            history_item.optimize(self.bbox)
-            history.append_item(history_item)
+        self.save_history_item()
+
         self.lines_array = None
 
         pen_up_timer.stop()
 
+    def save_history_item(self):
+        if self.bbox[-1] >= 0:
+            history_item = HistoryItemSet([self.lines_history_item, self.color_history_item])
+            history_item.optimize(self.bbox)
+            history.append_item(history_item)
+
+    def on_history_timer(self):
+        self.save_history_item()
+        self.new_history_item()
+        pg.time.set_timer(HISTORY_TIMER_EVENT, self.history_time_period, 1)
+
     def on_painting_timer(self):
-        self.on_mouse_move(*self.prev_drawn,from_timer=True)
+        if self.prev_drawn:
+            self.on_mouse_move(*self.prev_drawn,from_timer=True)
 
     def on_mouse_move(self, x, y, from_timer=False):
         if curr_layer_locked():
@@ -2117,6 +2133,8 @@ class PenTool(Button):
                     dx = xarr[0] - cx
                     dy = yarr[0] - cy
                     close_enough = math.sqrt(dx*dx + dy*dy) < 1
+                    if pg.event.peek(pg.MOUSEMOTION):
+                        break
                 else:
                     break
             
@@ -2797,6 +2815,9 @@ class Layout:
 
         if event.type == PAINTING_TIMER_EVENT:
             self.tool.on_painting_timer()
+
+        if event.type == HISTORY_TIMER_EVENT:
+            self.tool.on_history_timer()
 
         if event.type not in [pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION]:
             return
@@ -4904,10 +4925,17 @@ history = History()
 
 escape = False
 
-PLAYBACK_TIMER_EVENT = pygame.USEREVENT + 1
-SAVING_TIMER_EVENT = pygame.USEREVENT + 2
-FADING_TIMER_EVENT = pygame.USEREVENT + 3
-PAINTING_TIMER_EVENT = pygame.USEREVENT + 4
+user_event_offset = 0
+def user_event():
+    global user_event_offset
+    user_event_offset += 1
+    return user_event_offset
+
+PLAYBACK_TIMER_EVENT = user_event()
+SAVING_TIMER_EVENT = user_event() 
+FADING_TIMER_EVENT = user_event()
+PAINTING_TIMER_EVENT = user_event()
+HISTORY_TIMER_EVENT = user_event()
 
 pygame.time.set_timer(PLAYBACK_TIMER_EVENT, 1000//FRAME_RATE) # we play back at 12 fps
 pygame.time.set_timer(SAVING_TIMER_EVENT, 15*1000) # we save the current frame every 15 seconds
@@ -4918,10 +4946,11 @@ timer_events = [
     SAVING_TIMER_EVENT,
     FADING_TIMER_EVENT,
     PAINTING_TIMER_EVENT,
+    HISTORY_TIMER_EVENT,
 ]
 
-REDRAW_LAYOUT_EVENT = pygame.USEREVENT + 5
-RELOAD_MOVIE_LIST_EVENT = pygame.USEREVENT + 6
+REDRAW_LAYOUT_EVENT = user_event() 
+RELOAD_MOVIE_LIST_EVENT = user_event()
 
 interesting_event_attrs = 'type pos key mod rep'.split() # rep means "replayed event" - we log these same as others
 interesting_events = [
@@ -4935,7 +4964,7 @@ interesting_events = [
 ] + timer_events
 
 event2timer = {}
-event_names = 'KEYDOWN KEYUP MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING PAINTING'.split()
+event_names = 'KEYDOWN KEYUP MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING PAINTING HISTORY'.split()
 for i,event in enumerate(interesting_events):
     event2timer[event] = timers.add(event_names[i])
 

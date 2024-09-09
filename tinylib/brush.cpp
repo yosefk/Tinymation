@@ -162,12 +162,20 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
     //the narrowest line width where we're guaranteed to have 255s all along it
     //for a 4-connected flood fill to be stopped by the line is 2.5
 
+    //we can't erase an already fully-erased pixel, or strengthen an already-strongest-possible one
+    int immutableVal = _erase ? 0 : 255;
+
     for(int y = starty; y < endy; y++) {
         if(y < 0 || y >= _height) {
             continue;
         }
         for(int x = startx; x < endx; x++) {
             if(x < 0 || x >= _width) {
+                continue;
+            }
+            int ind = y*_ystride + x*_xstride;
+            int oldVal = _image[ind];
+            if(oldVal == immutableVal) {
                 continue;
             }
             double dist = distFromLine({(double)x,(double)y});
@@ -182,8 +190,6 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
             if(grey >= 255 - 30) {
                 grey = 255;
             }
-            int ind = y*_ystride + x*_xstride;
-            int oldVal = _image[ind];
             int newVal;
             if(_erase) {
                 newVal = std::min(255-grey, oldVal);
