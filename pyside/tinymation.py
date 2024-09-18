@@ -2892,16 +2892,14 @@ class Layout:
         self.is_playing = not self.is_playing
         self.playing_index = 0
             
+# FIXME: handle more cases (eg 9:16 and not just 16:9)
 def scale_and_fully_preserve_aspect_ratio(w, h, width, height):
     if width/height > w/h:
-        print('HERE')
         scaled_width = (round(w*height/h) // 16) * 16
         scaled_height = h*scaled_width/w
     else:
-        print('THERE')
         scaled_height = (round(h*width/w) // 9) * 9
         scaled_width = w*scaled_height/h
-    print('scaled', scaled_width, scaled_height, scaled_width/w, scaled_height/h)
     return round(scaled_width), round(scaled_height)
 
 class DrawingArea(LayoutElemBase):
@@ -2926,6 +2924,7 @@ class DrawingArea(LayoutElemBase):
             return
         left, bottom, width, height = self.rect
         self.iwidth, self.iheight = scale_and_fully_preserve_aspect_ratio(IWIDTH, IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
+        assert (self.iwidth / IWIDTH) - (self.iheight / IHEIGHT) < 1e-9
         self.xmargin = round((width - self.iwidth)/2)
         print('margin',self.xmargin,width,self.iwidth)
         self.ymargin = round((height - self.iheight)/2)
@@ -2994,18 +2993,20 @@ class DrawingArea(LayoutElemBase):
             return
 
         # slightly change the zoom such that not only (0,0) in the original image corresponds to
-        # the integer coordinate (0,0) in the scaled output image, but there is some integer step between 1 and 64 such that
+        # the integer coordinate (0,0) in the scaled output image, but there is some integer step such that
         # (step*M, step*N) for integers M,N in the original image correspond to integer coordinates in the scaled output image.
         # this way we'll be able to scale a step-aligned ROI in the original image and not only the whole image, which
         # is important when quickly redrawing upon pen movement, for example.
         min_step = round(8 / self.xscale)
-        try_steps = list(range(min_step,min_step+64)) # FIXME!!
+        try_steps = list(range(min_step,min_step+64))
         orig_image_coordinates_corresponding_to_steps = [i*self.xscale for i in try_steps]
         distances_from_integer_coordinates = [abs(x - round(x)) for x in orig_image_coordinates_corresponding_to_steps]
         min_dist_from_int_coord = min(distances_from_integer_coordinates)
         pos_of_min_dist = distances_from_integer_coordinates.index(min_dist_from_int_coord)
         best_int_step = pos_of_min_dist + try_steps[0]
+
         print('zoom',zoom,'best',best_int_step,'dist',min_dist_from_int_coord,'orig_at_step',orig_image_coordinates_corresponding_to_steps[pos_of_min_dist])
+
         self.zoom_int_step = best_int_step
         self.zoom_int_step_orig = int(round(best_int_step * self.xscale))
 
@@ -3020,9 +3021,7 @@ class DrawingArea(LayoutElemBase):
         framex, framey = self.xy2frame(cx, cy)
 
         # in this class, "zoom=1" is zooming to iwidth,iheight; this is zooming to IWIDTH,IHEIGHT - what would normally be called "1x zoom"
-        self.xscale = 1
-        self.yscale = 1
-        self.zoom = IWIDTH / self.iwidth
+        self.set_zoom(IWIDTH / self.iwidth)
 
         # set xyoffset s.t. the center stays at the same screen location (=we zoom around the center)
         xoffset = framex + self.xmargin - cx
@@ -3056,10 +3055,16 @@ class DrawingArea(LayoutElemBase):
         def align_down(n): return int((math.floor(n) // step) * step)
         def align_up(n): return int(((math.ceil(n) + step - 1) // step) * step)
 
-        frame_roi_left = align_down(self.xoffset * self.xscale)
-        frame_roi_bottom = align_down(self.yoffset * self.yscale)
-        frame_roi_right = align_up((self.xoffset + self.iwidth) * self.xscale)
-        frame_roi_top = align_up((self.yoffset + self.iheight) * self.yscale)
+        # we fill up the entire drawing area of 2*xmargin + iwidth, 2*ymargin + iheight pixels,
+        # unless we want to keep the margins or a part of them empty of pixels - that's when the
+        # edges of the image are visible in the shown ROI (which happens when the zoom is small
+        # enough or when x/yoffset have the values causing this to be the case)
+
+        frame_roi_left = align_down(max(0, self.xoffset - self.xmargin) * self.xscale)
+        frame_roi_bottom = align_down(max(0, self.yoffset - self.ymargin) * self.yscale)
+        frame_roi_right = align_up((self.xoffset + self.iwidth + self.xmargin*2) * self.xscale)
+        frame_roi_top = align_up((self.yoffset + self.iheight + self.ymargin*2) * self.yscale)
+
 
         # TODO: we need to be able to handle ROIs spilling over IWIDTH, IHEIGHT to have the right zoom instead of distorting it...
         if frame_roi_right > IWIDTH:
@@ -3069,13 +3074,26 @@ class DrawingArea(LayoutElemBase):
             print('WARNING: TRIMMING TOP')
             frame_roi_top = IHEIGHT
 
+        def rnd_chk(x):
+            r = round(x)
+            assert abs(r - x) < 1e-6, f'{r} is not close enough to {x} - should have gotten a value very close to an integer'
+            return int(r)
+
         step_aligned_frame_roi = (frame_roi_left, frame_roi_bottom, frame_roi_right - frame_roi_left, frame_roi_top - frame_roi_bottom)
         
-        scaled_roi_subset = (self.xoffset - round(frame_roi_left/self.xscale), self.yoffset - round(frame_roi_bottom/self.yscale), self.iwidth, self.iheight)
+        # FIXME: we don't want to pass width/height - we want to use zoom values directly
+        scale_target_width = round(step_aligned_frame_roi[2]/self.xscale)
+        scale_target_height = round(step_aligned_frame_roi[3]/self.yscale)
+        
+        scaled_left = max(0, self.xoffset - self.xmargin) - rnd_chk(frame_roi_left/self.xscale)
+        scaled_right = max(0, self.yoffset - self.ymargin) - rnd_chk(frame_roi_bottom/self.yscale)
+        scaled_width = min(self.iwidth + self.xmargin*2, scale_target_width - scaled_left)
+        scaled_height = min(self.iheight + self.ymargin*2, scale_target_height - scaled_right)
+        scaled_roi_subset = scaled_left, scaled_right, scaled_width, scaled_height 
+        
+        drawing_area_starting_point = max(0, self.xmargin - self.xoffset), max(0, self.ymargin - self.yoffset)
 
-        drawing_area_subsurface_roi = (self.xmargin, self.ymargin, self.iwidth, self.iheight)
-
-        return step_aligned_frame_roi, scaled_roi_subset, drawing_area_subsurface_roi
+        return step_aligned_frame_roi, (scale_target_width, scale_target_height), scaled_roi_subset, drawing_area_starting_point
         
     def frame_and_subsurface_roi(self):
         # ignoring margins, the roi in the drawing area shows the frame scaled by zoom and then cut
@@ -3097,6 +3115,7 @@ class DrawingArea(LayoutElemBase):
             width = min(width, IWIDTH-left)
             height = min(height, IHEIGHT-bottom)
             return left,bottom,width,height
+        #self.xscale = IWIDTH/(self.iwidth * self.zoom)
         no_margins_frame_roi = trim_roi([c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth, self.yoffset*IHEIGHT/self.iheight, IWIDTH, IHEIGHT)], round_xy=False, check_round=False)
         xm = self.xmargin * IWIDTH / self.iwidth
         ym = self.ymargin * IHEIGHT / self.iheight
@@ -3141,9 +3160,9 @@ class DrawingArea(LayoutElemBase):
         m.set_alpha(self.fading_mask.get_alpha())
         return m
     def get_zoom_pan_params(self):
-        return self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale
+        return self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale, self.zoom_int_step, self.zoom_int_step_orig
     def restore_zoom_pan_params(self, params):
-        self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale = params
+        self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale, self.zoom_int_step, self.zoom_int_step_orig = params
     def reset_zoom_pan_params(self):
         self.set_xyoffset(0, 0)
         self.set_zoom(1)
@@ -3172,14 +3191,12 @@ class DrawingArea(LayoutElemBase):
         highlight = not layout.is_playing and not movie.curr_layer().locked
         surfaces = []
 
-        step_aligned_frame_roi, scaled_roi_subset, drawing_area_subsurface_roi = self.rois()
-        starting_point = drawing_area_subsurface_roi[:2]
-        iwidth, iheight = round(step_aligned_frame_roi[2]/self.xscale), round(step_aligned_frame_roi[3]/self.yscale)
-        print('scaling to:',iwidth, iheight,'then taking',scaled_roi_subset)
+        step_aligned_frame_roi, (scaled_width, scaled_height), scaled_roi_subset, starting_point = self.rois()
+        print('scaling to:',scaled_width, scaled_height,'then taking',scaled_roi_subset)
 
         if movie.layers[movie.layer_pos].visible:
             with draw_curr_timer:
-                scaled_layer = movie.get_thumbnail(pos, iwidth, iheight, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi).subsurface(scaled_roi_subset)
+                scaled_layer = movie.get_thumbnail(pos, scaled_width, scaled_height, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi).subsurface(scaled_roi_subset)
             surfaces.append(scaled_layer)
 
         with draw_blits_timer:
@@ -3238,24 +3255,24 @@ class DrawingArea(LayoutElemBase):
         drawing_area_draw_timer.stop()
 
     def draw_region(self, frame_region):
-        # align the region s.t. it corresponds to integer coordinates in the zoomed image
         xmin, ymin, xmax, ymax = frame_region
         xmax += 1
         ymax += 1
+
+        # trim region to the currently displayed area [to avoid scaling stuff needlessly]
+        (zxmin, zymin, zw, zh), _, _, _ = self.rois()
+        xmin, ymin, xmax, ymax = max(xmin, zxmin), max(ymin, zymin), min(xmax, zxmin+zw), min(ymax, zymin+zh)
+
+        # align the region s.t. it corresponds to integer coordinates in the zoomed image
         step = self.zoom_int_step_orig
-        xo, yo = [round(i) for i in self.xy2frame(self.xoffset, self.yoffset)]
-        #print('aligning based on',xo, yo, self.xy2frame(self.xoffset, self.yoffset))
-        roi, sub_roi = self.frame_and_subsurface_roi() 
-        xo, yo = roi[:2]
-        xo, yo = 0, 0
+
         print('steps', self.zoom_int_step_orig, self.zoom_int_step)
-        print('aligning based on',xo, yo)
-        def align_down(n,o): return ((n - o) // step) * step + o
-        def align_up(n,o): return ((n - o + step - 1) // step) * step + o
-        xmin = max(align_down(xmin, xo) - step, 0)
-        xmax = min(align_up(xmax, xo) + step, IWIDTH)
-        ymin = max(align_down(ymin, yo) - step, 0)
-        ymax = min(align_up(ymax, yo) + step, IHEIGHT)
+        def align_down(n): return (n // step) * step
+        def align_up(n): return ((n + step - 1) // step) * step
+        xmin = max(align_down(xmin) - step, 0)
+        xmax = min(align_up(xmax) + step, IWIDTH)
+        ymin = max(align_down(ymin) - step, 0)
+        ymax = min(align_up(ymax) + step, IHEIGHT)
 
         x,y = self.frame2xy(xmin, ymin)
         starting_point = x,y
@@ -3282,7 +3299,6 @@ class DrawingArea(LayoutElemBase):
             yshrink += step
 
         starting_point = (sx, sy)
-        print('sub:',xoft, yoft,xshrink,yshrink)
   
         #roi, sub_roi = self.frame_and_subsurface_roi() 
         #starting_point = (sub_roi[0] + round((xmin-self.xoffset)/self.xscale), sub_roi[1] + round((ymin-self.yoffset)/self.yscale))
@@ -3290,10 +3306,18 @@ class DrawingArea(LayoutElemBase):
 
         cache.lock()
         scaled_layer = movie.layers[movie.layer_pos].frame(movie.pos).thumbnail(iwidth, iheight, roi=(xmin, ymin, xmax-xmin, ymax-ymin))
-        sub = self.subsurface.subsurface((starting_point[0], starting_point[1], scaled_layer.get_width() - xshrink, scaled_layer.get_height() - yshrink))
+        def trim(x,y,w,h,s):
+            x = max(x, 0)
+            y = max(y, 0)
+            right = min(x+w, s.get_width())
+            top = min(y+h, s.get_height())
+            return x,y,right-x,top-y
+        roi = (starting_point[0], starting_point[1], scaled_layer.get_width() - xshrink, scaled_layer.get_height() - yshrink)
+        trimmed_roi = trim(*roi, self.subsurface)
+        sub = self.subsurface.subsurface(trimmed_roi)
         #self.subsurface.blit(scaled_layer, starting_point)
         sub.fill(BACKGROUND) # FIXME - bottom layers will take care of this
-        sub.blit(scaled_layer.subsurface((xoft, yoft, scaled_layer.get_width() - xshrink, scaled_layer.get_height() - yshrink)), (0,0))
+        sub.blit(scaled_layer.subsurface(trim(xoft - (roi[0] - trimmed_roi[0]), yoft - (roi[1] - trimmed_roi[1]), roi[2], roi[3], scaled_layer)), (0,0))
         cache.unlock()
 
         return #FIXME
