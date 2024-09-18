@@ -313,26 +313,20 @@ class Frame:
         s.blit(sub(self.lines), (0, 0))
         return s
 
-    def thumbnail(self, width, height, roi):
+    def thumbnail(self, width, height, roi, inv_scale=None):
         if self.empty():
-            return empty_frame().color.subsurface(0, 0, width, height)
-        def sub(surface): return surface.subsurface(roi)
+            empty = empty_frame().color
+            if inv_scale is not None:
+                width = round(roi[2] * inv_scale)
+                height = round(roi[3] * inv_scale)
+            return empty.subsurface(0, 0, width, height)
+
         with thumb_timer:
-            s = scale_image(self.surface(roi), width, height)
-            return s
-            match roi:
-                # for a small ROI it's better to blit lines onto color first, and then scale;
-                # for a large ROI, better to scale first and then blit the smaller number of pixels.
-                # (there might be a multiplier in that comparison... empirically with the implicit
-                # multiplier 1, the two branches take about the same amount of time)
-                case _,_,w,h if w*h < width*height:
-                    with small_roi_timer:
-                        s = scale_image(self.surface(roi), width, height)
-                case _:
-                    with large_roi_timer:
-                        s = scale_image(sub(self.color), width, height)
-                        s.blit(scale_image(sub(self.lines), width, height), (0, 0))
-        return s
+            return scale_image(self.surface(roi), width, height, inv_scale)
+            # note that for a small ROI it's faster to blit lines onto color first, and then scale;
+            # for a large ROI, it's faster to scale first and then blit the smaller number of pixels.
+            # however this produces ugly artifacts where lines & color are eroded and you see through
+            # both into the layer below, so we don't do it
 
     def filenames_png_bmp(self,surface_id):
         fname = f'{self.id}-{surface_id}.'
@@ -1682,7 +1676,7 @@ def make_surface(width, height):
     return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
 
 import cv2
-def cv2_resize_surface(src, dst):
+def cv2_resize_surface(src, dst, inv_scale=None):
     iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
     optr, ostride, owidth, oheight, obgr = color_c_params(pg.surfarray.pixels3d(dst))
     assert ibgr == obgr
@@ -1703,10 +1697,24 @@ def cv2_resize_surface(src, dst):
         method = cv2.INTER_CUBIC
     else:
         method = cv2.INTER_LINEAR
-    cv2.resize(iattached, (owidth,oheight), oattached, interpolation=method)
 
-def scale_image(surface, width=None, height=None):
-    assert width or height
+    if inv_scale is not None:
+        cv2.resize(iattached, None, oattached, fx=inv_scale, fy=inv_scale, interpolation=method)
+    else:
+        cv2.resize(iattached, (owidth,oheight), oattached, interpolation=method)
+
+def scale_image(surface, width=None, height=None, inv_scale=None):
+    assert width or height or inv_scale
+
+    if inv_scale is not None:
+        # from OpenCV (resize.cpp, cv::resize):
+        #    dsize = Size(saturate_cast<int>(ssize.width*inv_scale_x),
+        #                 saturate_cast<int>(ssize.height*inv_scale_y));
+        # from fast_math.hpp:
+        # template<> inline int saturate_cast<int>(double v)           { return cvRound(v); }
+        width = round(surface.get_width() * inv_scale)
+        height = round(surface.get_height() * inv_scale)
+        
     if not height:
         height = int(surface.get_height() * width / surface.get_width())
     if not width:
@@ -1716,7 +1724,7 @@ def scale_image(surface, width=None, height=None):
         return scale_image(scale_image(surface, surface.get_width()//2, surface.get_height()//2), width, height)
 
     ret = pg.Surface((width, height), pg.SRCALPHA)
-    cv2_resize_surface(surface, ret)
+    cv2_resize_surface(surface, ret, inv_scale)
     ret.set_alpha(surface.get_alpha())
     #ret = pg.transform.smoothscale(surface, (width, height))
 
@@ -3031,7 +3039,7 @@ class DrawingArea(LayoutElemBase):
         self.set_zoom_center(center)
 
     def rois(self):
-        '''step_aligned_frame_roi, scaled_roi_subset, drawing_area_subsurface_roi = da.rois()
+        '''step_aligned_frame_roi, scaled_roi_subset, drawing_area_starting_point = da.rois()
 
         step_aligned_frame_roi is the region in the frame coordinates corresponding to what is shown
         in the drawing area (if we ignore margins, that would be xoffset, yoffset, iwidth, iheight),
@@ -3046,8 +3054,8 @@ class DrawingArea(LayoutElemBase):
         get the pixels to put into the drawing area (meaning, it strips the extra pixels added due to alignment
         and gives you just the pixels in xoffset, yoffset, iwidth, iheight - again, ignoring margins.)
 
-        drawing_area_subsurface_roi is xmargin, ymargin, iwidth, iheight - again, ignoring margins; this
-        is the subsurface of da.subsurface corresponding to scaled_roi_subset.
+        drawing_area_starting_point is xmargin, ymargin - again, ignoring our drawing at the margins at high zoom;
+        this is where scaled_roi_subset should be drawn into da.subsurface.
         '''
         frame_roi = (self.xoffset * self.xscale, self.yoffset * self.yscale, self.iwidth * self.xscale, self.iheight * self.yscale)
 
@@ -3062,17 +3070,8 @@ class DrawingArea(LayoutElemBase):
 
         frame_roi_left = align_down(max(0, self.xoffset - self.xmargin) * self.xscale)
         frame_roi_bottom = align_down(max(0, self.yoffset - self.ymargin) * self.yscale)
-        frame_roi_right = align_up((self.xoffset + self.iwidth + self.xmargin*2) * self.xscale)
-        frame_roi_top = align_up((self.yoffset + self.iheight + self.ymargin*2) * self.yscale)
-
-
-        # TODO: we need to be able to handle ROIs spilling over IWIDTH, IHEIGHT to have the right zoom instead of distorting it...
-        if frame_roi_right > IWIDTH:
-            print('WARNING: TRIMMING RIGHT')
-            frame_roi_right = IWIDTH
-        if frame_roi_top > IHEIGHT:
-            print('WARNING: TRIMMING TOP')
-            frame_roi_top = IHEIGHT
+        frame_roi_right = min(IWIDTH, align_up((self.xoffset + self.iwidth + self.xmargin*2) * self.xscale))
+        frame_roi_top = min(IHEIGHT, align_up((self.yoffset + self.iheight + self.ymargin*2) * self.yscale))
 
         def rnd_chk(x):
             r = round(x)
@@ -3080,10 +3079,10 @@ class DrawingArea(LayoutElemBase):
             return int(r)
 
         step_aligned_frame_roi = (frame_roi_left, frame_roi_bottom, frame_roi_right - frame_roi_left, frame_roi_top - frame_roi_bottom)
-        
-        # FIXME: we don't want to pass width/height - we want to use zoom values directly
-        scale_target_width = round(step_aligned_frame_roi[2]/self.xscale)
-        scale_target_height = round(step_aligned_frame_roi[3]/self.yscale)
+
+        # compute target width & height exactly as OpenCV resize would
+        scale_target_width = round(step_aligned_frame_roi[2] * (1/self.xscale))
+        scale_target_height = round(step_aligned_frame_roi[3] * (1/self.xscale))
         
         scaled_left = max(0, self.xoffset - self.xmargin) - rnd_chk(frame_roi_left/self.xscale)
         scaled_right = max(0, self.yoffset - self.ymargin) - rnd_chk(frame_roi_bottom/self.yscale)
@@ -3093,7 +3092,7 @@ class DrawingArea(LayoutElemBase):
         
         drawing_area_starting_point = max(0, self.xmargin - self.xoffset), max(0, self.ymargin - self.yoffset)
 
-        return step_aligned_frame_roi, (scale_target_width, scale_target_height), scaled_roi_subset, drawing_area_starting_point
+        return step_aligned_frame_roi, scaled_roi_subset, drawing_area_starting_point
         
     def frame_and_subsurface_roi(self):
         # ignoring margins, the roi in the drawing area shows the frame scaled by zoom and then cut
@@ -3191,12 +3190,11 @@ class DrawingArea(LayoutElemBase):
         highlight = not layout.is_playing and not movie.curr_layer().locked
         surfaces = []
 
-        step_aligned_frame_roi, (scaled_width, scaled_height), scaled_roi_subset, starting_point = self.rois()
-        print('scaling to:',scaled_width, scaled_height,'then taking',scaled_roi_subset)
+        step_aligned_frame_roi, scaled_roi_subset, starting_point = self.rois()
 
         if movie.layers[movie.layer_pos].visible:
             with draw_curr_timer:
-                scaled_layer = movie.get_thumbnail(pos, scaled_width, scaled_height, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi).subsurface(scaled_roi_subset)
+                scaled_layer = movie.get_thumbnail(pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=1/self.xscale).subsurface(scaled_roi_subset)
             surfaces.append(scaled_layer)
 
         with draw_blits_timer:
@@ -3260,7 +3258,7 @@ class DrawingArea(LayoutElemBase):
         ymax += 1
 
         # trim region to the currently displayed area [to avoid scaling stuff needlessly]
-        (zxmin, zymin, zw, zh), _, _, _ = self.rois()
+        (zxmin, zymin, zw, zh), _, _ = self.rois()
         xmin, ymin, xmax, ymax = max(xmin, zxmin), max(ymin, zymin), min(xmax, zxmin+zw), min(ymax, zymin+zh)
 
         # align the region s.t. it corresponds to integer coordinates in the zoomed image
@@ -3304,7 +3302,6 @@ class DrawingArea(LayoutElemBase):
         #starting_point = (sub_roi[0] + round((xmin-self.xoffset)/self.xscale), sub_roi[1] + round((ymin-self.yoffset)/self.yscale))
         iwidth, iheight = round((xmax - xmin) / self.xscale), round((ymax - ymin) / self.yscale)
 
-        cache.lock()
         scaled_layer = movie.layers[movie.layer_pos].frame(movie.pos).thumbnail(iwidth, iheight, roi=(xmin, ymin, xmax-xmin, ymax-ymin))
         def trim(x,y,w,h,s):
             x = max(x, 0)
@@ -3318,7 +3315,6 @@ class DrawingArea(LayoutElemBase):
         #self.subsurface.blit(scaled_layer, starting_point)
         sub.fill(BACKGROUND) # FIXME - bottom layers will take care of this
         sub.blit(scaled_layer.subsurface(trim(xoft - (roi[0] - trimmed_roi[0]), yoft - (roi[1] - trimmed_roi[1]), roi[2], roi[3], scaled_layer)), (0,0))
-        cache.unlock()
 
         return #FIXME
         roi, sub_roi = self.frame_and_subsurface_roi() 
@@ -4339,7 +4335,7 @@ class Movie(MovieData):
         frames = [layer.frame(pos) for layer in layers if layer.visible or include_invisible]
         return tuple([frame.cache_id_version() for frame in frames if not frame.empty()])
 
-    def get_thumbnail(self, pos, width, height, highlight=True, transparent_single_layer=-1, roi=None):
+    def get_thumbnail(self, pos, width=None, height=None, highlight=True, transparent_single_layer=-1, roi=None, inv_scale=None):
         if roi is None:
             roi = (0, 0, IWIDTH, IHEIGHT) # the roi is in the original image coordinates, not the thumbnail coordinates
         trans_single = transparent_single_layer >= 0
@@ -4349,17 +4345,17 @@ class Movie(MovieData):
         class CachedThumbnail(CachedItem):
             def compute_key(_):
                 if trans_single:
-                    return id2version([self.layers[layer_pos]]), ('transparent-layer-thumbnail', width, height, roi)
+                    return id2version([self.layers[layer_pos]]), ('transparent-layer-thumbnail', width, height, roi, inv_scale)
                 else:
                     def layer_ids(layers): return tuple([layer.id for layer in layers if not layer.frame(pos).empty()])
                     hl = ('highlight', layer_ids(self.layers[:layer_pos]), layer_ids([self.layers[layer_pos]]), layer_ids(self.layers[layer_pos+1:])) if highlight else 'no-highlight'
-                    return id2version(self.layers), ('thumbnail', width, height, roi, hl)
+                    return id2version(self.layers), ('thumbnail', width, height, roi, hl, inv_scale)
             def compute_value(_):
                 h = int(screen.get_height() * 0.15)
                 w = int(h * IWIDTH / IHEIGHT)
-                if w <= width and h <= height:
+                if inv_scale is not None or (w <= width and h <= height):
                     if trans_single:
-                        return self.layers[layer_pos].frame(pos).thumbnail(width, height, roi)
+                        return self.layers[layer_pos].frame(pos).thumbnail(width, height, roi, inv_scale)
 
                     s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi).copy()
                     if self.layers[self.layer_pos].visible:
