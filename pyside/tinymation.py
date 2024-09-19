@@ -1293,13 +1293,8 @@ def start_teacher_client():
 import subprocess
 import pygame.gfxdraw
 import math
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-import matplotlib
-matplotlib.use('agg')  # turn off interactive backend
 import io
 import shutil
-from scipy.interpolate import splprep
 
 from skimage.morphology import flood_fill, binary_dilation, skeletonize
 from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closing
@@ -1421,7 +1416,6 @@ pen_down_timer = timers.add('PenTool.on_mouse_down')
 pen_move_timer = timers.add('PenTool.on_mouse_move')
 pen_up_timer = timers.add('PenTool.on_mouse_up')
 pen_draw_lines_timer = timers.add('drawLines', indent=1)
-fit_curve_timer = timers.add('bspline_interp', indent=2)
 pen_suggestions_timer = timers.add('pen suggestions', indent=1)
 eraser_timer = timers.add('eraser',indent=1)
 pen_fading_mask_timer = timers.add('fading_mask', indent=1)
@@ -1493,188 +1487,6 @@ def rgba_array(surface):
 # these are simple functions to test the assumptions regarding Surface numpy array layout
 def meshgrid_color(rgb): tinylib.meshgrid_color(*color_c_params(rgb))
 def meshgrid_alpha(alpha): tinylib.meshgrid_alpha(*greyscale_c_params(alpha))
-
-fig = None
-ax = None
-fig_dict = {}
-ax_dict = {}
-
-def splev(x, tck):
-    t, c, k = tck
-    try:
-        c[0][0]
-        parametric = True
-    except Exception:
-        parametric = False
-    if parametric:
-        return list(map(lambda c, x=x, t=t, k=k: splev(x, [t, c, k]), c))
-
-    x = np.asarray(x)
-    xshape = x.shape
-    x = x.ravel()
-    y = np.zeros(x.shape, float)
-    tinylib.splev(arr_base_ptr(t), t.shape[0], arr_base_ptr(c), k, arr_base_ptr(x), arr_base_ptr(y), y.shape[0])
-    return y.reshape(xshape)
-
-def should_make_closed(curve_length, bbox_length, endpoints_dist):
-    if curve_length < bbox_length*0.85:
-        # if the distance between the endpoints is <30% of the length of the curve, close it
-        return endpoints_dist / curve_length < 0.3
-    else: # "long and curvy" - only make closed when the endpoints are close relatively to the bbox length
-        return endpoints_dist / bbox_length < 0.1
-
-def bspline_interp(points, suggest_options, existing_lines, zoom):
-    fit_curve_timer.start()
-    x = np.array([1.*p[0] for p in points])
-    y = np.array([1.*p[1] for p in points])
-
-    okay = np.where(np.abs(np.diff(x)) + np.abs(np.diff(y)) > 0)
-    x = np.r_[x[okay], x[-1]]#, x[0]]
-    y = np.r_[y[okay], y[-1]]#, y[0]]
-
-    def dist(i1, i2):
-        return math.sqrt((x[i1]-x[i2])**2 + (y[i1]-y[i2])**2)
-    curve_length = sum([dist(i, i+1) for i in range(len(x)-1)])
-
-    results = []
-
-    def add_result(tck, ufirst, ulast):
-        step=(ulast-ufirst)/curve_length
-
-        new_points = splev(np.arange(ufirst, ulast+step, step), tck)
-        results.append(new_points)
-
-    smoothing = len(x) / (2*zoom)
-    tck, u = splprep([x, y], s=smoothing)
-    add_result(tck, u[0], u[-1])
-
-    if not suggest_options:
-        fit_curve_timer.stop()
-        return results
-
-    # check for intersections, throw out short segments between the endpoints and first/last intersection
-    ix = np.round(results[0][0]).astype(int)
-    iy = np.round(results[0][1]).astype(int)
-    within_bounds = (ix >= 0) & (iy >= 0) & (ix < existing_lines.shape[0]) & (iy < existing_lines.shape[1])
-    line_alphas = np.zeros(len(ix), int)
-    line_alphas[within_bounds] = existing_lines[ix[within_bounds], iy[within_bounds]]
-    intersections = np.where(line_alphas == 255)[0]
-
-    def find_intersection_point(start, step):
-        indexes = [intersections[start]]
-        pos = start+step
-        while pos < len(intersections) and pos >= 0 and abs(intersections[pos]-indexes[-1]) == 1:
-            indexes.append(intersections[pos])
-            pos += step
-        return indexes[-1] #sum(indexes)/len(indexes)
-
-    if len(intersections) > 0:
-        len_first = intersections[0]
-        len_last = len(ix) - intersections[-1]
-        # look for clear alpha pixels along the path before the first and the last intersection - if we find some, we have >= 2 intersections
-        two_or_more_intersections = len(np.where(line_alphas[intersections[0]:intersections[-1]] == 0)[0]) > 1
-
-        first_short = two_or_more_intersections or len_first < len_last
-        last_short = two_or_more_intersections or len_last <= len_first
-
-        step=(u[-1]-u[0])/curve_length
-
-        first_intersection = find_intersection_point(0, 1)
-        last_intersection = find_intersection_point(len(intersections)-1, -1)
-        uvals = np.arange(first_intersection if first_short else 0, (last_intersection if last_short else len(ix))+1, 1)*step
-        new_points = splev(uvals, tck)
-        return [new_points] + results
-
-    # check if we'd like to attempt to close the line
-    bbox_length = (np.max(x)-np.min(x))*2 + (np.max(y)-np.min(y))*2
-    endpoints_dist = dist(0, -1)
-
-    make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
-
-    if make_closed:
-        tck, u = splprep([x, y], s=smoothing, per=True)
-        add_result(tck, u[0], u[-1])
-        return reversed(results)
-
-    fit_curve_timer.stop()
-    return results
-
-def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points, zoom):
-    results = []
-    def add_results(px, py):
-        minx = math.floor(max(0, np.min(px) - pwidth - 1))
-        miny = math.floor(max(0, np.min(py) - pwidth - 1))
-        maxx = math.ceil(min(image_height-1, np.max(px) + pwidth + 1))
-        maxy = math.ceil(min(image_width-1, np.max(py) + pwidth + 1))
-
-        line, = ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False, solid_capstyle='round', aa=True)
-
-        canvas = FigureCanvas(fig)
-        fig.draw_artist(line)
-        canvas.flush_events()
-
-        pixel_data = canvas.buffer_rgba()
-
-        # TODO: it would be nice to slice before converting to numpy array rather than first
-        # convert and then slice which costs ~3 ms... but doing that gives a "memoryview: invalid slice key."
-        # perhaps canvas.copy_from_bbox() instead of buffer_rgba() could be helpful?..
-        results.append(((np.array(pixel_data)[minx:maxx+1,miny:maxy+1,3]), (minx, miny, maxx, maxy)))
-
-    if len(set(points)) == 1:
-        x,y = points[0]
-        eps = 0.001
-        points = [(x+eps, y+eps)] + points
-    try:
-        for path in bspline_interp(points, suggest_options, existing_lines, zoom):
-            px, py = filter_points(path[0], path[1])
-            add_results(px, py)
-    except:
-        px = np.array([x for x,y in points])
-        py = np.array([y for x,y in points])
-        add_results(px, py)
-
-    return results
-
-def drawLines(image_height, image_width, points, width, suggest_options, existing_lines, zoom, filter_points=lambda px, py: (px, py)):
-    global fig_dict
-    global ax_dict
-    global fig
-    global ax
-    res = (image_width, image_height)
-    if res not in fig_dict:
-        fig, ax = plt.subplots()
-        ax.axis('off')
-        fig.set_size_inches(image_width/fig.get_dpi(), image_height/fig.get_dpi())
-        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-        fig_dict[res] = fig
-        ax_dict[res] = ax
-    
-        def plot_reset():
-            plt.cla()
-            plt.xlim(0, image_width)
-            plt.ylim(0, image_height)
-            ax.invert_yaxis()
-            ax.spines[['left', 'right', 'bottom', 'top']].set_visible(False)
-            ax.tick_params(left=False, right=False, bottom=False, top=False)
-
-        plot_reset()
-    else:
-        fig = fig_dict[res]
-        ax = ax_dict[res]
-
-    pwidth = width
-    width *= 72 / fig.get_dpi()
-
-    return plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points, zoom)
-
-def drawCircle( screen, x, y, color, width):
-    pygame.draw.circle( screen, color, ( x, y ), width/2 )
-
-def drawLine(screen, pos1, pos2, color, width):
-    pygame.draw.line(screen, color, pos1, pos2, width)
-
-def make_surface(width, height):
-    return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
 
 import cv2
 def cv2_resize_surface(src, dst, inv_scale=None):
@@ -2160,37 +1972,6 @@ class PenTool(Button):
                 layout.drawing_area().draw_region(self.short_term_bbox)
                 widget.redrawScreen()
             
-        #self.lines_array[round(cx),round(cy)] = 255
-        if False and expose_other_layers:
-            roi, (xstart, ystart, iwidth, iheight) = drawing_area.frame_and_subsurface_roi()
-            # FIXME we get an exception here sometimes [in subsurface() - rectangle outside surface area]
-            draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface.subsurface((xstart, ystart, iwidth, iheight))
-            ox,oy = (0,0) if not expose_other_layers else (xstart, ystart)
-
-            alpha = pg.surfarray.pixels_red(draw_into)
-            w, h = self.lines_array.shape
-            def clipw(val): return max(0, min(val, w))
-            def cliph(val): return max(0, min(val, h))
-            px, py = self.prev_drawn if self.prev_drawn else (x, y)
-            left = clipw(min(x-ox-self.width, px-ox-self.width))
-            right = clipw(max(x-ox+self.width, px-ox+self.width))
-            bottom = cliph(min(y-oy-self.width, py-oy-self.width))
-            top = cliph(max(y-oy+self.width, py-oy+self.width))
-            def render_surface(s):
-                if not s:
-                    return
-                salpha = pg.surfarray.pixels_alpha(s)
-                orig_alpha = salpha[left:right+1, bottom:top+1].copy()
-                salpha[left:right+1, bottom:top+1] = np.minimum(orig_alpha, alpha[left:right+1,bottom:top+1])
-                del salpha
-                drawing_area.subsurface.blit(s, (ox+left,oy+bottom), (left,bottom,right-left+1,top-bottom+1))
-                salpha = pg.surfarray.pixels_alpha(s)
-                salpha[left:right+1, bottom:top+1] = orig_alpha
-
-            render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True, width=iwidth, height=iheight, roi=roi))
-            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True, width=iwidth, height=iheight, roi=roi))
-            render_surface(layout.timeline_area().combined_light_table_mask())
-
         self.prev_drawn = (x,y) 
         pen_move_timer.stop()
 
@@ -2936,7 +2717,6 @@ class DrawingArea(LayoutElemBase):
         self.iwidth, self.iheight = scale_and_fully_preserve_aspect_ratio(IWIDTH, IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
         assert (self.iwidth / IWIDTH) - (self.iheight / IHEIGHT) < 1e-9
         self.xmargin = round((width - self.iwidth)/2)
-        print('margin',self.xmargin,width,self.iwidth)
         self.ymargin = round((height - self.iheight)/2)
         self.set_zoom(self.zoom)
 
@@ -3015,8 +2795,7 @@ class DrawingArea(LayoutElemBase):
         pos_of_min_dist = distances_from_integer_coordinates.index(min_dist_from_int_coord)
         best_int_step = pos_of_min_dist + try_steps[0]
 
-        print('zoom',zoom,'best',best_int_step,'dist',min_dist_from_int_coord,'orig_at_step',orig_image_coordinates_corresponding_to_steps[pos_of_min_dist])
-
+        #print('zoom',zoom,'best',best_int_step,'dist',min_dist_from_int_coord,'orig_at_step',orig_image_coordinates_corresponding_to_steps[pos_of_min_dist])
         self.zoom_int_step = best_int_step
         self.zoom_int_step_orig = int(round(best_int_step * self.xscale))
 
@@ -3096,39 +2875,8 @@ class DrawingArea(LayoutElemBase):
 
         return step_aligned_frame_roi, scaled_roi_subset, drawing_area_starting_point
         
-    def frame_and_subsurface_roi(self):
-        # ignoring margins, the roi in the drawing area shows the frame scaled by zoom and then cut
-        # to the subsurface xoffset, yoffset, iwidth, iheight
-        def trim_roi(roi, round_xy, check_round):
-            left,bottom,width,height = roi
-            left = max(0, left)
-            bottom = max(0, bottom)
-            check_round = False # FIXME
-            def round_and_check(c):
-                if not round_xy:
-                    return c
-                rc = round(c)
-                if check_round:
-                    assert abs(rc - c) < 0.0001, f'expecting a coordinate value very close to an integer, got {c}'
-                return rc
-            left = round_and_check(left)
-            bottom = round_and_check(bottom)
-            width = min(width, IWIDTH-left)
-            height = min(height, IHEIGHT-bottom)
-            return left,bottom,width,height
-        #self.xscale = IWIDTH/(self.iwidth * self.zoom)
-        no_margins_frame_roi = trim_roi([c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth, self.yoffset*IHEIGHT/self.iheight, IWIDTH, IHEIGHT)], round_xy=False, check_round=False)
-        xm = self.xmargin * IWIDTH / self.iwidth
-        ym = self.ymargin * IHEIGHT / self.iheight
-        frame_roi = trim_roi([c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth - xm, self.yoffset*IHEIGHT/self.iheight - ym, IWIDTH+xm*2, IHEIGHT+ym*2)], round_xy=True, check_round=True)
-        xstart = self.xmargin-(no_margins_frame_roi[0] - frame_roi[0])/self.xscale
-        ystart = self.ymargin-(no_margins_frame_roi[1] - frame_roi[1])/self.yscale
-        sub_roi = trim_roi((xstart, ystart, frame_roi[2]/self.xscale, frame_roi[3]/self.yscale), round_xy=True, check_round=False)
-        return frame_roi, sub_roi
     def xy2frame(self, x, y, minoft=0):
-        # we need minoft because we get small negative xoffset/yoffset upon zooming and panning to the rightmost/bottommost extent,
-        # and this throws off everything except the zoom tool which seems to need it?!.. TODO: understand and solve this properly
-        return (x - self.xmargin + max(minoft,self.xoffset))*self.xscale, (y - self.ymargin + max(minoft,self.yoffset))*self.yscale
+        return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
     def frame2xy(self, framex, framey):
         return framex/self.xscale + self.xmargin - self.xoffset, framey/self.yscale + self.ymargin - self.yoffset
     def roi(self, surface):
@@ -3214,42 +2962,6 @@ class DrawingArea(LayoutElemBase):
 
         with draw_blits_timer:
             self.subsurface.blits([(surface, starting_point) for surface in surfaces])
-        return
-
-        roi, sub_roi = self.frame_and_subsurface_roi() 
-        starting_point = (sub_roi[0], sub_roi[1])
-        print('orig SP - draw', starting_point)
-        starting_point = self.frame2xy(roi[0], roi[1])
-        print('new  SP - draw', starting_point, 'roi', roi)
-        iwidth, iheight = sub_roi[2], sub_roi[3]
-        print('iwidth, iheight', iwidth, iheight, 'vs', (roi[2]/self.xscale), (roi[3]/self.yscale))
-        print('roi',roi)
-        roi = list(roi)
-        roi[2] = round(roi[2])
-        roi[3] = round(roi[3])
-        roi = tuple(roi)
-
-        iwidth, iheight = round(roi[2]/self.xscale), round(roi[3]/self.yscale)
-        with draw_bottom_timer:
-            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=iwidth, height=iheight, roi=roi))
-        if movie.layers[movie.layer_pos].visible:
-            with draw_curr_timer:
-                scaled_layer = movie.get_thumbnail(pos, iwidth, iheight, transparent_single_layer=movie.layer_pos, roi=roi)
-            surfaces.append(scaled_layer)
-        with draw_top_timer:
-            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, width=iwidth, height=iheight, roi=roi))
-
-        if not layout.is_playing:
-            with draw_light_timer:
-                mask = layout.timeline_area().combined_light_table_mask()
-            if mask:
-                surfaces.append(mask)
-            if self.fading_mask:
-                with draw_fading_timer:
-                    surfaces.append(self.scaled_fading_mask())
-
-        with draw_blits_timer:
-            self.subsurface.blits([(surface, starting_point) for surface in surfaces])
 
         eps = 0.019
         if self.zoom > 1 + eps:
@@ -3275,7 +2987,7 @@ class DrawingArea(LayoutElemBase):
         # align the region s.t. it corresponds to integer coordinates in the zoomed image
         step = self.zoom_int_step_orig
 
-        print('steps', self.zoom_int_step_orig, self.zoom_int_step)
+        #print('steps', self.zoom_int_step_orig, self.zoom_int_step)
         def align_down(n): return (n // step) * step
         def align_up(n): return ((n + step - 1) // step) * step
         xmin = max(align_down(xmin) - step, 0)
@@ -3284,8 +2996,8 @@ class DrawingArea(LayoutElemBase):
         ymax = min(align_up(ymax) + step, IHEIGHT)
 
         x,y = self.frame2xy(xmin, ymin)
-        starting_point = x,y
-        print('starting point',starting_point, 'xyoft', self.xoffset, self.yoffset, 'xyscale', self.xscale, self.yscale)
+        #starting_point = x,y
+        #print('starting point',starting_point, 'xyoft', self.xoffset, self.yoffset, 'xyscale', self.xscale, self.yscale)
         sx, sy = round(x),round(y)
 
         # don't draw the entire scaled area since we have artifacts at the boundaries
@@ -3307,8 +3019,6 @@ class DrawingArea(LayoutElemBase):
         if ymax < IHEIGHT:
             yshrink += step
 
-        starting_point = (sx, sy)
-  
         full_step_aligned_frame_roi, full_scaled_roi_subset, full_starting_point = self.rois()
         iscale = 1/self.xscale
 
@@ -3326,7 +3036,7 @@ class DrawingArea(LayoutElemBase):
             right = min(x+w, s.get_width())
             top = min(y+h, s.get_height())
             return x,y,right-x,top-y
-        roi = (starting_point[0], starting_point[1], scaled_layer.get_width() - xshrink, scaled_layer.get_height() - yshrink)
+        roi = (sx, sy, scaled_layer.get_width() - xshrink, scaled_layer.get_height() - yshrink)
         trimmed_roi = trim(*roi, self.subsurface)
         sub = self.subsurface.subsurface(trimmed_roi)
 
@@ -3336,8 +3046,13 @@ class DrawingArea(LayoutElemBase):
         sub.blit(top.subsurface(other_layers_roi), (0,0)) 
         if mask:
             sub.blit(mask.subsurface(other_layers_roi), (0,0))
+        if self.should_draw_zoom_surface():
+            self.draw_zoom_surface(trimmed_roi)
 
-    def draw_zoom_surface(self):
+    def should_draw_zoom_surface(self): return self.zoom > 1.015
+    def draw_zoom_surface(self, region=None):
+        if region is not None:
+            self.subsurface.set_clip(region)
         start_x = int(self.zoom_center[0] - self.zoom_surface.get_width()/2)
         start_y = int(self.zoom_center[1] - self.zoom_surface.get_height()/2)
         self.subsurface.blit(self.zoom_surface, (start_x, start_y))
@@ -3347,6 +3062,7 @@ class DrawingArea(LayoutElemBase):
         pygame.gfxdraw.box(self.subsurface, (0, end_y, self.subsurface.get_width(), self.subsurface.get_height()), MARGIN)
         pygame.gfxdraw.box(self.subsurface, (0, start_y, start_x, end_y-start_y), MARGIN)
         pygame.gfxdraw.box(self.subsurface, (end_x, start_y, self.subsurface.get_width(), end_y-start_y), MARGIN)
+        self.subsurface.set_clip(None)
 
     def clear_fading_mask(self):
         global last_skeleton
