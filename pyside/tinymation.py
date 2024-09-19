@@ -28,48 +28,6 @@ if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
     compress_and_remove(sys.argv[2:])
     sys.exit()
 
-# we use a subprocess for an open file dialog since using tkinter together with pygame
-# causes issues for the latter after the first use of the former
-
-def tkinter_dir_path_dialog():
-    import tkinter
-    import tkinter.filedialog
-
-    tk_root = tkinter.Tk()
-    tk_root.withdraw()  # Hide the main window
-
-    return tkinter.filedialog.askdirectory(title="Select a Tinymate clips directory")
-
-# tkinter is a 200MB dependency
-# pygame_gui has non-trivial i18n issues
-# on Windows,
-#   GetOpenFileName doesn't support selecting directories
-#   IFileOpenDialog involves COM, which I felt is potentially too bug-prone (at my level) to depend on
-# so we use SHBrowseForFolder
-def windows_dir_path_dialog():
-    import win32gui, win32con
-    file_types = "'Open' selects current folder\0*.xxxxxxx\0"
-    fname, customfilter, flags = win32gui.GetOpenFileNameW(
-        InitialDir=os.getcwd(),
-        Flags=win32con.OFN_EXPLORER | win32con.OFN_NOCHANGEDIR,
-        Title="Go INTO a folder and click 'Open' to select it",
-        File="Go to folder",
-        Filter=file_types
-    )
-    return os.path.dirname(fname)
-
-def dir_path_dialog():
-    if on_windows:
-        file_path = windows_dir_path_dialog()
-    else:
-        file_path = tkinter_dir_path_dialog()
-    if file_path:
-        sys.stdout.write(repr(file_path.encode()))
-
-if len(sys.argv)>1 and sys.argv[1] == 'dir-path-dialog':
-    dir_path_dialog()
-    sys.exit()
-
 # we spawn subprocesses to export the movie to GIF, MP4 and a PNG sequence
 # every time we close a movie (if we reopen it, we interrupt the exporting
 # process and then restart upon closing; when we exit the application,
@@ -4990,12 +4948,17 @@ def export_and_open_explorer():
     open_explorer(movie.gif_path())
 
 def open_dir_path_dialog():
-    dialog_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'dir-path-dialog'], stdout=subprocess.PIPE)
-    output, _ = dialog_subprocess.communicate()
-    # we use repr/eval because writing Unicode to sys.stdout fails
-    # and so does writing the binary output of encode() without repr()
-    file_path = eval(output).decode() if output.strip() else None
-    return file_path
+    dialog = QFileDialog(widget)
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setViewMode(QFileDialog.Detail)
+    dialog.setAcceptMode(QFileDialog.AcceptOpen)
+    dialog.setOptions(QFileDialog.DontUseNativeDialog)
+    dialog.setLabelText(QFileDialog.LookIn, '')
+    dialog.setLabelText(QFileDialog.FileType, '')
+    dialog.setWindowTitle('Open a folder with zero or more Tinymation clips')
+    if dialog.exec():
+        fileNames = dialog.selectedFiles()
+        return fileNames[0]
 
 def open_clip_dir():
     file_path = open_dir_path_dialog()
@@ -5147,7 +5110,7 @@ class ScreenLock:
 
 replayed_event_index = 0
 
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QWidget, QFileDialog
 from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor
 from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication
 
