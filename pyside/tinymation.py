@@ -313,7 +313,7 @@ class Frame:
         s.blit(sub(self.lines), (0, 0))
         return s
 
-    def thumbnail(self, width, height, roi, inv_scale=None):
+    def thumbnail(self, width=None, height=None, roi=None, inv_scale=None):
         if self.empty():
             empty = empty_frame().color
             if inv_scale is not None:
@@ -499,11 +499,12 @@ class MovieData:
                 return False
         return True
 
-    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False, width=None, height=None, roi=None):
-        if not width: width=IWIDTH
-        if not height: height=IHEIGHT
+    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False, width=None, height=None, roi=None, inv_scale=None):
+        if not inv_scale:
+            if not width: width=IWIDTH
+            if not height: height=IHEIGHT
         if not roi: roi = (0, 0, IWIDTH, IHEIGHT)
-        s = pygame.Surface((width, height), pygame.SRCALPHA)
+        s = pygame.Surface((width if width else round(roi[2]*inv_scale), height if height else round(roi[3]*inv_scale)), pygame.SRCALPHA)
         if not transparent:
             s.fill(BACKGROUND)
         surfaces = []
@@ -515,8 +516,8 @@ class MovieData:
                 surfaces.append(f.surf_by_id('color'))
                 surfaces.append(f.surf_by_id('lines'))
             else:
-                surfaces.append(movie.get_thumbnail(pos, width, height, transparent_single_layer=self.layers.index(layer), roi=roi))
-        s.blits([(surface, (0, 0), (0, 0, width, height)) for surface in surfaces])
+                surfaces.append(movie.get_thumbnail(pos, width, height, transparent_single_layer=self.layers.index(layer), roi=roi, inv_scale=inv_scale))
+        s.blits([(surface, (0, 0), (0, 0, s.get_width(), s.get_height())) for surface in surfaces])
         return s
 
 
@@ -2043,6 +2044,7 @@ class PenTool(Button):
         ptr, ystride, width, height = greyscale_c_params(self.lines_array)
         smoothDist = 20#40
         lineWidth = 2.5 if self.width == WIDTH else self.width*drawing_area.xscale
+        # FIXME use event timestamps
         self.brush = tinylib.brush_init_paint(cx, cy, time.time_ns()*1000000, lineWidth, smoothDist, 1 if self.eraser else 0, ptr, width, height, 4, ystride)
         if self.eraser:
             self.brush_flood_fill_color_based_on_mask()
@@ -3140,8 +3142,8 @@ class DrawingArea(LayoutElemBase):
                 id2version, comp = key
                 return id2version, ('scaled-to-drawing-area', comp, self.zoom, self.xoffset, self.yoffset)
             def compute_value(_):
-                frame_roi, (_, _, iwidth, iheight) = self.frame_and_subsurface_roi()
-                return scale_image(surface.subsurface(frame_roi), iwidth, iheight)
+                step_aligned_frame_roi, scaled_roi_subset, _ = self.rois()
+                return scale_image(surface.subsurface(step_aligned_frame_roi), inv_scale=1/self.xscale).subsurface(scaled_roi_subset)
         if get_key:
             return ScaledSurface().compute_key()
         if surface is None:
@@ -3191,11 +3193,24 @@ class DrawingArea(LayoutElemBase):
         surfaces = []
 
         step_aligned_frame_roi, scaled_roi_subset, starting_point = self.rois()
+        iscale = 1/self.xscale
 
+        with draw_bottom_timer:
+            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
         if movie.layers[movie.layer_pos].visible:
             with draw_curr_timer:
-                scaled_layer = movie.get_thumbnail(pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=1/self.xscale).subsurface(scaled_roi_subset)
-            surfaces.append(scaled_layer)
+                surfaces.append(movie.get_thumbnail(pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
+        with draw_top_timer:
+            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
+
+        with draw_light_timer:
+            mask = layout.timeline_area().combined_light_table_mask()
+            if mask:
+                surfaces.append(mask)
+
+        if self.fading_mask:
+            with draw_fading_timer:
+                surfaces.append(self.scaled_fading_mask())
 
         with draw_blits_timer:
             self.subsurface.blits([(surface, starting_point) for surface in surfaces])
@@ -3235,10 +3250,6 @@ class DrawingArea(LayoutElemBase):
 
         with draw_blits_timer:
             self.subsurface.blits([(surface, starting_point) for surface in surfaces])
-        if 0:
-          for x in range(0,IWIDTH,100):
-            for y in range(0,IHEIGHT,100):
-                self.draw_region((x,y,x+1,y+1))
 
         eps = 0.019
         if self.zoom > 1 + eps:
@@ -3298,11 +3309,17 @@ class DrawingArea(LayoutElemBase):
 
         starting_point = (sx, sy)
   
-        #roi, sub_roi = self.frame_and_subsurface_roi() 
-        #starting_point = (sub_roi[0] + round((xmin-self.xoffset)/self.xscale), sub_roi[1] + round((ymin-self.yoffset)/self.yscale))
-        iwidth, iheight = round((xmax - xmin) / self.xscale), round((ymax - ymin) / self.yscale)
+        full_step_aligned_frame_roi, full_scaled_roi_subset, full_starting_point = self.rois()
+        iscale = 1/self.xscale
 
-        scaled_layer = movie.layers[movie.layer_pos].frame(movie.pos).thumbnail(iwidth, iheight, roi=(xmin, ymin, xmax-xmin, ymax-ymin))
+        # take the full-region cached surface and take the needed integer sub-region (faster than computing the sub-region by passing roi=src_roi)
+        bottom = movie.curr_bottom_layers_surface(movie.pos, highlight=True, roi=full_step_aligned_frame_roi, inv_scale=iscale).subsurface(full_scaled_roi_subset)
+        top = movie.curr_top_layers_surface(movie.pos, highlight=True, roi=full_step_aligned_frame_roi, inv_scale=iscale).subsurface(full_scaled_roi_subset)
+        mask = layout.timeline_area().combined_light_table_mask()
+
+        src_roi = (xmin, ymin, xmax-xmin, ymax-ymin)
+        scaled_layer = movie.layers[movie.layer_pos].frame(movie.pos).thumbnail(roi=src_roi, inv_scale=iscale)
+
         def trim(x,y,w,h,s):
             x = max(x, 0)
             y = max(y, 0)
@@ -3312,22 +3329,13 @@ class DrawingArea(LayoutElemBase):
         roi = (starting_point[0], starting_point[1], scaled_layer.get_width() - xshrink, scaled_layer.get_height() - yshrink)
         trimmed_roi = trim(*roi, self.subsurface)
         sub = self.subsurface.subsurface(trimmed_roi)
-        #self.subsurface.blit(scaled_layer, starting_point)
-        sub.fill(BACKGROUND) # FIXME - bottom layers will take care of this
-        sub.blit(scaled_layer.subsurface(trim(xoft - (roi[0] - trimmed_roi[0]), yoft - (roi[1] - trimmed_roi[1]), roi[2], roi[3], scaled_layer)), (0,0))
 
-        return #FIXME
-        roi, sub_roi = self.frame_and_subsurface_roi() 
-        starting_point = (sub_roi[0], sub_roi[1])
-        iwidth, iheight = sub_roi[2], sub_roi[3]
-        with draw_bottom_timer:
-            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=iwidth, height=iheight, roi=roi))
-        if movie.layers[movie.layer_pos].visible:
-            with draw_curr_timer:
-                scaled_layer = movie.get_thumbnail(pos, iwidth, iheight, transparent_single_layer=movie.layer_pos, roi=roi)
-            surfaces.append(scaled_layer)
-        with draw_top_timer:
-            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, width=iwidth, height=iheight, roi=roi))
+        other_layers_roi = trim(trimmed_roi[0] - full_starting_point[0], trimmed_roi[1] - full_starting_point[1], trimmed_roi[2], trimmed_roi[3], bottom)
+        sub.blit(bottom.subsurface(other_layers_roi), (0,0)) 
+        sub.blit(scaled_layer.subsurface(trim(xoft - (roi[0] - trimmed_roi[0]), yoft - (roi[1] - trimmed_roi[1]), roi[2], roi[3], scaled_layer)), (0,0))
+        sub.blit(top.subsurface(other_layers_roi), (0,0)) 
+        if mask:
+            sub.blit(mask.subsurface(other_layers_roi), (0,0))
 
     def draw_zoom_surface(self):
         start_x = int(self.zoom_center[0] - self.zoom_surface.get_width()/2)
@@ -3646,10 +3654,9 @@ class TimelineArea(LayoutElemBase):
                 held_inside = scaled(held_mask_inside)
                 
                 if held_inside or held_outside:
-                    roi, sub_roi = da.frame_and_subsurface_roi() 
-                    iwidth, iheight = sub_roi[2], sub_roi[3]
+                    step_aligned_frame_roi, scaled_roi_subset, _ = da.rois()
+                    scaled_layer = movie.get_thumbnail(movie.pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=1/da.xscale).subsurface(scaled_roi_subset)
 
-                    scaled_layer = movie.get_thumbnail(movie.pos, iwidth, iheight, transparent_single_layer=movie.layer_pos, roi=roi)
                     alpha = pg.surfarray.pixels_alpha(scaled_layer)
 
                 masks = []
@@ -3967,7 +3974,7 @@ class LayersArea(LayoutElemBase):
         if not self.thumbnail_height:
             return None
         _, bottom, _, _ = self.rect
-        return len(movie.layers) - ((y-bottom) // self.thumbnail_height) - 1
+        return len(movie.layers) - (round(y-bottom) // self.thumbnail_height) - 1
 
     def update_on_light_table(self,x,y):
         for left, bottom, right, top, layer_pos in self.lit_boundaries:
@@ -4357,10 +4364,10 @@ class Movie(MovieData):
                     if trans_single:
                         return self.layers[layer_pos].frame(pos).thumbnail(width, height, roi, inv_scale)
 
-                    s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi).copy()
+                    s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi, inv_scale=inv_scale).copy()
                     if self.layers[self.layer_pos].visible:
-                        s.blit(self.get_thumbnail(pos, width, height, transparent_single_layer=layer_pos, roi=roi), (0, 0))
-                    s.blit(self.curr_top_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi), (0, 0))
+                        s.blit(self.get_thumbnail(pos, width, height, transparent_single_layer=layer_pos, roi=roi, inv_scale=inv_scale), (0, 0))
+                    s.blit(self.curr_top_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi, inv_scale=inv_scale), (0, 0))
                     return s
                 else:
                     return scale_image(self.get_thumbnail(pos, w, h, highlight=highlight, transparent_single_layer=transparent_single_layer, roi=roi), width, height)
@@ -4512,24 +4519,26 @@ class Movie(MovieData):
         self.edited_since_export = True
         return f
 
-    def _set_undrawable_layers_grid(self, s):
+    def _set_undrawable_layers_grid(self, s, x=0, y=0):
         alpha = pg.surfarray.pixels3d(s)
-        alpha[::WIDTH*3, ::WIDTH*3, :] = 0
-        alpha[1::WIDTH*3, ::WIDTH*3, :] = 0
-        alpha[:1:WIDTH*3, ::WIDTH*3, :] = 0
-        alpha[1:1:WIDTH*3, ::WIDTH*3, :] = 0
+        xo = x % (WIDTH*3) #layout.drawing_area().xoffset# % (WIDTH*3)
+        yo = y % (WIDTH*3) #layout.drawing_area().yoffset# % (WIDTH*3)
+        alpha[xo::WIDTH*3, yo::WIDTH*3, :] = 0
+        alpha[xo+1::WIDTH*3, yo::WIDTH*3, :] = 0
+        alpha[xo::WIDTH*3, yo+1::WIDTH*3, :] = 0
+        alpha[xo+1::WIDTH*3, yo+1::WIDTH*3, :] = 0
 
-    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None):
-        if not width: width=IWIDTH
-        if not height: height=IHEIGHT
+    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None):
+        if not width and not inv_scale: width=IWIDTH
+        if not height and not inv_scale: height=IHEIGHT
         if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
 
         class CachedBottomLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi)
+                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi, inv_scale)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi)
-                s = pg.Surface((width, height), pg.SRCALPHA)
+                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
+                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
                 s.fill(BACKGROUND)
                 if self.layer_pos == 0:
                     return s
@@ -4539,7 +4548,7 @@ class Movie(MovieData):
 
                 layers.set_alpha(128)
                 da = layout.drawing_area()
-                w, h = da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2
+                w, h = da.iwidth+da.xmargin*2+128, da.iheight+da.ymargin*2+128
                 class BelowImage:
                     def compute_key(_): return tuple(), ('below-image', w, h)
                     def compute_value(_):
@@ -4551,31 +4560,31 @@ class Movie(MovieData):
                 # to save a copy of just the alpha pixels [those we really need]...
                 layers.blit(cache.fetch(BelowImage()), (0,0))
                 rgba_array(layers)[0][:,:,3] = rgba[:,:,3]
-                self._set_undrawable_layers_grid(layers)
+                #self._set_undrawable_layers_grid(layers, roi[0], roi[1]) # FIXME: to resurrect this we have to know the right offset for the dots
                 s.blit(layers, (0,0))
 
                 return s
 
         return cache.fetch(CachedBottomLayers())
 
-    def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None):
-        if not width: width=IWIDTH
-        if not height: height=IHEIGHT
+    def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None):
+        if not width and not inv_scale: width=IWIDTH
+        if not height and not inv_scale: height=IHEIGHT
         if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
 
         class CachedTopLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height, roi)
+                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height, roi, inv_scale)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi)
+                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
                 if not highlight or self.layer_pos == len(self.layers)-1:
                     return layers
 
                 layers.set_alpha(128)
-                s = pg.Surface((width, height), pg.SRCALPHA)
+                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
                 s.fill(BACKGROUND)
                 da = layout.drawing_area()
-                w, h = da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2
+                w, h = da.iwidth+da.xmargin*2 + 128, da.iheight+da.ymargin*2 + 128 #TODO: what should this really be? 128 is 2x max alignment step but in what space?..
                 class AboveImage:
                     def compute_key(_): return tuple(), ('above-image', w, h)
                     def compute_value(_):
@@ -4585,7 +4594,7 @@ class Movie(MovieData):
                         return above_image
                 rgba = np.copy(rgba_array(layers)[0])
                 layers.blit(cache.fetch(AboveImage()), (0,0))
-                self._set_undrawable_layers_grid(layers)
+                #self._set_undrawable_layers_grid(layers) # FIXME: offsets
                 s.blit(layers, (0,0))
                 rgba_array(s)[0][:,:,3] = rgba[:,:,3]
                 s.set_alpha(192)
