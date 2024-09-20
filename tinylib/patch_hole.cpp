@@ -50,7 +50,7 @@ enum CantPatchReason
 	NoClosestPointOnLines = -4
 };
 
-void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_stride, int width, int height);
+extern "C" void skeletonize(const uint8_t* image, int im_stride, uint8_t* skeleton, int sk_stride, int width, int height);
 
 //we modify the skeleton in-place
 //

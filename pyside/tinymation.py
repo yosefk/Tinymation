@@ -621,7 +621,7 @@ class ExportProgressStatus:
 _empty_frame = Frame('')
 
 # backups
-import zipfile
+#import zipfile
 
 def create_backup(on_progress):
     backup_file = os.path.join(WD, f'Tinymate-backup-{format_now()}.zip')
@@ -749,13 +749,14 @@ def parse_replay_log():
 
 # Student server & teacher client: turn screen on/off, save/restore backups
 
-import threading
-import socket
-from zeroconf import ServiceInfo, Zeroconf
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import getpass, getmac
-import base64
+#import threading
+#import socket
+#from zeroconf import ServiceInfo, Zeroconf
+#from http.server import BaseHTTPRequestHandler, HTTPServer
+#import getpass, getmac
+#import base64
 
+class BaseHTTPRequestHandler: pass
 class StudentRequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
         try:
@@ -907,10 +908,10 @@ class StudentServer:
         self.thread.join()
         self.zeroconf.unregister_service(self.service_info)
 
-student_server = StudentServer()
+#student_server = StudentServer()
 
-from zeroconf import ServiceBrowser
-import http.client
+#from zeroconf import ServiceBrowser
+#import http.client
 
 class StudentThreads:
     def __init__(self, students, title):
@@ -1254,8 +1255,6 @@ import math
 import io
 import shutil
 
-from skimage.morphology import flood_fill, binary_dilation, skeletonize
-from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closing
 pg = pygame
 pg.init()
 
@@ -1847,6 +1846,7 @@ class PenTool(Button):
         pg.time.set_timer(PAINTING_TIMER_EVENT, 0, 0)
         pg.time.set_timer(HISTORY_TIMER_EVENT, 0, 0)
 
+        movie.edit_curr_frame()
         tinylib.brush_end_paint(self.brush, self.region)
         self.update_bbox()
         self.brush = 0
@@ -2232,10 +2232,13 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
         
     sk_timer.start()
     skx, sky = fixed_size_image_region(x, y, SK_WIDTH, SK_HEIGHT)
-    skeleton = skeletonize(np.ascontiguousarray(flood_mask[skx,sky])).astype(np.uint8)
+    skeleton = tl_skeletonize(np.ascontiguousarray(flood_mask[skx,sky])).astype(np.uint8)
     sk_timer.stop()
 
-    fmb = binary_dilation(binary_dilation(skeleton))
+    def dilation(img):
+        kernel = np.ones((3, 3), np.uint8)
+        return cv2.dilate(img, kernel, iterations=1)
+    fmb = dilation(dilation(skeleton))
 
     # Compute distance from each point to the specified center
     dist_timer.start()
@@ -2253,7 +2256,7 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
         d = np.ones(lines.shape, int)
         maxdist = 10
 
-    outer_d = -grey_dilation(-d, 3)
+    outer_d = -dilation(-d)
 
     maxdist = min(700, maxdist)
 
@@ -5232,8 +5235,8 @@ status = app.exec()
 
 
 pygame.quit()
-if student_server:
-    student_server.stop()
+#if student_server:
+#    student_server.stop()
 sys.exit(status)
 
 try:
