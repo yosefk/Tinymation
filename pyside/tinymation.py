@@ -1258,6 +1258,26 @@ import shutil
 pg = pygame
 pg.init()
 
+from PySide6.QtWidgets import QApplication, QWidget, QFileDialog
+from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor, QPixmap
+from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication, QSize
+
+app = QApplication(sys.argv)
+
+def pgsurf2qtimage(src, dst):
+    iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
+    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iheight * istride * 4))).contents
+    iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
+
+    mem_view = dst.bits()
+    optr = ctypes.addressof(ctypes.c_byte.from_buffer(mem_view))
+    owidth, oheight, ostride = iwidth, iheight, istride # FIXME
+    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (oheight * ostride * 4))).contents
+
+    oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer, strides=(ostride, 4, 1))
+    oattached[:] = iattached[:]
+
+
 replay_log = None
 if len(sys.argv) > 1 and sys.argv[1] == 'replay':
     print('replaying events from log')
@@ -1503,6 +1523,12 @@ def scale_image(surface, width=None, height=None, inv_scale=None):
 def minmax(v, minv, maxv):
     return min(maxv,max(minv,v))
 
+def surf2cursor(surface, hotx, hoty):
+  image = QImage(QSize(surface.get_width(), surface.get_height()), QImage.Format_ARGB32)
+  pgsurf2qtimage(surface, image)
+  pixmap = QPixmap.fromImage(image)
+  return QCursor(pixmap, hotX=hotx, hotY=hoty)
+
 def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=192, edit=lambda x: x, hot_spot_offset=(0,0)):
   surface = load_image(file)
   surface = scale_image(surface, size, size*surface.get_height()/surface.get_width())#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
@@ -1515,7 +1541,8 @@ def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=19
   surface = edit(surface)
   hotx = minmax(int(hot_spot[0] * surface.get_width()) + hot_spot_offset[0], 0, surface.get_width()-1)
   hoty = minmax(int(hot_spot[1] * surface.get_height()) + hot_spot_offset[1], 0, surface.get_height()-1)
-  return pg.cursors.Cursor((hotx, hoty), surface), non_transparent_surface
+  #return pg.cursors.Cursor((hotx, hoty), surface), non_transparent_surface
+  return surf2cursor(surface, hotx, hoty), non_transparent_surface
 
 def add_circle(image, radius, color=(255,0,0,128), outline_color=(0,0,0,128)):
     new_width = radius + image.get_width()
@@ -1546,7 +1573,7 @@ pan_cursor = load_cursor('pan.png', hot_spot=(0.5, 0.5), size=int(CURSOR_SIZE*2)
 finger_cursor = load_cursor('finger.png', hot_spot=(0.85, 0.17))
 
 # for locked screen
-empty_cursor = pg.cursors.Cursor((0,0), pg.Surface((10,10), pg.SRCALPHA))
+empty_cursor = surf2cursor(pg.Surface((10,10), pg.SRCALPHA), 0, 0)
 
 # set_cursor can fail on some machines so we don't count on it to work.
 # we set it early on to "give a sign of life" while the window is black;
@@ -1559,10 +1586,11 @@ def try_set_cursor(c):
     try:
         global curr_cursor
         global prev_cursor
-        pg.mouse.set_cursor(c)
+        widget.setCursor(c)
         prev_cursor = curr_cursor
         curr_cursor = c
-    except:
+    except Exception as e:
+        print('Failed to set cursor',e)
         pass
 try_set_cursor(pencil_cursor[0])
 
@@ -1943,7 +1971,7 @@ class ZoomTool(Button):
         h = screen.get_height()
         self.max_up_dist = min(.85 * abs_y, h * .3 * (MAX_ZOOM - da.zoom)/(MAX_ZOOM - MIN_ZOOM))
         self.max_down_dist = min(.85 * (h - abs_y), h * .3 * (da.zoom - MIN_ZOOM)/(MAX_ZOOM - MIN_ZOOM))
-        self.frame_start = da.xy2frame(x,y,minoft=-1000000)
+        self.frame_start = da.xy2frame(x,y)
         self.orig_zoom = da.zoom
         da.set_zoom_center(self.start)
     def on_mouse_up(self, x, y):
@@ -2836,7 +2864,7 @@ class DrawingArea(LayoutElemBase):
 
         return step_aligned_frame_roi, scaled_roi_subset, drawing_area_starting_point
         
-    def xy2frame(self, x, y, minoft=0):
+    def xy2frame(self, x, y):
         return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
     def frame2xy(self, framex, framey):
         return framex/self.xscale + self.xmargin - self.xoffset, framey/self.yscale + self.ymargin - self.yoffset
@@ -2878,8 +2906,6 @@ class DrawingArea(LayoutElemBase):
         self.set_zoom(1)
     def draw(self):
         drawing_area_draw_timer.start()
-        print('zoom',self.zoom,'margins',self.xmargin,self.ymargin)
-        self.subsurface.fill(BACKGROUND) # FIXME
 
         self._internal_layout()
         left, bottom, width, height = self.rect
@@ -4581,10 +4607,10 @@ class Palette:
         for row in range(self.rows):
             for col in range(self.columns):
                 sc = bucket(self.colors[row][col])
-                self.cursors[row][col] = (pg.cursors.Cursor((radius,sc.get_height()-radius-1), sc), color_image(paint_bucket_cursor[1], self.colors[row][col]))
+                self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], self.colors[row][col]))
 
         sc = bucket(self.bg_color)
-        cursor = (pg.cursors.Cursor((radius,sc.get_height()-radius-1), sc), color_image(paint_bucket_cursor[1], self.bg_color))
+        cursor = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], self.bg_color))
         self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width()))
 
 palette = Palette('palette.png')
@@ -5113,23 +5139,6 @@ class ScreenLock:
 
 replayed_event_index = 0
 
-from PySide6.QtWidgets import QApplication, QWidget, QFileDialog
-from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor
-from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication
-
-def pgsurf2qtimage(src, dst):
-    iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
-    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iheight * istride * 4))).contents
-    iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
-
-    mem_view = dst.bits()
-    optr = ctypes.addressof(ctypes.c_byte.from_buffer(mem_view))
-    owidth, oheight, ostride = iwidth, iheight, istride # FIXME
-    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (oheight * ostride * 4))).contents
-
-    oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer, strides=(ostride, 4, 1))
-    oattached[:] = iattached[:]
-
 class TinymationWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -5229,8 +5238,8 @@ class TinymationWidget(QWidget):
         else:
             print('Shift-Escape pressed - skipping export to GIF and MP4!')
 
-app = QApplication(sys.argv)
 widget = TinymationWidget()
+try_set_cursor(pencil_cursor[0])
 status = app.exec()
 
 
