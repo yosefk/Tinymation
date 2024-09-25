@@ -470,7 +470,7 @@ void Brush::paintBezierSegment(const SamplePoint& p1, const SamplePoint& p2, con
     paintBezierCurve(p1, p2, control1, control2);
 }
 
-const double BEZIER_FLATNESS_THRESHOLD = 0.3; //Krita uses 0.5; smaller is smoother and potentially more expensive
+const double BEZIER_FLATNESS_THRESHOLD = 0.1; //Krita uses 0.5; smaller is smoother and potentially more expensive
 
 void Brush::paintBezierCurve(const SamplePoint& p1, const SamplePoint& p2, const Point2D& control1, const Point2D& control2)
 {

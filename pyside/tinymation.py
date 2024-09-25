@@ -1452,9 +1452,10 @@ tinylib = npct.load_library('tinylib','.')
 
 tinylib.brush_init_paint.argtypes = [ctypes.c_double]*5 + [ctypes.c_int, ctypes.c_void_p] + [ctypes.c_int]*4
 tinylib.brush_init_paint.restype = ctypes.c_void_p
-tinylib.brush_paint.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_double]*2
-tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]
+tinylib.brush_paint.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_double]*2 + [ctypes.c_void_p]
+tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]*2
 tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_int]*5
+tinylib.fitpack_parcur.argtypes = [ctypes.c_void_p]*2 + [ctypes.c_int]*3 + [ctypes.c_double] + [ctypes.c_void_p]*3
 
 def rgba_array(surface):
     ptr, ystride, width, height, bgr = color_c_params(pg.surfarray.pixels3d(surface))
@@ -2305,6 +2306,68 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
     rest_timer.stop()
     return fading_mask, (skeleton, skx, sky)
 
+def splprep(points, weights=None, smoothing=None):
+    '''NOTE: scipy.interpolation.splprep expects points (which it calls x) to be transposed relatively to this function, as in
+    idim, m = points.shape'''
+    m, idim = points.shape
+    if weights is None:
+        weights = np.ones(m)
+    if smoothing is None: 
+        smoothing = m - math.sqrt(2*m)
+    k = 3
+    assert m>k, 'not enough points'
+
+    t = np.zeros(m+k+1)
+    c = np.zeros((m+k+1)*idim)
+    num_knots = np.zeros(1, np.int32)
+    ier = tinylib.fitpack_parcur(arr_base_ptr(points), arr_base_ptr(weights), idim, m, k, smoothing,
+                                 arr_base_ptr(t), arr_base_ptr(num_knots), arr_base_ptr(c))
+
+    n = num_knots[0]
+    # c: on succesful exit, this array will contain the coefficients
+    #    in the b-spline representation of the spline curve s(u),i.e.
+    #       the b-spline coefficients of the spline sj(u) will be given
+    #           in c(n*(j-1)+i),i=1,2,...,n-k-1 for j=1,2,...,idim.
+    return (t[:n], [c[n*j:n*j+n-k-1] for j in range(idim)], k)
+
+def splev(x, tck):
+    t, c, k = tck
+    try:
+        c[0][0]
+        parametric = True
+    except Exception:
+        parametric = False
+    if parametric:
+        return list(map(lambda c, x=x, t=t, k=k: splev(x, [t, c, k]), c))
+
+    x = np.asarray(x)
+    xshape = x.shape
+    x = x.ravel()
+    y = np.zeros(x.shape, float)
+    ier = tinylib.fitpack_splev(arr_base_ptr(t), t.shape[0], arr_base_ptr(c), k, arr_base_ptr(x), arr_base_ptr(y), y.shape[0])
+    assert ier == 0
+    return y.reshape(xshape)
+
+def bspline_interp(points):
+    x = np.array([1.*p[0] for p in points])
+    y = np.array([1.*p[1] for p in points])
+
+    def dist(i1, i2):
+        return math.sqrt((x[i1]-x[i2])**2 + (y[i1]-y[i2])**2)
+    curve_length = sum([dist(i, i+1) for i in range(len(x)-1)])
+
+    smoothing = len(x) / 15
+    # scipy.interpolate.splrep works like this:
+    #tck, u = splprep([x, y], s=smoothing)
+    #ufirst, ulast = u[0], u[-1] # these evaluate to 0, 1
+    # our splprep works like this:
+    tck = splprep(np.column_stack([x,y]), smoothing=smoothing)
+    ufirst, ulast = 0, 1
+
+    step=(ulast-ufirst)/curve_length
+
+    return splev(np.arange(ufirst, ulast+step, step), tck)
+
 HOLE_REGION_W = 40
 HOLE_REGION_H = 40
 
@@ -2355,27 +2418,20 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     if found < 3:
         return False
-    n1 = n1[0] #* 0
-    n2 = n2[0] #* 0
+
+    n1 = n1[0]
+    n2 = n2[0]
     xs1 = xs1[:n1]
     ys1 = ys1[:n1]
     xs2 = xs2[:n2]
     ys2 = ys2[:n2]
-    #skeleton[xs,ys] = 5
-    #skeleton[xs1,ys1] = 6
-    #skeleton[xs2,ys2] = 7
-    #print('LP xs ys',lines[xs+skx.start,ys+sky.start])
-    #imageio.imwrite('lines-skel.png', skeleton.astype(np.uint8)*(256//8))
-    #imageio.imwrite('lines-bin.png', lines_patch.astype(np.uint8)*127)
 
     endp1 = xs[0]+skx.start, ys[0]+sky.start
     endp2 = xs[2]+skx.start, ys[2]+sky.start
 
     if n1 == 0 and n2 == 0: #  just 3 points - create 5 points to fit a curve
-        # through the point on the skeleton and the 2 endpoints
-        pass
-        #xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]
-        #ys = [ys[0], ys[0]*0.9 + ys[1]*0.1, ys[1], ys[1]*0.1 + ys[2]*0.9, ys[2]]
+        xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]
+        ys = [ys[0], ys[0]*0.9 + ys[1]*0.1, ys[1], ys[1]*0.1 + ys[2]*0.9, ys[2]]
     else: # we have enough points to not depend on the exact point
         # on the skeleton
         def pad(c, n): # a crude way to add weight to a "lone endpoint",
@@ -2386,12 +2442,10 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
         ys = pad(ys[0],n1) + pad(ys[2],n2)
 
 
-    # +.5 because line skeletonization done inside tinylib.patch_hole
-    # seems to move "the line center of mass" by about half a pixel
-    #print(xs1[::-1]+.5, xs, xs2+.5)
-    #print(ys1[::-1]+.5, ys, ys2+.5)
-    xs = np.concatenate((xs1[::-1]+.5, xs, xs2+.5))
-    ys = np.concatenate((ys1[::-1]+.5, ys, ys2+.5))
+    oft=0 # at one point it seemed that skeletonization moves the points by .5... currently oft is 0 since it doesn't seem so
+    w = np.array([i/(len(xs1)) for i in range(len(xs1))] + [1]*len(xs) + [i/len(xs2) for i in range(len(xs2),0,-1)])
+    xs = np.concatenate((xs1[::-1]+oft, xs, xs2+oft))
+    ys = np.concatenate((ys1[::-1]+oft, ys, ys2+oft))
     lines_patch[:] = 0
     skeleton[:] = 0
     points=[(x+skx.start,y+sky.start) for x,y in zip(xs,ys)]
@@ -2408,30 +2462,33 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
                 end = i
                 break
         return px[start:end], py[start:end]
-    # TODO: use the brush instead
-    history_item = HistoryItem('lines') # TODO: pass bbox
+
+
+    path = bspline_interp(points)
+    px, py = filter_points(path[0], path[1])
+            
+    margin = 5
+    minx = max(0, math.floor(min(px)) - margin)
+    miny = max(0, math.floor(min(py)) - margin)
+    maxx = min(IWIDTH-1, math.ceil(max(px)) + margin)
+    maxy = min(IHEIGHT-1, math.ceil(max(py)) + margin)
+    history_item = HistoryItem('lines', bbox=(minx, miny, maxx, maxy))
+    history.append_item(history_item)
 
     ptr, ystride, width, height = greyscale_c_params(lines)
-    brush = tinylib.brush_init_paint(points[0][0], points[1][1], 0, 2.5, 0, 0, ptr, width, height, 4, ystride)
+    brush = tinylib.brush_init_paint(px[0], py[0], 0, 2.5, 0, 0, ptr, width, height, 4, ystride)
     xarr = np.zeros(1)
     yarr = np.zeros(1)
     t = 0
-    for x,y in points:
+    rect = np.zeros(4, dtype=np.int32)
+    region = arr_base_ptr(rect)
+    for x,y in zip(px[1:],py[1:]):
         xarr[0] = x
         yarr[0] = y
-        tinylib.brush_paint(brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1)
+        tinylib.brush_paint(brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, region)
         t += 7
 
-    tinylib.brush_end_paint(brush)
-    
-    history.append_item(history_item)
-
-    #new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines, zoom=1, filter_points=filter_points)[0]
-
-    #history_item = HistoryItem('lines', bbox)
-    #(minx, miny, maxx, maxy) = bbox
-    #lines[minx:maxx+1, miny:maxy+1] = np.maximum(new_lines, lines[minx:maxx+1, miny:maxy+1])
-    #history.append_item(history_item)
+    tinylib.brush_end_paint(brush, region)
 
     return True
 
@@ -5221,13 +5278,13 @@ class TinymationWidget(QWidget):
             self.shutdown(export_on_exit=not (event.modifiers() & Qt.ShiftModifier))
             self.close()
             return
-        if event.type() == QEvent.KeyPress:
-            process_keydown_event(event)
-        elif event.type() == QEvent.KeyRelease:
-            process_keyup_event(event)
+        process_keydown_event(event)
         self.redrawLayoutIfNeeded(event)
         self.redrawScreen()
         event.accept()
+
+    def keyReleaseEvent(self, event):
+        process_keyup_event(event)
 
     def shutdown(self, export_on_exit):
         timers.show()

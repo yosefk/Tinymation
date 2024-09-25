@@ -10,5 +10,7 @@
     brush_paint;
     brush_end_paint;
     brush_flood_fill_color_based_on_mask;
+    fitpack_splev;
+    fitpack_parcur;
   local: *;
 };
