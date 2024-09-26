@@ -500,6 +500,11 @@ class MP4:
         self.stream.options = {'crf': '17'} # quite bad quality with smaller file sizes without this
     def write_frame(self, pixels):
         frame = av.VideoFrame.from_ndarray(pixels, format='rgb24')
+        # without this reformat() call with both the format and the colorspace options, we get slightly
+        # wrong colors (ffmpeg malfunctions similarly with the default settings and it's fixed by the -colorspace option,
+        # though in that experiment I didn't try also specifying a yuv420p output; I don't know why we need to explicitly
+        # convert the source to YUV in this code in addition to the converstion to the bt709 colorspace)
+        frame = frame.reformat(format='yuv420p', dst_colorspace=av.video.reformatter.Colorspace.ITU709)
         packet = self.stream.encode(frame)
         self.output.mux(packet)
     def close(self):
