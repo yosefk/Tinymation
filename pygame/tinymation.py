@@ -28,6 +28,48 @@ if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
     compress_and_remove(sys.argv[2:])
     sys.exit()
 
+# we use a subprocess for an open file dialog since using tkinter together with pygame
+# causes issues for the latter after the first use of the former
+
+def tkinter_dir_path_dialog():
+    import tkinter
+    import tkinter.filedialog
+
+    tk_root = tkinter.Tk()
+    tk_root.withdraw()  # Hide the main window
+
+    return tkinter.filedialog.askdirectory(title="Select a Tinymation clips directory")
+
+# tkinter is a 200MB dependency
+# pygame_gui has non-trivial i18n issues
+# on Windows,
+#   GetOpenFileName doesn't support selecting directories
+#   IFileOpenDialog involves COM, which I felt is potentially too bug-prone (at my level) to depend on
+# so we use SHBrowseForFolder
+def windows_dir_path_dialog():
+    import win32gui, win32con
+    file_types = "'Open' selects current folder\0*.xxxxxxx\0"
+    fname, customfilter, flags = win32gui.GetOpenFileNameW(
+        InitialDir=os.getcwd(),
+        Flags=win32con.OFN_EXPLORER | win32con.OFN_NOCHANGEDIR,
+        Title="Go INTO a folder and click 'Open' to select it",
+        File="Go to folder",
+        Filter=file_types
+    )
+    return os.path.dirname(fname)
+
+def dir_path_dialog():
+    if on_windows:
+        file_path = windows_dir_path_dialog()
+    else:
+        file_path = tkinter_dir_path_dialog()
+    if file_path:
+        sys.stdout.write(repr(file_path.encode()))
+
+if len(sys.argv)>1 and sys.argv[1] == 'dir-path-dialog':
+    dir_path_dialog()
+    sys.exit()
+
 # we spawn subprocesses to export the movie to GIF, MP4 and a PNG sequence
 # every time we close a movie (if we reopen it, we interrupt the exporting
 # process and then restart upon closing; when we exit the application,
@@ -271,20 +313,24 @@ class Frame:
         s.blit(sub(self.lines), (0, 0))
         return s
 
-    def thumbnail(self, width=None, height=None, roi=None, inv_scale=None):
+    def thumbnail(self, width, height, roi):
         if self.empty():
-            empty = empty_frame().color
-            if inv_scale is not None:
-                width = round(roi[2] * inv_scale)
-                height = round(roi[3] * inv_scale)
-            return empty.subsurface(0, 0, width, height)
-
+            return empty_frame().color.subsurface(0, 0, width, height)
+        def sub(surface): return surface.subsurface(roi)
         with thumb_timer:
-            return scale_image(self.surface(roi), width, height, inv_scale)
-            # note that for a small ROI it's faster to blit lines onto color first, and then scale;
-            # for a large ROI, it's faster to scale first and then blit the smaller number of pixels.
-            # however this produces ugly artifacts where lines & color are eroded and you see through
-            # both into the layer below, so we don't do it
+            match roi:
+                # for a small ROI it's better to blit lines onto color first, and then scale;
+                # for a large ROI, better to scale first and then blit the smaller number of pixels.
+                # (there might be a multiplier in that comparison... empirically with the implicit
+                # multiplier 1, the two branches take about the same amount of time)
+                case _,_,w,h if w*h < width*height:
+                    with small_roi_timer:
+                        s = scale_image(self.surface(roi), width, height)
+                case _:
+                    with large_roi_timer:
+                        s = scale_image(sub(self.color), width, height)
+                        s.blit(scale_image(sub(self.lines), width, height), (0, 0))
+        return s
 
     def filenames_png_bmp(self,surface_id):
         fname = f'{self.id}-{surface_id}.'
@@ -457,12 +503,11 @@ class MovieData:
                 return False
         return True
 
-    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False, width=None, height=None, roi=None, inv_scale=None):
-        if not inv_scale:
-            if not width: width=IWIDTH
-            if not height: height=IHEIGHT
+    def _blit_layers(self, layers, pos, transparent=False, include_invisible=False, width=None, height=None, roi=None):
+        if not width: width=IWIDTH
+        if not height: height=IHEIGHT
         if not roi: roi = (0, 0, IWIDTH, IHEIGHT)
-        s = pygame.Surface((width if width else round(roi[2]*inv_scale), height if height else round(roi[3]*inv_scale)), pygame.SRCALPHA)
+        s = pygame.Surface((width, height), pygame.SRCALPHA)
         if not transparent:
             s.fill(BACKGROUND)
         surfaces = []
@@ -474,8 +519,8 @@ class MovieData:
                 surfaces.append(f.surf_by_id('color'))
                 surfaces.append(f.surf_by_id('lines'))
             else:
-                surfaces.append(movie.get_thumbnail(pos, width, height, transparent_single_layer=self.layers.index(layer), roi=roi, inv_scale=inv_scale))
-        s.blits([(surface, (0, 0), (0, 0, s.get_width(), s.get_height())) for surface in surfaces])
+                surfaces.append(movie.get_thumbnail(pos, width, height, transparent_single_layer=self.layers.index(layer), roi=roi))
+        s.blits([(surface, (0, 0), (0, 0, width, height)) for surface in surfaces])
         return s
 
 
@@ -621,7 +666,7 @@ class ExportProgressStatus:
 _empty_frame = Frame('')
 
 # backups
-#import zipfile
+import zipfile
 
 def create_backup(on_progress):
     backup_file = os.path.join(WD, f'Tinymation-backup-{format_now()}.zip')
@@ -749,14 +794,13 @@ def parse_replay_log():
 
 # Student server & teacher client: turn screen on/off, save/restore backups
 
-#import threading
-#import socket
-#from zeroconf import ServiceInfo, Zeroconf
-#from http.server import BaseHTTPRequestHandler, HTTPServer
-#import getpass, getmac
-#import base64
+import threading
+import socket
+from zeroconf import ServiceInfo, Zeroconf
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import getpass, getmac
+import base64
 
-class BaseHTTPRequestHandler: pass
 class StudentRequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
         try:
@@ -908,10 +952,10 @@ class StudentServer:
         self.thread.join()
         self.zeroconf.unregister_service(self.service_info)
 
-#student_server = StudentServer()
+student_server = StudentServer()
 
-#from zeroconf import ServiceBrowser
-#import http.client
+from zeroconf import ServiceBrowser
+import http.client
 
 class StudentThreads:
     def __init__(self, students, title):
@@ -1252,31 +1296,18 @@ def start_teacher_client():
 import subprocess
 import pygame.gfxdraw
 import math
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import matplotlib
+matplotlib.use('agg')  # turn off interactive backend
 import io
 import shutil
+from scipy.interpolate import splprep
 
+from skimage.morphology import flood_fill, binary_dilation, skeletonize
+from scipy.ndimage import grey_dilation, grey_erosion, grey_opening, grey_closing
 pg = pygame
 pg.init()
-
-from PySide6.QtWidgets import QApplication, QWidget, QFileDialog
-from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor, QPixmap
-from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication, QSize
-
-app = QApplication(sys.argv)
-
-def pgsurf2qtimage(src, dst):
-    iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
-    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iheight * istride * 4))).contents
-    iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
-
-    mem_view = dst.bits()
-    optr = ctypes.addressof(ctypes.c_byte.from_buffer(mem_view))
-    owidth, oheight, ostride = iwidth, iheight, istride # FIXME
-    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (oheight * ostride * 4))).contents
-
-    oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer, strides=(ostride, 4, 1))
-    oattached[:] = iattached[:]
-
 
 replay_log = None
 if len(sys.argv) > 1 and sys.argv[1] == 'replay':
@@ -1287,15 +1318,13 @@ else:
     #screen = pygame.display.set_mode((800, 350*2), pygame.RESIZABLE)
     #screen = pygame.display.set_mode((350, 800), pygame.RESIZABLE)
     #screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
-    #screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-    screen = pg.Surface((1920, 1200), pg.SRCALPHA)#pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-    print(screen.get_size())
+    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
 
 log_event(dict(STARTING=True, width=screen.get_width(), height=screen.get_height()))
 
 screen.fill(BACKGROUND)
-#pygame.display.flip()
-#pygame.display.set_caption("Tinymation")
+pygame.display.flip()
+pygame.display.set_caption("Tinymation")
 
 font = pygame.font.Font(size=screen.get_height()//15)
 
@@ -1393,6 +1422,7 @@ pen_down_timer = timers.add('PenTool.on_mouse_down')
 pen_move_timer = timers.add('PenTool.on_mouse_move')
 pen_up_timer = timers.add('PenTool.on_mouse_up')
 pen_draw_lines_timer = timers.add('drawLines', indent=1)
+fit_curve_timer = timers.add('bspline_interp', indent=2)
 pen_suggestions_timer = timers.add('pen suggestions', indent=1)
 eraser_timer = timers.add('eraser',indent=1)
 pen_fading_mask_timer = timers.add('fading_mask', indent=1)
@@ -1452,10 +1482,9 @@ tinylib = npct.load_library('tinylib','.')
 
 tinylib.brush_init_paint.argtypes = [ctypes.c_double]*5 + [ctypes.c_int, ctypes.c_void_p] + [ctypes.c_int]*4
 tinylib.brush_init_paint.restype = ctypes.c_void_p
-tinylib.brush_paint.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_double]*2 + [ctypes.c_void_p]
-tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]*2
+tinylib.brush_paint.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_double]*2
+tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]
 tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_int]*5
-tinylib.fitpack_parcur.argtypes = [ctypes.c_void_p]*2 + [ctypes.c_int]*3 + [ctypes.c_double] + [ctypes.c_void_p]*3
 
 def rgba_array(surface):
     ptr, ystride, width, height, bgr = color_c_params(pg.surfarray.pixels3d(surface))
@@ -1466,8 +1495,190 @@ def rgba_array(surface):
 def meshgrid_color(rgb): tinylib.meshgrid_color(*color_c_params(rgb))
 def meshgrid_alpha(alpha): tinylib.meshgrid_alpha(*greyscale_c_params(alpha))
 
+fig = None
+ax = None
+fig_dict = {}
+ax_dict = {}
+
+def splev(x, tck):
+    t, c, k = tck
+    try:
+        c[0][0]
+        parametric = True
+    except Exception:
+        parametric = False
+    if parametric:
+        return list(map(lambda c, x=x, t=t, k=k: splev(x, [t, c, k]), c))
+
+    x = np.asarray(x)
+    xshape = x.shape
+    x = x.ravel()
+    y = np.zeros(x.shape, float)
+    tinylib.splev(arr_base_ptr(t), t.shape[0], arr_base_ptr(c), k, arr_base_ptr(x), arr_base_ptr(y), y.shape[0])
+    return y.reshape(xshape)
+
+def should_make_closed(curve_length, bbox_length, endpoints_dist):
+    if curve_length < bbox_length*0.85:
+        # if the distance between the endpoints is <30% of the length of the curve, close it
+        return endpoints_dist / curve_length < 0.3
+    else: # "long and curvy" - only make closed when the endpoints are close relatively to the bbox length
+        return endpoints_dist / bbox_length < 0.1
+
+def bspline_interp(points, suggest_options, existing_lines, zoom):
+    fit_curve_timer.start()
+    x = np.array([1.*p[0] for p in points])
+    y = np.array([1.*p[1] for p in points])
+
+    okay = np.where(np.abs(np.diff(x)) + np.abs(np.diff(y)) > 0)
+    x = np.r_[x[okay], x[-1]]#, x[0]]
+    y = np.r_[y[okay], y[-1]]#, y[0]]
+
+    def dist(i1, i2):
+        return math.sqrt((x[i1]-x[i2])**2 + (y[i1]-y[i2])**2)
+    curve_length = sum([dist(i, i+1) for i in range(len(x)-1)])
+
+    results = []
+
+    def add_result(tck, ufirst, ulast):
+        step=(ulast-ufirst)/curve_length
+
+        new_points = splev(np.arange(ufirst, ulast+step, step), tck)
+        results.append(new_points)
+
+    smoothing = len(x) / (2*zoom)
+    tck, u = splprep([x, y], s=smoothing)
+    add_result(tck, u[0], u[-1])
+
+    if not suggest_options:
+        fit_curve_timer.stop()
+        return results
+
+    # check for intersections, throw out short segments between the endpoints and first/last intersection
+    ix = np.round(results[0][0]).astype(int)
+    iy = np.round(results[0][1]).astype(int)
+    within_bounds = (ix >= 0) & (iy >= 0) & (ix < existing_lines.shape[0]) & (iy < existing_lines.shape[1])
+    line_alphas = np.zeros(len(ix), int)
+    line_alphas[within_bounds] = existing_lines[ix[within_bounds], iy[within_bounds]]
+    intersections = np.where(line_alphas == 255)[0]
+
+    def find_intersection_point(start, step):
+        indexes = [intersections[start]]
+        pos = start+step
+        while pos < len(intersections) and pos >= 0 and abs(intersections[pos]-indexes[-1]) == 1:
+            indexes.append(intersections[pos])
+            pos += step
+        return indexes[-1] #sum(indexes)/len(indexes)
+
+    if len(intersections) > 0:
+        len_first = intersections[0]
+        len_last = len(ix) - intersections[-1]
+        # look for clear alpha pixels along the path before the first and the last intersection - if we find some, we have >= 2 intersections
+        two_or_more_intersections = len(np.where(line_alphas[intersections[0]:intersections[-1]] == 0)[0]) > 1
+
+        first_short = two_or_more_intersections or len_first < len_last
+        last_short = two_or_more_intersections or len_last <= len_first
+
+        step=(u[-1]-u[0])/curve_length
+
+        first_intersection = find_intersection_point(0, 1)
+        last_intersection = find_intersection_point(len(intersections)-1, -1)
+        uvals = np.arange(first_intersection if first_short else 0, (last_intersection if last_short else len(ix))+1, 1)*step
+        new_points = splev(uvals, tck)
+        return [new_points] + results
+
+    # check if we'd like to attempt to close the line
+    bbox_length = (np.max(x)-np.min(x))*2 + (np.max(y)-np.min(y))*2
+    endpoints_dist = dist(0, -1)
+
+    make_closed = len(points)>2 and should_make_closed(curve_length, bbox_length, endpoints_dist)
+
+    if make_closed:
+        tck, u = splprep([x, y], s=smoothing, per=True)
+        add_result(tck, u[0], u[-1])
+        return reversed(results)
+
+    fit_curve_timer.stop()
+    return results
+
+def plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points, zoom):
+    results = []
+    def add_results(px, py):
+        minx = math.floor(max(0, np.min(px) - pwidth - 1))
+        miny = math.floor(max(0, np.min(py) - pwidth - 1))
+        maxx = math.ceil(min(image_height-1, np.max(px) + pwidth + 1))
+        maxy = math.ceil(min(image_width-1, np.max(py) + pwidth + 1))
+
+        line, = ax.plot(py,px, linestyle='solid', color='k', linewidth=width, scalex=False, scaley=False, solid_capstyle='round', aa=True)
+
+        canvas = FigureCanvas(fig)
+        fig.draw_artist(line)
+        canvas.flush_events()
+
+        pixel_data = canvas.buffer_rgba()
+
+        # TODO: it would be nice to slice before converting to numpy array rather than first
+        # convert and then slice which costs ~3 ms... but doing that gives a "memoryview: invalid slice key."
+        # perhaps canvas.copy_from_bbox() instead of buffer_rgba() could be helpful?..
+        results.append(((np.array(pixel_data)[minx:maxx+1,miny:maxy+1,3]), (minx, miny, maxx, maxy)))
+
+    if len(set(points)) == 1:
+        x,y = points[0]
+        eps = 0.001
+        points = [(x+eps, y+eps)] + points
+    try:
+        for path in bspline_interp(points, suggest_options, existing_lines, zoom):
+            px, py = filter_points(path[0], path[1])
+            add_results(px, py)
+    except:
+        px = np.array([x for x,y in points])
+        py = np.array([y for x,y in points])
+        add_results(px, py)
+
+    return results
+
+def drawLines(image_height, image_width, points, width, suggest_options, existing_lines, zoom, filter_points=lambda px, py: (px, py)):
+    global fig_dict
+    global ax_dict
+    global fig
+    global ax
+    res = (image_width, image_height)
+    if res not in fig_dict:
+        fig, ax = plt.subplots()
+        ax.axis('off')
+        fig.set_size_inches(image_width/fig.get_dpi(), image_height/fig.get_dpi())
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        fig_dict[res] = fig
+        ax_dict[res] = ax
+    
+        def plot_reset():
+            plt.cla()
+            plt.xlim(0, image_width)
+            plt.ylim(0, image_height)
+            ax.invert_yaxis()
+            ax.spines[['left', 'right', 'bottom', 'top']].set_visible(False)
+            ax.tick_params(left=False, right=False, bottom=False, top=False)
+
+        plot_reset()
+    else:
+        fig = fig_dict[res]
+        ax = ax_dict[res]
+
+    pwidth = width
+    width *= 72 / fig.get_dpi()
+
+    return plotLines(points, ax, width, pwidth, suggest_options, existing_lines, image_width, image_height, filter_points, zoom)
+
+def drawCircle( screen, x, y, color, width):
+    pygame.draw.circle( screen, color, ( x, y ), width/2 )
+
+def drawLine(screen, pos1, pos2, color, width):
+    pygame.draw.line(screen, color, pos1, pos2, width)
+
+def make_surface(width, height):
+    return pg.Surface((width, height), screen.get_flags(), screen.get_bitsize(), screen.get_masks())
+
 import cv2
-def cv2_resize_surface(src, dst, inv_scale=None):
+def cv2_resize_surface(src, dst):
     iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
     optr, ostride, owidth, oheight, obgr = color_c_params(pg.surfarray.pixels3d(dst))
     assert ibgr == obgr
@@ -1488,24 +1699,10 @@ def cv2_resize_surface(src, dst, inv_scale=None):
         method = cv2.INTER_CUBIC
     else:
         method = cv2.INTER_LINEAR
+    cv2.resize(iattached, (owidth,oheight), oattached, interpolation=method)
 
-    if inv_scale is not None:
-        cv2.resize(iattached, None, oattached, fx=inv_scale, fy=inv_scale, interpolation=method)
-    else:
-        cv2.resize(iattached, (owidth,oheight), oattached, interpolation=method)
-
-def scale_image(surface, width=None, height=None, inv_scale=None):
-    assert width or height or inv_scale
-
-    if inv_scale is not None:
-        # from OpenCV (resize.cpp, cv::resize):
-        #    dsize = Size(saturate_cast<int>(ssize.width*inv_scale_x),
-        #                 saturate_cast<int>(ssize.height*inv_scale_y));
-        # from fast_math.hpp:
-        # template<> inline int saturate_cast<int>(double v)           { return cvRound(v); }
-        width = round(surface.get_width() * inv_scale)
-        height = round(surface.get_height() * inv_scale)
-        
+def scale_image(surface, width=None, height=None):
+    assert width or height
     if not height:
         height = int(surface.get_height() * width / surface.get_width())
     if not width:
@@ -1515,7 +1712,7 @@ def scale_image(surface, width=None, height=None, inv_scale=None):
         return scale_image(scale_image(surface, surface.get_width()//2, surface.get_height()//2), width, height)
 
     ret = pg.Surface((width, height), pg.SRCALPHA)
-    cv2_resize_surface(surface, ret, inv_scale)
+    cv2_resize_surface(surface, ret)
     ret.set_alpha(surface.get_alpha())
     #ret = pg.transform.smoothscale(surface, (width, height))
 
@@ -1523,12 +1720,6 @@ def scale_image(surface, width=None, height=None, inv_scale=None):
 
 def minmax(v, minv, maxv):
     return min(maxv,max(minv,v))
-
-def surf2cursor(surface, hotx, hoty):
-  image = QImage(QSize(surface.get_width(), surface.get_height()), QImage.Format_ARGB32)
-  pgsurf2qtimage(surface, image)
-  pixmap = QPixmap.fromImage(image)
-  return QCursor(pixmap, hotX=hotx, hotY=hoty)
 
 def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=192, edit=lambda x: x, hot_spot_offset=(0,0)):
   surface = load_image(file)
@@ -1542,8 +1733,7 @@ def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=19
   surface = edit(surface)
   hotx = minmax(int(hot_spot[0] * surface.get_width()) + hot_spot_offset[0], 0, surface.get_width()-1)
   hoty = minmax(int(hot_spot[1] * surface.get_height()) + hot_spot_offset[1], 0, surface.get_height()-1)
-  #return pg.cursors.Cursor((hotx, hoty), surface), non_transparent_surface
-  return surf2cursor(surface, hotx, hoty), non_transparent_surface
+  return pg.cursors.Cursor((hotx, hoty), surface), non_transparent_surface
 
 def add_circle(image, radius, color=(255,0,0,128), outline_color=(0,0,0,128)):
     new_width = radius + image.get_width()
@@ -1574,7 +1764,7 @@ pan_cursor = load_cursor('pan.png', hot_spot=(0.5, 0.5), size=int(CURSOR_SIZE*2)
 finger_cursor = load_cursor('finger.png', hot_spot=(0.85, 0.17))
 
 # for locked screen
-empty_cursor = surf2cursor(pg.Surface((10,10), pg.SRCALPHA), 0, 0)
+empty_cursor = pg.cursors.Cursor((0,0), pg.Surface((10,10), pg.SRCALPHA))
 
 # set_cursor can fail on some machines so we don't count on it to work.
 # we set it early on to "give a sign of life" while the window is black;
@@ -1587,11 +1777,10 @@ def try_set_cursor(c):
     try:
         global curr_cursor
         global prev_cursor
-        widget.setCursor(c)
+        pg.mouse.set_cursor(c)
         prev_cursor = curr_cursor
         curr_cursor = c
-    except Exception as e:
-        print('Failed to set cursor',e)
+    except:
         pass
 try_set_cursor(pencil_cursor[0])
 
@@ -1840,9 +2029,8 @@ class PenTool(Button):
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
         ptr, ystride, width, height = greyscale_c_params(self.lines_array)
-        smoothDist = 20#40
+        smoothDist = 40
         lineWidth = 2.5 if self.width == WIDTH else self.width*drawing_area.xscale
-        # FIXME use event timestamps
         self.brush = tinylib.brush_init_paint(cx, cy, time.time_ns()*1000000, lineWidth, smoothDist, 1 if self.eraser else 0, ptr, width, height, 4, ystride)
         if self.eraser:
             self.brush_flood_fill_color_based_on_mask()
@@ -1864,9 +2052,6 @@ class PenTool(Button):
         rxmin, rymin, rxmax, rymax = self.rect
         self.bbox = (min(xmin, rxmin), min(ymin, rymin), max(xmax, rxmax), max(ymax, rymax))
 
-        xmin, ymin, xmax, ymax = self.short_term_bbox
-        self.short_term_bbox = (min(xmin, rxmin), min(ymin, rymin), max(xmax, rxmax), max(ymax, rymax))
-
     def on_mouse_up(self, x, y):
         if curr_layer_locked():
             return
@@ -1875,7 +2060,6 @@ class PenTool(Button):
         pg.time.set_timer(PAINTING_TIMER_EVENT, 0, 0)
         pg.time.set_timer(HISTORY_TIMER_EVENT, 0, 0)
 
-        movie.edit_curr_frame()
         tinylib.brush_end_paint(self.brush, self.region)
         self.update_bbox()
         self.brush = 0
@@ -1939,7 +2123,6 @@ class PenTool(Button):
 
         if self.prev_drawn:
             close_enough = False
-            self.short_term_bbox = (1000000, 1000000, -1, -1)
             while not close_enough:
                 xarr = np.array([cx])
                 yarr = np.array([cy])
@@ -1954,11 +2137,38 @@ class PenTool(Button):
                         break
                 else:
                     break
-
-            if self.short_term_bbox[-1] >= 0:
-                layout.drawing_area().draw_region(self.short_term_bbox)
-                widget.redrawScreen()
             
+        #self.lines_array[round(cx),round(cy)] = 255
+        if False and expose_other_layers:
+            roi, (xstart, ystart, iwidth, iheight) = drawing_area.frame_and_subsurface_roi()
+            # FIXME we get an exception here sometimes [in subsurface() - rectangle outside surface area]
+            draw_into = drawing_area.subsurface if not expose_other_layers else self.alpha_surface.subsurface((xstart, ystart, iwidth, iheight))
+            ox,oy = (0,0) if not expose_other_layers else (xstart, ystart)
+
+            alpha = pg.surfarray.pixels_red(draw_into)
+            w, h = self.lines_array.shape
+            def clipw(val): return max(0, min(val, w))
+            def cliph(val): return max(0, min(val, h))
+            px, py = self.prev_drawn if self.prev_drawn else (x, y)
+            left = clipw(min(x-ox-self.width, px-ox-self.width))
+            right = clipw(max(x-ox+self.width, px-ox+self.width))
+            bottom = cliph(min(y-oy-self.width, py-oy-self.width))
+            top = cliph(max(y-oy+self.width, py-oy+self.width))
+            def render_surface(s):
+                if not s:
+                    return
+                salpha = pg.surfarray.pixels_alpha(s)
+                orig_alpha = salpha[left:right+1, bottom:top+1].copy()
+                salpha[left:right+1, bottom:top+1] = np.minimum(orig_alpha, alpha[left:right+1,bottom:top+1])
+                del salpha
+                drawing_area.subsurface.blit(s, (ox+left,oy+bottom), (left,bottom,right-left+1,top-bottom+1))
+                salpha = pg.surfarray.pixels_alpha(s)
+                salpha[left:right+1, bottom:top+1] = orig_alpha
+
+            render_surface(movie.curr_bottom_layers_surface(movie.pos, highlight=True, width=iwidth, height=iheight, roi=roi))
+            render_surface(movie.curr_top_layers_surface(movie.pos, highlight=True, width=iwidth, height=iheight, roi=roi))
+            render_surface(layout.timeline_area().combined_light_table_mask())
+
         self.prev_drawn = (x,y) 
         pen_move_timer.stop()
 
@@ -1972,7 +2182,7 @@ class ZoomTool(Button):
         h = screen.get_height()
         self.max_up_dist = min(.85 * abs_y, h * .3 * (MAX_ZOOM - da.zoom)/(MAX_ZOOM - MIN_ZOOM))
         self.max_down_dist = min(.85 * (h - abs_y), h * .3 * (da.zoom - MIN_ZOOM)/(MAX_ZOOM - MIN_ZOOM))
-        self.frame_start = da.xy2frame(x,y)
+        self.frame_start = da.xy2frame(x,y,minoft=-1000000)
         self.orig_zoom = da.zoom
         da.set_zoom_center(self.start)
     def on_mouse_up(self, x, y):
@@ -2146,8 +2356,9 @@ class PaintBucketTool(Button):
         if bbox:
             self.bboxes.append(bbox)
 
-            layout.drawing_area().draw_region(bbox)
-            widget.redrawScreen()
+        # not redrawing - using the "is_pressed" workaround PenTool uses, too until we learn to redraw only a part of the region
+        # TODO: only redraw within the bbox?
+        #layout.drawing_area().draw()
         
         paint_bucket_timer.stop()
 
@@ -2261,13 +2472,10 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
         
     sk_timer.start()
     skx, sky = fixed_size_image_region(x, y, SK_WIDTH, SK_HEIGHT)
-    skeleton = tl_skeletonize(np.ascontiguousarray(flood_mask[skx,sky])).astype(np.uint8)
+    skeleton = skeletonize(np.ascontiguousarray(flood_mask[skx,sky])).astype(np.uint8)
     sk_timer.stop()
 
-    def dilation(img):
-        kernel = np.ones((3, 3), np.uint8)
-        return cv2.dilate(img, kernel, iterations=1)
-    fmb = dilation(dilation(skeleton))
+    fmb = binary_dilation(binary_dilation(skeleton))
 
     # Compute distance from each point to the specified center
     dist_timer.start()
@@ -2285,7 +2493,7 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
         d = np.ones(lines.shape, int)
         maxdist = 10
 
-    outer_d = -dilation(-d)
+    outer_d = -grey_dilation(-d, 3)
 
     maxdist = min(700, maxdist)
 
@@ -2305,68 +2513,6 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
 
     rest_timer.stop()
     return fading_mask, (skeleton, skx, sky)
-
-def splprep(points, weights=None, smoothing=None):
-    '''NOTE: scipy.interpolation.splprep expects points (which it calls x) to be transposed relatively to this function, as in
-    idim, m = points.shape'''
-    m, idim = points.shape
-    if weights is None:
-        weights = np.ones(m)
-    if smoothing is None: 
-        smoothing = m - math.sqrt(2*m)
-    k = 3
-    assert m>k, 'not enough points'
-
-    t = np.zeros(m+k+1)
-    c = np.zeros((m+k+1)*idim)
-    num_knots = np.zeros(1, np.int32)
-    ier = tinylib.fitpack_parcur(arr_base_ptr(points), arr_base_ptr(weights), idim, m, k, smoothing,
-                                 arr_base_ptr(t), arr_base_ptr(num_knots), arr_base_ptr(c))
-
-    n = num_knots[0]
-    # c: on succesful exit, this array will contain the coefficients
-    #    in the b-spline representation of the spline curve s(u),i.e.
-    #       the b-spline coefficients of the spline sj(u) will be given
-    #           in c(n*(j-1)+i),i=1,2,...,n-k-1 for j=1,2,...,idim.
-    return (t[:n], [c[n*j:n*j+n-k-1] for j in range(idim)], k)
-
-def splev(x, tck):
-    t, c, k = tck
-    try:
-        c[0][0]
-        parametric = True
-    except Exception:
-        parametric = False
-    if parametric:
-        return list(map(lambda c, x=x, t=t, k=k: splev(x, [t, c, k]), c))
-
-    x = np.asarray(x)
-    xshape = x.shape
-    x = x.ravel()
-    y = np.zeros(x.shape, float)
-    ier = tinylib.fitpack_splev(arr_base_ptr(t), t.shape[0], arr_base_ptr(c), k, arr_base_ptr(x), arr_base_ptr(y), y.shape[0])
-    assert ier == 0
-    return y.reshape(xshape)
-
-def bspline_interp(points):
-    x = np.array([1.*p[0] for p in points])
-    y = np.array([1.*p[1] for p in points])
-
-    def dist(i1, i2):
-        return math.sqrt((x[i1]-x[i2])**2 + (y[i1]-y[i2])**2)
-    curve_length = sum([dist(i, i+1) for i in range(len(x)-1)])
-
-    smoothing = len(x) / 15
-    # scipy.interpolate.splrep works like this:
-    #tck, u = splprep([x, y], s=smoothing)
-    #ufirst, ulast = u[0], u[-1] # these evaluate to 0, 1
-    # our splprep works like this:
-    tck = splprep(np.column_stack([x,y]), smoothing=smoothing)
-    ufirst, ulast = 0, 1
-
-    step=(ulast-ufirst)/curve_length
-
-    return splev(np.arange(ufirst, ulast+step, step), tck)
 
 HOLE_REGION_W = 40
 HOLE_REGION_H = 40
@@ -2418,20 +2564,27 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     if found < 3:
         return False
-
-    n1 = n1[0]
-    n2 = n2[0]
+    n1 = n1[0] #* 0
+    n2 = n2[0] #* 0
     xs1 = xs1[:n1]
     ys1 = ys1[:n1]
     xs2 = xs2[:n2]
     ys2 = ys2[:n2]
+    #skeleton[xs,ys] = 5
+    #skeleton[xs1,ys1] = 6
+    #skeleton[xs2,ys2] = 7
+    #print('LP xs ys',lines[xs+skx.start,ys+sky.start])
+    #imageio.imwrite('lines-skel.png', skeleton.astype(np.uint8)*(256//8))
+    #imageio.imwrite('lines-bin.png', lines_patch.astype(np.uint8)*127)
 
     endp1 = xs[0]+skx.start, ys[0]+sky.start
     endp2 = xs[2]+skx.start, ys[2]+sky.start
 
     if n1 == 0 and n2 == 0: #  just 3 points - create 5 points to fit a curve
-        xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]
-        ys = [ys[0], ys[0]*0.9 + ys[1]*0.1, ys[1], ys[1]*0.1 + ys[2]*0.9, ys[2]]
+        # through the point on the skeleton and the 2 endpoints
+        pass
+        #xs = [xs[0], xs[0]*0.9 + xs[1]*0.1, xs[1], xs[1]*0.1 + xs[2]*0.9, xs[2]]
+        #ys = [ys[0], ys[0]*0.9 + ys[1]*0.1, ys[1], ys[1]*0.1 + ys[2]*0.9, ys[2]]
     else: # we have enough points to not depend on the exact point
         # on the skeleton
         def pad(c, n): # a crude way to add weight to a "lone endpoint",
@@ -2442,10 +2595,12 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
         ys = pad(ys[0],n1) + pad(ys[2],n2)
 
 
-    oft=0 # at one point it seemed that skeletonization moves the points by .5... currently oft is 0 since it doesn't seem so
-    w = np.array([i/(len(xs1)) for i in range(len(xs1))] + [1]*len(xs) + [i/len(xs2) for i in range(len(xs2),0,-1)])
-    xs = np.concatenate((xs1[::-1]+oft, xs, xs2+oft))
-    ys = np.concatenate((ys1[::-1]+oft, ys, ys2+oft))
+    # +.5 because line skeletonization done inside tinylib.patch_hole
+    # seems to move "the line center of mass" by about half a pixel
+    #print(xs1[::-1]+.5, xs, xs2+.5)
+    #print(ys1[::-1]+.5, ys, ys2+.5)
+    xs = np.concatenate((xs1[::-1]+.5, xs, xs2+.5))
+    ys = np.concatenate((ys1[::-1]+.5, ys, ys2+.5))
     lines_patch[:] = 0
     skeleton[:] = 0
     points=[(x+skx.start,y+sky.start) for x,y in zip(xs,ys)]
@@ -2462,33 +2617,30 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
                 end = i
                 break
         return px[start:end], py[start:end]
-
-
-    path = bspline_interp(points)
-    px, py = filter_points(path[0], path[1])
-            
-    margin = 5
-    minx = max(0, math.floor(min(px)) - margin)
-    miny = max(0, math.floor(min(py)) - margin)
-    maxx = min(IWIDTH-1, math.ceil(max(px)) + margin)
-    maxy = min(IHEIGHT-1, math.ceil(max(py)) + margin)
-    history_item = HistoryItem('lines', bbox=(minx, miny, maxx, maxy))
-    history.append_item(history_item)
+    # TODO: use the brush instead
+    history_item = HistoryItem('lines') # TODO: pass bbox
 
     ptr, ystride, width, height = greyscale_c_params(lines)
-    brush = tinylib.brush_init_paint(px[0], py[0], 0, 2.5, 0, 0, ptr, width, height, 4, ystride)
+    brush = tinylib.brush_init_paint(points[0][0], points[1][1], 0, 2.5, 0, 0, ptr, width, height, 4, ystride)
     xarr = np.zeros(1)
     yarr = np.zeros(1)
     t = 0
-    rect = np.zeros(4, dtype=np.int32)
-    region = arr_base_ptr(rect)
-    for x,y in zip(px[1:],py[1:]):
+    for x,y in points:
         xarr[0] = x
         yarr[0] = y
-        tinylib.brush_paint(brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, region)
+        tinylib.brush_paint(brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1)
         t += 7
 
-    tinylib.brush_end_paint(brush, region)
+    tinylib.brush_end_paint(brush)
+    
+    history.append_item(history_item)
+
+    #new_lines,bbox = drawLines(IWIDTH, IHEIGHT, points, WIDTH, False, lines, zoom=1, filter_points=filter_points)[0]
+
+    #history_item = HistoryItem('lines', bbox)
+    #(minx, miny, maxx, maxy) = bbox
+    #lines[minx:maxx+1, miny:maxy+1] = np.maximum(new_lines, lines[minx:maxx+1, miny:maxy+1])
+    #history.append_item(history_item)
 
     return True
 
@@ -2501,12 +2653,12 @@ class FlashlightTool(Button):
         x, y = layout.drawing_area().xy2frame(x,y)
         x, y = round(x), round(y)
 
-        try_to_patch = QGuiApplication.queryKeyboardModifiers() & Qt.ControlModifier
+        try_to_patch = pygame.key.get_mods() & pygame.KMOD_CTRL
         frame = movie.edit_curr_frame() if try_to_patch else movie.curr_frame()
 
         color = pygame.surfarray.pixels3d(frame.surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(frame.surf_by_id('lines'))
-        if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1] or lines[x,y] == 255:
+        if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1]:
             return
         flashlight_timer.start()
 
@@ -2516,7 +2668,6 @@ class FlashlightTool(Button):
                 skeleton, skx, sky = last_skeleton
                 if x >= skx.start and x < skx.stop and y >= sky.start and y < sky.stop:
                     hole_timer.start()
-                    found = False
                     if patch_hole(lines, x, y, skeleton, skx, sky):
                         # find a point to compute a new skeleton around. Sometimes x,y itself
                         # is that point and sometimes a neighbor, depending on how the hole was patched.
@@ -2533,14 +2684,7 @@ class FlashlightTool(Button):
                                 continue
                             if lines[xi,yi] != 255:
                                 break
-                                found = True
                         x,y = xi,yi
-
-                        if not found:
-                            layout.drawing_area().set_fading_mask(None)
-                            hole_timer.stop()
-                            return
-
                     hole_timer.stop()
 
         fading_mask_and_skeleton = skeletonize_color_based_on_lines(color, lines, x, y)
@@ -2657,11 +2801,11 @@ class Layout:
             # when zooming/panning, we redraw at the playback rate [instead of per mouse event,
             # which can create a "backlog" where we keep redrawing after the mouse stops moving because we
             # lag after mouse motion.] TODO: do we want to use a similar approach elsewhere?..
-            elif self.is_pressed and self.zoom_pan_tool() and self.focus_elem is self.drawing_area():
+            elif self.is_pressed: # FIXME and self.zoom_pan_tool() and self.focus_elem is self.drawing_area():
                 cache.lock() # the chance to need to redraw with the same intermediate zoom/pan is low
                 self.drawing_area().draw()
                 cache.unlock()
-                #pg.display.flip()
+                pg.display.flip()
 
         if event.type == FADING_TIMER_EVENT:
             self.drawing_area().update_fading_mask()
@@ -2737,16 +2881,6 @@ class Layout:
         self.is_playing = not self.is_playing
         self.playing_index = 0
             
-# FIXME: handle more cases (eg 9:16 and not just 16:9)
-def scale_and_fully_preserve_aspect_ratio(w, h, width, height):
-    if width/height > w/h:
-        scaled_width = (round(w*height/h) // 16) * 16
-        scaled_height = h*scaled_width/w
-    else:
-        scaled_height = (round(h*width/w) // 9) * 9
-        scaled_width = w*scaled_height/h
-    return round(scaled_width), round(scaled_height)
-
 class DrawingArea(LayoutElemBase):
     def init(self):
         self.fading_mask = None
@@ -2768,8 +2902,7 @@ class DrawingArea(LayoutElemBase):
         if self.iwidth and self.iheight:
             return
         left, bottom, width, height = self.rect
-        self.iwidth, self.iheight = scale_and_fully_preserve_aspect_ratio(IWIDTH, IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
-        assert (self.iwidth / IWIDTH) - (self.iheight / IHEIGHT) < 1e-9
+        self.iwidth, self.iheight = scale_and_preserve_aspect_ratio(IWIDTH, IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
         self.xmargin = round((width - self.iwidth)/2)
         self.ymargin = round((height - self.iheight)/2)
         self.set_zoom(self.zoom)
@@ -2793,20 +2926,6 @@ class DrawingArea(LayoutElemBase):
     def set_xyoffset(self, xoffset, yoffset):
         self._internal_layout()
         prevxo, prevyo = self.xoffset, self.yoffset
-
-        # we want xyoffset to be an integer (in the scaled image coordinates; we don't care
-        # if it translates to an integer in the frame coordinates.) that's because we scale step-aligned
-        # regions of the frame, s.t. their integer coordinates map to integer coordinates in the scaled image.
-        # then we display a sub-region of this scaled region, which is not step-aligned; but it has to have
-        # integer coordinates so we can just take a sub-region without any warping.
-
-        self.xoffset = int(round(min(max(xoffset, 0), self.iwidth*(self.zoom - 1))))
-        self.yoffset = int(round(min(max(yoffset, 0), self.iheight*(self.zoom - 1))))
-
-        zx, zy = self.zoom_center
-        self.zoom_center = zx - (self.xoffset - prevxo), zy - (self.yoffset - prevyo)
-        return
-
         self.xoffset = min(max(xoffset, 0), self.iwidth*(self.zoom - 1))
         self.yoffset = min(max(yoffset, 0), self.iheight*(self.zoom - 1))
         # make sure xoffset,yoffset correspond to an integer coordinate in the non-zoomed image,
@@ -2819,52 +2938,21 @@ class DrawingArea(LayoutElemBase):
         self.xoffset = (math.floor(x) * self.zoom + xm) * self.iwidth / IWIDTH
         self.yoffset = (math.floor(y) * self.zoom + ym) * self.iheight / IHEIGHT
 
-        #step = self.zoom_int_step
-        #def align(n): return (int(round(n)) // step) * step
-        #self.xoffset = align(xoffset)
-        #self.yoffset = align(yoffset)
-        #self.xoffset = min(max(self.xoffset, 0), self.iwidth*(self.zoom - 1))
-        #self.yoffset = min(max(self.yoffset, 0), self.iheight*(self.zoom - 1))
-        print('xoft',self.xoffset, self.xoffset * self.xscale, 'yoft',self.yoffset, self.yoffset * self.yscale)
-
         zx, zy = self.zoom_center
         self.zoom_center = zx - (self.xoffset - prevxo), zy - (self.yoffset - prevyo)
-    def set_zoom(self, zoom, correct=True):
+    def set_zoom(self, zoom):
         self.zoom = zoom
         self.xscale = IWIDTH/(self.iwidth * self.zoom)
         self.yscale = IHEIGHT/(self.iheight * self.zoom)
-        if not correct:
-            return
-
-        # slightly change the zoom such that not only (0,0) in the original image corresponds to
-        # the integer coordinate (0,0) in the scaled output image, but there is some integer step such that
-        # (step*M, step*N) for integers M,N in the original image correspond to integer coordinates in the scaled output image.
-        # this way we'll be able to scale a step-aligned ROI in the original image and not only the whole image, which
-        # is important when quickly redrawing upon pen movement, for example.
-        min_step = round(8 / self.xscale)
-        try_steps = list(range(min_step,min_step+64))
-        orig_image_coordinates_corresponding_to_steps = [i*self.xscale for i in try_steps]
-        distances_from_integer_coordinates = [abs(x - round(x)) for x in orig_image_coordinates_corresponding_to_steps]
-        min_dist_from_int_coord = min(distances_from_integer_coordinates)
-        pos_of_min_dist = distances_from_integer_coordinates.index(min_dist_from_int_coord)
-        best_int_step = pos_of_min_dist + try_steps[0]
-
-        #print('zoom',zoom,'best',best_int_step,'dist',min_dist_from_int_coord,'orig_at_step',orig_image_coordinates_corresponding_to_steps[pos_of_min_dist])
-        self.zoom_int_step = best_int_step
-        self.zoom_int_step_orig = int(round(best_int_step * self.xscale))
-
-        corrected_xscale = round(orig_image_coordinates_corresponding_to_steps[pos_of_min_dist]) / best_int_step
-        corrected_zoom = IWIDTH / (self.iwidth * corrected_xscale)
-        #print('corrected',zoom,corrected_zoom)
-        self.set_zoom(corrected_zoom, correct=False)
-
     def set_zoom_center(self, center): self.zoom_center = center
     def set_zoom_to_film_res(self, center):
         cx, cy = center
         framex, framey = self.xy2frame(cx, cy)
 
         # in this class, "zoom=1" is zooming to iwidth,iheight; this is zooming to IWIDTH,IHEIGHT - what would normally be called "1x zoom"
-        self.set_zoom(IWIDTH / self.iwidth)
+        self.xscale = 1
+        self.yscale = 1
+        self.zoom = IWIDTH / self.iwidth
 
         # set xyoffset s.t. the center stays at the same screen location (=we zoom around the center)
         xoffset = framex + self.xmargin - cx
@@ -2872,65 +2960,37 @@ class DrawingArea(LayoutElemBase):
         self.set_xyoffset(xoffset, yoffset)
 
         self.set_zoom_center(center)
-
-    def rois(self):
-        '''step_aligned_frame_roi, scaled_roi_subset, drawing_area_starting_point = da.rois()
-
-        step_aligned_frame_roi is the region in the frame coordinates corresponding to what is shown
-        in the drawing area (if we ignore margins, that would be xoffset, yoffset, iwidth, iheight),
-        aligned to zoom_int_step_orig. the purpose of this alignment is being able to take step-aligned
-        sub-regions of this region (in pen and paint bucket tools), scale them, and get the same pixels
-        as we would if we took a sub-region of the scaled image [both correspond to integer coordinates.]
-        for this to work, we need zoom to be exactly the value of self.zoom, not just a close approximation,
-        and this is only guaranteed if the width & height of the frame region and the scaled region are
-        integer multiples of zoom_int_step_orig and zoom_int_step, respectively.
-
-        scaled_roi_subset is the subsurface of the scaled step_aligned_frame_roi that you should take to
-        get the pixels to put into the drawing area (meaning, it strips the extra pixels added due to alignment
-        and gives you just the pixels in xoffset, yoffset, iwidth, iheight - again, ignoring margins.)
-
-        drawing_area_starting_point is xmargin, ymargin - again, ignoring our drawing at the margins at high zoom;
-        this is where scaled_roi_subset should be drawn into da.subsurface.
-        '''
-        frame_roi = (self.xoffset * self.xscale, self.yoffset * self.yscale, self.iwidth * self.xscale, self.iheight * self.yscale)
-
-        step = self.zoom_int_step_orig
-        def align_down(n): return int((math.floor(n) // step) * step)
-        def align_up(n): return int(((math.ceil(n) + step - 1) // step) * step)
-
-        # we fill up the entire drawing area of 2*xmargin + iwidth, 2*ymargin + iheight pixels,
-        # unless we want to keep the margins or a part of them empty of pixels - that's when the
-        # edges of the image are visible in the shown ROI (which happens when the zoom is small
-        # enough or when x/yoffset have the values causing this to be the case)
-
-        frame_roi_left = align_down(max(0, self.xoffset - self.xmargin) * self.xscale)
-        frame_roi_bottom = align_down(max(0, self.yoffset - self.ymargin) * self.yscale)
-        frame_roi_right = min(IWIDTH, align_up((self.xoffset + self.iwidth + self.xmargin*2) * self.xscale))
-        frame_roi_top = min(IHEIGHT, align_up((self.yoffset + self.iheight + self.ymargin*2) * self.yscale))
-
-        def rnd_chk(x):
-            r = round(x)
-            assert abs(r - x) < 1e-6, f'{r} is not close enough to {x} - should have gotten a value very close to an integer'
-            return int(r)
-
-        step_aligned_frame_roi = (frame_roi_left, frame_roi_bottom, frame_roi_right - frame_roi_left, frame_roi_top - frame_roi_bottom)
-
-        # compute target width & height exactly as OpenCV resize would
-        scale_target_width = round(step_aligned_frame_roi[2] * (1/self.xscale))
-        scale_target_height = round(step_aligned_frame_roi[3] * (1/self.xscale))
-        
-        scaled_left = max(0, self.xoffset - self.xmargin) - rnd_chk(frame_roi_left/self.xscale)
-        scaled_right = max(0, self.yoffset - self.ymargin) - rnd_chk(frame_roi_bottom/self.yscale)
-        scaled_width = min(self.iwidth + self.xmargin*2, scale_target_width - scaled_left)
-        scaled_height = min(self.iheight + self.ymargin*2, scale_target_height - scaled_right)
-        scaled_roi_subset = scaled_left, scaled_right, scaled_width, scaled_height 
-        
-        drawing_area_starting_point = max(0, self.xmargin - self.xoffset), max(0, self.ymargin - self.yoffset)
-
-        return step_aligned_frame_roi, scaled_roi_subset, drawing_area_starting_point
-        
-    def xy2frame(self, x, y):
-        return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
+    def frame_and_subsurface_roi(self):
+        # ignoring margins, the roi in the drawing area shows the frame scaled by zoom and then cut
+        # to the subsurface xoffset, yoffset, iwidth, iheight
+        def trim_roi(roi, round_xy, check_round):
+            left,bottom,width,height = roi
+            left = max(0, left)
+            bottom = max(0, bottom)
+            def round_and_check(c):
+                if not round_xy:
+                    return c
+                rc = round(c)
+                if check_round:
+                    assert abs(rc - c) < 0.0001, f'expecting a coordinate value very close to an integer, got {c}'
+                return rc
+            left = round_and_check(left)
+            bottom = round_and_check(bottom)
+            width = min(width, IWIDTH-left)
+            height = min(height, IHEIGHT-bottom)
+            return left,bottom,width,height
+        no_margins_frame_roi = trim_roi([c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth, self.yoffset*IHEIGHT/self.iheight, IWIDTH, IHEIGHT)], round_xy=False, check_round=False)
+        xm = self.xmargin * IWIDTH / self.iwidth
+        ym = self.ymargin * IHEIGHT / self.iheight
+        frame_roi = trim_roi([c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth - xm, self.yoffset*IHEIGHT/self.iheight - ym, IWIDTH+xm*2, IHEIGHT+ym*2)], round_xy=True, check_round=True)
+        xstart = self.xmargin-(no_margins_frame_roi[0] - frame_roi[0])/self.xscale
+        ystart = self.ymargin-(no_margins_frame_roi[1] - frame_roi[1])/self.yscale
+        sub_roi = trim_roi((xstart, ystart, frame_roi[2]/self.xscale, frame_roi[3]/self.yscale), round_xy=True, check_round=False)
+        return frame_roi, sub_roi
+    def xy2frame(self, x, y, minoft=0):
+        # we need minoft because we get small negative xoffset/yoffset upon zooming and panning to the rightmost/bottommost extent,
+        # and this throws off everything except the zoom tool which seems to need it?!.. TODO: understand and solve this properly
+        return (x - self.xmargin + max(minoft,self.xoffset))*self.xscale, (y - self.ymargin + max(minoft,self.yoffset))*self.yscale
     def frame2xy(self, framex, framey):
         return framex/self.xscale + self.xmargin - self.xoffset, framey/self.yscale + self.ymargin - self.yoffset
     def roi(self, surface):
@@ -2944,8 +3004,8 @@ class DrawingArea(LayoutElemBase):
                 id2version, comp = key
                 return id2version, ('scaled-to-drawing-area', comp, self.zoom, self.xoffset, self.yoffset)
             def compute_value(_):
-                step_aligned_frame_roi, scaled_roi_subset, _ = self.rois()
-                return scale_image(surface.subsurface(step_aligned_frame_roi), inv_scale=1/self.xscale).subsurface(scaled_roi_subset)
+                frame_roi, (_, _, iwidth, iheight) = self.frame_and_subsurface_roi()
+                return scale_image(surface.subsurface(frame_roi), iwidth, iheight)
         if get_key:
             return ScaledSurface().compute_key()
         if surface is None:
@@ -2963,9 +3023,9 @@ class DrawingArea(LayoutElemBase):
         m.set_alpha(self.fading_mask.get_alpha())
         return m
     def get_zoom_pan_params(self):
-        return self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale, self.zoom_int_step, self.zoom_int_step_orig
+        return self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale
     def restore_zoom_pan_params(self, params):
-        self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale, self.zoom_int_step, self.zoom_int_step_orig = params
+        self.zoom, self.xoffset, self.yoffset, self.zoom_center, self.xscale, self.yscale = params
     def reset_zoom_pan_params(self):
         self.set_xyoffset(0, 0)
         self.set_zoom(1)
@@ -2992,31 +3052,31 @@ class DrawingArea(LayoutElemBase):
         highlight = not layout.is_playing and not movie.curr_layer().locked
         surfaces = []
 
-        step_aligned_frame_roi, scaled_roi_subset, starting_point = self.rois()
-        iscale = 1/self.xscale
-
+        roi, sub_roi = self.frame_and_subsurface_roi() 
+        starting_point = (sub_roi[0], sub_roi[1])
+        iwidth, iheight = sub_roi[2], sub_roi[3]
         with draw_bottom_timer:
-            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
+            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, width=iwidth, height=iheight, roi=roi))
         if movie.layers[movie.layer_pos].visible:
             with draw_curr_timer:
-                surfaces.append(movie.get_thumbnail(pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
+                scaled_layer = movie.get_thumbnail(pos, iwidth, iheight, transparent_single_layer=movie.layer_pos, roi=roi)
+            surfaces.append(scaled_layer)
         with draw_top_timer:
-            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
+            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, width=iwidth, height=iheight, roi=roi))
 
-        with draw_light_timer:
-            mask = layout.timeline_area().combined_light_table_mask()
+        if not layout.is_playing:
+            with draw_light_timer:
+                mask = layout.timeline_area().combined_light_table_mask()
             if mask:
                 surfaces.append(mask)
-
-        if self.fading_mask:
-            with draw_fading_timer:
-                surfaces.append(self.scaled_fading_mask())
+            if self.fading_mask:
+                with draw_fading_timer:
+                    surfaces.append(self.scaled_fading_mask())
 
         with draw_blits_timer:
             self.subsurface.blits([(surface, starting_point) for surface in surfaces])
 
-        eps = 0.019
-        if self.zoom > 1 + eps:
+        if self.zoom > 1:
             self.draw_zoom_surface()
         else:
             margin_color = UNDRAWABLE if layout.is_playing else MARGIN
@@ -3027,84 +3087,7 @@ class DrawingArea(LayoutElemBase):
 
         drawing_area_draw_timer.stop()
 
-    def draw_region(self, frame_region):
-        xmin, ymin, xmax, ymax = frame_region
-        xmax += 1
-        ymax += 1
-
-        # trim region to the currently displayed area [to avoid scaling stuff needlessly]
-        (zxmin, zymin, zw, zh), _, _ = self.rois()
-        xmin, ymin, xmax, ymax = max(xmin, zxmin), max(ymin, zymin), min(xmax, zxmin+zw), min(ymax, zymin+zh)
-
-        # align the region s.t. it corresponds to integer coordinates in the zoomed image
-        step = self.zoom_int_step_orig
-
-        #print('steps', self.zoom_int_step_orig, self.zoom_int_step)
-        def align_down(n): return (n // step) * step
-        def align_up(n): return ((n + step - 1) // step) * step
-        xmin = max(align_down(xmin) - step, 0)
-        xmax = min(align_up(xmax) + step, IWIDTH)
-        ymin = max(align_down(ymin) - step, 0)
-        ymax = min(align_up(ymax) + step, IHEIGHT)
-
-        x,y = self.frame2xy(xmin, ymin)
-        #starting_point = x,y
-        #print('starting point',starting_point, 'xyoft', self.xoffset, self.yoffset, 'xyscale', self.xscale, self.yscale)
-        sx, sy = round(x),round(y)
-
-        # don't draw the entire scaled area since we have artifacts at the boundaries
-        xshrink = 0
-        yshrink = 0
-        xoft = 0
-        yoft = 0
-        step = self.zoom_int_step
-        if xmin > 0:
-            xshrink += step
-            sx += step
-            xoft = step
-        if ymin > 0:
-            yshrink += step
-            sy += step
-            yoft = step
-        if xmax < IWIDTH:
-            xshrink += step
-        if ymax < IHEIGHT:
-            yshrink += step
-
-        full_step_aligned_frame_roi, full_scaled_roi_subset, full_starting_point = self.rois()
-        iscale = 1/self.xscale
-
-        # take the full-region cached surface and take the needed integer sub-region (faster than computing the sub-region by passing roi=src_roi)
-        bottom = movie.curr_bottom_layers_surface(movie.pos, highlight=True, roi=full_step_aligned_frame_roi, inv_scale=iscale).subsurface(full_scaled_roi_subset)
-        top = movie.curr_top_layers_surface(movie.pos, highlight=True, roi=full_step_aligned_frame_roi, inv_scale=iscale).subsurface(full_scaled_roi_subset)
-        mask = layout.timeline_area().combined_light_table_mask()
-
-        src_roi = (xmin, ymin, xmax-xmin, ymax-ymin)
-        scaled_layer = movie.layers[movie.layer_pos].frame(movie.pos).thumbnail(roi=src_roi, inv_scale=iscale)
-
-        def trim(x,y,w,h,s):
-            x = max(x, 0)
-            y = max(y, 0)
-            right = min(x+w, s.get_width())
-            top = min(y+h, s.get_height())
-            return x,y,right-x,top-y
-        roi = (sx, sy, scaled_layer.get_width() - xshrink, scaled_layer.get_height() - yshrink)
-        trimmed_roi = trim(*roi, self.subsurface)
-        sub = self.subsurface.subsurface(trimmed_roi)
-
-        other_layers_roi = trim(trimmed_roi[0] - full_starting_point[0], trimmed_roi[1] - full_starting_point[1], trimmed_roi[2], trimmed_roi[3], bottom)
-        sub.blit(bottom.subsurface(other_layers_roi), (0,0)) 
-        sub.blit(scaled_layer.subsurface(trim(xoft - (roi[0] - trimmed_roi[0]), yoft - (roi[1] - trimmed_roi[1]), roi[2], roi[3], scaled_layer)), (0,0))
-        sub.blit(top.subsurface(other_layers_roi), (0,0)) 
-        if mask:
-            sub.blit(mask.subsurface(other_layers_roi), (0,0))
-        if self.should_draw_zoom_surface():
-            self.draw_zoom_surface(trimmed_roi)
-
-    def should_draw_zoom_surface(self): return self.zoom > 1.015
-    def draw_zoom_surface(self, region=None):
-        if region is not None:
-            self.subsurface.set_clip(region)
+    def draw_zoom_surface(self):
         start_x = int(self.zoom_center[0] - self.zoom_surface.get_width()/2)
         start_y = int(self.zoom_center[1] - self.zoom_surface.get_height()/2)
         self.subsurface.blit(self.zoom_surface, (start_x, start_y))
@@ -3114,7 +3097,6 @@ class DrawingArea(LayoutElemBase):
         pygame.gfxdraw.box(self.subsurface, (0, end_y, self.subsurface.get_width(), self.subsurface.get_height()), MARGIN)
         pygame.gfxdraw.box(self.subsurface, (0, start_y, start_x, end_y-start_y), MARGIN)
         pygame.gfxdraw.box(self.subsurface, (end_x, start_y, self.subsurface.get_width(), end_y-start_y), MARGIN)
-        self.subsurface.set_clip(None)
 
     def clear_fading_mask(self):
         global last_skeleton
@@ -3147,7 +3129,7 @@ class DrawingArea(LayoutElemBase):
         left, bottom, _, _ = self.rect
         return (x-left), (y-bottom)
     def on_mouse_down(self,x,y):
-        alt = QGuiApplication.queryKeyboardModifiers() & Qt.AltModifier
+        alt = pg.key.get_mods() & pg.KMOD_ALT
         if alt:
             set_tool(TOOLS['zoom'])
             layout.restore_tool_on_mouse_up = True
@@ -3422,9 +3404,10 @@ class TimelineArea(LayoutElemBase):
                 held_inside = scaled(held_mask_inside)
                 
                 if held_inside or held_outside:
-                    step_aligned_frame_roi, scaled_roi_subset, _ = da.rois()
-                    scaled_layer = movie.get_thumbnail(movie.pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=1/da.xscale).subsurface(scaled_roi_subset)
+                    roi, sub_roi = da.frame_and_subsurface_roi() 
+                    iwidth, iheight = sub_roi[2], sub_roi[3]
 
+                    scaled_layer = movie.get_thumbnail(movie.pos, iwidth, iheight, transparent_single_layer=movie.layer_pos, roi=roi)
                     alpha = pg.surfarray.pixels_alpha(scaled_layer)
 
                 masks = []
@@ -3742,7 +3725,7 @@ class LayersArea(LayoutElemBase):
         if not self.thumbnail_height:
             return None
         _, bottom, _, _ = self.rect
-        return len(movie.layers) - (round(y-bottom) // self.thumbnail_height) - 1
+        return len(movie.layers) - ((y-bottom) // self.thumbnail_height) - 1
 
     def update_on_light_table(self,x,y):
         for left, bottom, right, top, layer_pos in self.lit_boundaries:
@@ -3832,16 +3815,8 @@ class ProgressBar:
         text_surface = font.render(self.title, True, UNUSED)
         pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
         screen.blit(text_surface, pos)
-        try:
-            print('redrawScreen', self.done, self.total)
-            widget.redrawScreen()
-            print('processing events')
-            QCoreApplication.processEvents()
-            print('done')
-        except:
-            pass # FIXME create widget earlier
-        #pg.display.flip()
-        #pg.event.pump()
+        pg.display.flip()
+        pg.event.pump()
 
 def open_movie_with_progress_bar(clipdir):
     progress_bar = ProgressBar('Loading...')
@@ -3963,7 +3938,7 @@ class MovieListArea(LayoutElemBase):
         if not movie_list.images or x is None:
             return None
         left, _, _, _ = self.rect
-        return int(round(x-left)) // movie_list.images[0].get_width()
+        return (x-left) // movie_list.images[0].get_width()
     def on_mouse_down(self,x,y):
         self.prevx = None
         if layout.new_delete_tool():
@@ -4110,7 +4085,7 @@ class Movie(MovieData):
         frames = [layer.frame(pos) for layer in layers if layer.visible or include_invisible]
         return tuple([frame.cache_id_version() for frame in frames if not frame.empty()])
 
-    def get_thumbnail(self, pos, width=None, height=None, highlight=True, transparent_single_layer=-1, roi=None, inv_scale=None):
+    def get_thumbnail(self, pos, width, height, highlight=True, transparent_single_layer=-1, roi=None):
         if roi is None:
             roi = (0, 0, IWIDTH, IHEIGHT) # the roi is in the original image coordinates, not the thumbnail coordinates
         trans_single = transparent_single_layer >= 0
@@ -4120,22 +4095,22 @@ class Movie(MovieData):
         class CachedThumbnail(CachedItem):
             def compute_key(_):
                 if trans_single:
-                    return id2version([self.layers[layer_pos]]), ('transparent-layer-thumbnail', width, height, roi, inv_scale)
+                    return id2version([self.layers[layer_pos]]), ('transparent-layer-thumbnail', width, height, roi)
                 else:
                     def layer_ids(layers): return tuple([layer.id for layer in layers if not layer.frame(pos).empty()])
                     hl = ('highlight', layer_ids(self.layers[:layer_pos]), layer_ids([self.layers[layer_pos]]), layer_ids(self.layers[layer_pos+1:])) if highlight else 'no-highlight'
-                    return id2version(self.layers), ('thumbnail', width, height, roi, hl, inv_scale)
+                    return id2version(self.layers), ('thumbnail', width, height, roi, hl)
             def compute_value(_):
                 h = int(screen.get_height() * 0.15)
                 w = int(h * IWIDTH / IHEIGHT)
-                if inv_scale is not None or (w <= width and h <= height):
+                if w <= width and h <= height:
                     if trans_single:
-                        return self.layers[layer_pos].frame(pos).thumbnail(width, height, roi, inv_scale)
+                        return self.layers[layer_pos].frame(pos).thumbnail(width, height, roi)
 
-                    s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi, inv_scale=inv_scale).copy()
+                    s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi).copy()
                     if self.layers[self.layer_pos].visible:
-                        s.blit(self.get_thumbnail(pos, width, height, transparent_single_layer=layer_pos, roi=roi, inv_scale=inv_scale), (0, 0))
-                    s.blit(self.curr_top_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi, inv_scale=inv_scale), (0, 0))
+                        s.blit(self.get_thumbnail(pos, width, height, transparent_single_layer=layer_pos, roi=roi), (0, 0))
+                    s.blit(self.curr_top_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi), (0, 0))
                     return s
                 else:
                     return scale_image(self.get_thumbnail(pos, w, h, highlight=highlight, transparent_single_layer=transparent_single_layer, roi=roi), width, height)
@@ -4287,26 +4262,24 @@ class Movie(MovieData):
         self.edited_since_export = True
         return f
 
-    def _set_undrawable_layers_grid(self, s, x=0, y=0):
+    def _set_undrawable_layers_grid(self, s):
         alpha = pg.surfarray.pixels3d(s)
-        xo = x % (WIDTH*3) #layout.drawing_area().xoffset# % (WIDTH*3)
-        yo = y % (WIDTH*3) #layout.drawing_area().yoffset# % (WIDTH*3)
-        alpha[xo::WIDTH*3, yo::WIDTH*3, :] = 0
-        alpha[xo+1::WIDTH*3, yo::WIDTH*3, :] = 0
-        alpha[xo::WIDTH*3, yo+1::WIDTH*3, :] = 0
-        alpha[xo+1::WIDTH*3, yo+1::WIDTH*3, :] = 0
+        alpha[::WIDTH*3, ::WIDTH*3, :] = 0
+        alpha[1::WIDTH*3, ::WIDTH*3, :] = 0
+        alpha[:1:WIDTH*3, ::WIDTH*3, :] = 0
+        alpha[1:1:WIDTH*3, ::WIDTH*3, :] = 0
 
-    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None):
-        if not width and not inv_scale: width=IWIDTH
-        if not height and not inv_scale: height=IHEIGHT
+    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None):
+        if not width: width=IWIDTH
+        if not height: height=IHEIGHT
         if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
 
         class CachedBottomLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi, inv_scale)
+                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
-                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi)
+                s = pg.Surface((width, height), pg.SRCALPHA)
                 s.fill(BACKGROUND)
                 if self.layer_pos == 0:
                     return s
@@ -4316,7 +4289,7 @@ class Movie(MovieData):
 
                 layers.set_alpha(128)
                 da = layout.drawing_area()
-                w, h = da.iwidth+da.xmargin*2+128, da.iheight+da.ymargin*2+128
+                w, h = da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2
                 class BelowImage:
                     def compute_key(_): return tuple(), ('below-image', w, h)
                     def compute_value(_):
@@ -4328,31 +4301,31 @@ class Movie(MovieData):
                 # to save a copy of just the alpha pixels [those we really need]...
                 layers.blit(cache.fetch(BelowImage()), (0,0))
                 rgba_array(layers)[0][:,:,3] = rgba[:,:,3]
-                #self._set_undrawable_layers_grid(layers, roi[0], roi[1]) # FIXME: to resurrect this we have to know the right offset for the dots
+                self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
 
                 return s
 
         return cache.fetch(CachedBottomLayers())
 
-    def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None):
-        if not width and not inv_scale: width=IWIDTH
-        if not height and not inv_scale: height=IHEIGHT
+    def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None):
+        if not width: width=IWIDTH
+        if not height: height=IHEIGHT
         if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
 
         class CachedTopLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height, roi, inv_scale)
+                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height, roi)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
+                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi)
                 if not highlight or self.layer_pos == len(self.layers)-1:
                     return layers
 
                 layers.set_alpha(128)
-                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                s = pg.Surface((width, height), pg.SRCALPHA)
                 s.fill(BACKGROUND)
                 da = layout.drawing_area()
-                w, h = da.iwidth+da.xmargin*2 + 128, da.iheight+da.ymargin*2 + 128 #TODO: what should this really be? 128 is 2x max alignment step but in what space?..
+                w, h = da.iwidth+da.xmargin*2, da.iheight+da.ymargin*2
                 class AboveImage:
                     def compute_key(_): return tuple(), ('above-image', w, h)
                     def compute_value(_):
@@ -4362,7 +4335,7 @@ class Movie(MovieData):
                         return above_image
                 rgba = np.copy(rgba_array(layers)[0])
                 layers.blit(cache.fetch(AboveImage()), (0,0))
-                #self._set_undrawable_layers_grid(layers) # FIXME: offsets
+                self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
                 rgba_array(s)[0][:,:,3] = rgba[:,:,3]
                 s.set_alpha(192)
@@ -4565,8 +4538,7 @@ def toggle_layer_lock():
     history.append_item(ToggleHistoryItem(layer.toggle_locked))
 
 def zoom_to_film_res():
-    pos = QCursor.pos()
-    x, y = pos.x(), pos.y()
+    x, y = pg.mouse.get_pos()
     da = layout.drawing_area()
     left, bottom, width, height = da.rect
     da.set_zoom_to_film_res((x-left,y-bottom))
@@ -4672,10 +4644,10 @@ class Palette:
         for row in range(self.rows):
             for col in range(self.columns):
                 sc = bucket(self.colors[row][col])
-                self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], self.colors[row][col]))
+                self.cursors[row][col] = (pg.cursors.Cursor((radius,sc.get_height()-radius-1), sc), color_image(paint_bucket_cursor[1], self.colors[row][col]))
 
         sc = bucket(self.bg_color)
-        cursor = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], self.bg_color))
+        cursor = (pg.cursors.Cursor((radius,sc.get_height()-radius-1), sc), color_image(paint_bucket_cursor[1], self.bg_color))
         self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width()))
 
 palette = Palette('palette.png')
@@ -5042,17 +5014,12 @@ def export_and_open_explorer():
     open_explorer(movie.gif_path())
 
 def open_dir_path_dialog():
-    dialog = QFileDialog(widget)
-    dialog.setFileMode(QFileDialog.Directory)
-    dialog.setViewMode(QFileDialog.Detail)
-    dialog.setAcceptMode(QFileDialog.AcceptOpen)
-    dialog.setOptions(QFileDialog.DontUseNativeDialog)
-    dialog.setLabelText(QFileDialog.LookIn, '')
-    dialog.setLabelText(QFileDialog.FileType, '')
-    dialog.setWindowTitle('Open a folder with zero or more Tinymation clips')
-    if dialog.exec():
-        fileNames = dialog.selectedFiles()
-        return fileNames[0]
+    dialog_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'dir-path-dialog'], stdout=subprocess.PIPE)
+    output, _ = dialog_subprocess.communicate()
+    # we use repr/eval because writing Unicode to sys.stdout fails
+    # and so does writing the binary output of encode() without repr()
+    file_path = eval(output).decode() if output.strip() else None
+    return file_path
 
 def open_clip_dir():
     file_path = open_dir_path_dialog()
@@ -5064,19 +5031,19 @@ def open_clip_dir():
         load_clips_dir()
 
 def process_keyup_event(event):
-    ctrl = event.modifiers() & Qt.ControlModifier
+    ctrl = event.mod & pg.KMOD_CTRL
     if not ctrl and isinstance(layout.tool, FlashlightTool):
         try_set_cursor(flashlight_cursor[0])
 
 def process_keydown_event(event):
-    ctrl = event.modifiers() & Qt.ControlModifier
-    shift = event.modifiers() & Qt.ShiftModifier
+    ctrl = event.mod & pg.KMOD_CTRL
+    shift = event.mod & pg.KMOD_SHIFT
 
     if ctrl and isinstance(layout.tool, FlashlightTool):
         try_set_cursor(needle_cursor[0])
 
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
-    if event.key() == Qt.Key_Space:
+    if event.key == pg.K_SPACE:
         if ctrl:
             history.redo_item()
             return
@@ -5086,76 +5053,76 @@ def process_keydown_event(event):
 
     # Ctrl-Z: undo any change (space only undoes drawing changes and does nothing if the latest change in the history
     # isn't a drawing change)
-    if event.key() == Qt.Key_Z and ctrl:
+    if event.key == pg.K_z and ctrl:
         history.undo_item(drawing_changes_only=False)
         return
 
     # Ctrl+Shift+Delete
-    if event.key() == Qt.Key_Delete and ctrl and shift:
+    if event.key == pg.K_DELETE and ctrl and shift:
         clear_history()
         return
 
     # Ctrl-E: export
-    if ctrl and event.key() == Qt.Key_E:
+    if ctrl and event.key == pg.K_e:
         export_and_open_explorer()
         return
 
     # Ctrl-O: open a directory
-    if ctrl and event.key() == Qt.Key_O:
+    if ctrl and event.key == pg.K_o:
         open_clip_dir()
         return
 
     # Ctrl-C/X/V
     if ctrl:
-        if event.key() == Qt.Key_C:
+        if event.key == pg.K_c:
             copy_frame()
             return
-        elif event.key() == Qt.Key_X:
+        elif event.key == pg.K_x:
             cut_frame()
             return
-        elif event.key() == Qt.Key_V:
+        elif event.key == pg.K_v:
             paste_frame()
             return
 
     # Ctrl-R: rotate
-    if ctrl and event.key == Qt.Key_R:
+    if ctrl and event.key == pg.K_r:
         swap_width_height()
         return
 
     # teacher/student - TODO: better UI
     # Ctrl-T: teacher client
-    if ctrl and event.key() == Qt.Key_T:
+    if ctrl and event.key == pg.K_t:
         print('shutting down the student server and starting the teacher client')
         start_teacher_client()
         return
-    if ctrl and event.key() == Qt.Key_L and teacher_client:
+    if ctrl and event.key == pg.K_l and teacher_client:
         print('locking student screens')
         teacher_client.lock_screens()
         return
-    if ctrl and event.key() == Qt.Key_U and teacher_client:
+    if ctrl and event.key == pg.K_u and teacher_client:
         print('unlocking student screens')
         teacher_client.unlock_screens()
         return
-    if ctrl and event.key() == Qt.Key_B and teacher_client:
+    if ctrl and event.key == pg.K_b and teacher_client:
         print('saving class backup')
         teacher_client.save_class_backup()
         return
-    if ctrl and event.key() == Qt.Key_D and teacher_client:
+    if ctrl and event.key == pg.K_d and teacher_client:
         print('restoring class backup')
         teacher_client.restore_class_backup(open_dir_path_dialog())
         return
-    if ctrl and event.key() == Qt.Key_P and teacher_client:
+    if ctrl and event.key == pg.K_p and teacher_client:
         print("putting a directory in all students' Tinymation directories")
         teacher_client.put_dir(open_dir_path_dialog())
         return
 
     # Ctrl-1/2: set layout to drawing/animation
-    if ctrl and event.key() == Qt.Key_1:
+    if ctrl and event.key == pg.K_1:
         layout.mode = DRAWING_LAYOUT
         if teacher_client:
             teacher_client.drawing_layout()
         return
-    if ctrl and event.key() == Qt.Key_2:
+    if ctrl and event.key == pg.K_2:
         layout.mode = ANIMATION_LAYOUT
         if teacher_client:
             teacher_client.animation_layout()
@@ -5166,21 +5133,21 @@ def process_keydown_event(event):
 
     if keyboard_shortcuts_enabled:
         for tool in TOOLS.values():
-            if event.key() in [ord(c) for c in tool.chars]:
+            if event.key in [ord(c) for c in tool.chars]:
                 set_tool(tool)
                 return
 
         for func, chars, _ in FUNCTIONS.values():
-            if event.key() in [ord(c) for c in chars]:
+            if event.key in [ord(c) for c in chars]:
                 func()
                 return
                 
-    if event.key() == Qt.Key_A and ctrl:
+    if event.key == pygame.K_a and ctrl:
         keyboard_shortcuts_enabled = not keyboard_shortcuts_enabled
         print('Ctrl-A pressed -','enabling' if keyboard_shortcuts_enabled else 'disabling','keyboard shortcuts')
 
 layout.draw()
-#pygame.display.flip()
+pygame.display.flip()
 
 export_on_exit = True
 
@@ -5203,119 +5170,6 @@ class ScreenLock:
         return False
 
 replayed_event_index = 0
-
-class TinymationWidget(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.initUI()
-        self.eraser = False
-        self.lineWidth = 2.5
-
-    def initUI(self):
-        self.setWindowTitle('Tablet Drawing')
-        self.showFullScreen()
-        
-        # Get the size of the primary screen
-        scr = QGuiApplication.primaryScreen().geometry()
-        self.setGeometry(scr)
-        
-        # Create backing store QImage with the scr size
-        self.image = QImage(scr.size(), QImage.Format.Format_RGB32)
-        self.sz = scr.size()
-        self.image.fill(Qt.black)
-        pgsurf2qtimage(screen, self.image)
-        
-        # Enable tablet tracking
-        #self.setAttribute(Qt.WidgetAttribute.WA_TabletTracking)
-
-        mem_view = self.image.bits()
-        self.address = ctypes.c_void_p(ctypes.addressof(ctypes.c_byte.from_buffer(mem_view))).value + 1
-
-        self.rect = np.zeros(4, dtype=np.int32)
-        self.region = arr_base_ptr(self.rect)
-
-        self.playback_timer = QTimer(self)
-        self.playback_timer.timeout.connect(self.on_playback_timer)
-        self.playback_timer.start(1000/12)
-
-    def on_playback_timer(self):
-        class Event: pass
-        e = Event()
-        e.type = PLAYBACK_TIMER_EVENT
-        layout.on_event(e)
-        self.redrawLayoutIfNeeded(e)
-        self.redrawScreen()
-
-    def redrawScreen(self):
-        pgsurf2qtimage(screen, self.image)
-        self.update()
-
-    def redrawLayoutIfNeeded(self, event=None):
-        if layout.is_playing or event is None or event.type != PLAYBACK_TIMER_EVENT: #(layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events:
-            if event is None or event.type == PLAYBACK_TIMER_EVENT or event.type() != QEvent.TabletMove or layout.is_pressed:
-                layout.draw()
-                if not layout.is_playing:
-                    cache.collect_garbage()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        region = event.region()
-        rect = region.boundingRect()
-        painter.drawImage(rect, self.image, rect)
-        painter.end()
-        event.accept()
-
-    def tabletEvent(self, event):
-        class Event:
-            pass
-        e = Event()
-        e.type = {QEvent.TabletPress: pg.MOUSEBUTTONDOWN, QEvent.TabletMove: pg.MOUSEMOTION, QEvent.TabletRelease: pg.MOUSEBUTTONUP}.get(event.type())
-        pos = event.position()
-        # there seems to be a disagreement in "where the center of the pixel is" - at integer coordinates 0,1,2...
-        # or at 0.5, 1.5, 2.5... between the tablet events and the coordinate system of xy2frame/frame2xy. I didn't give
-        # it much thought after observing that the below seems to work in the sense of drawing reasonably "exactly"
-        # where the cursor hotspot is (which isn't happening without this correction)
-        e.pos = (pos.x()-.5, pos.y()-.5)
-        layout.on_event(e)
-        self.redrawLayoutIfNeeded(event)
-        self.redrawScreen()
-        event.accept()
-
-    def update_region(self):
-        xmin, ymin, xmax, ymax = self.rect
-        self.update(xmin, ymin, xmax, ymax)
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
-            self.shutdown(export_on_exit=not (event.modifiers() & Qt.ShiftModifier))
-            self.close()
-            return
-        process_keydown_event(event)
-        self.redrawLayoutIfNeeded(event)
-        self.redrawScreen()
-        event.accept()
-
-    def keyReleaseEvent(self, event):
-        process_keyup_event(event)
-
-    def shutdown(self, export_on_exit):
-        timers.show()
-
-        movie.save_before_closing()
-        if export_on_exit:
-            movie_list.wait_for_all_exporting_to_finish()
-        else:
-            print('Shift-Escape pressed - skipping export to GIF and MP4!')
-
-widget = TinymationWidget()
-try_set_cursor(pencil_cursor[0])
-status = app.exec()
-
-
-pygame.quit()
-#if student_server:
-#    student_server.stop()
-sys.exit(status)
 
 try:
     screen_lock = ScreenLock()
