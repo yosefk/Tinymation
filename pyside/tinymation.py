@@ -2506,7 +2506,7 @@ class FlashlightTool(Button):
 
         color = pygame.surfarray.pixels3d(frame.surf_by_id('color'))
         lines = pygame.surfarray.pixels_alpha(frame.surf_by_id('lines'))
-        if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1]:
+        if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1] or lines[x,y] == 255:
             return
         flashlight_timer.start()
 
@@ -2516,6 +2516,7 @@ class FlashlightTool(Button):
                 skeleton, skx, sky = last_skeleton
                 if x >= skx.start and x < skx.stop and y >= sky.start and y < sky.stop:
                     hole_timer.start()
+                    found = False
                     if patch_hole(lines, x, y, skeleton, skx, sky):
                         # find a point to compute a new skeleton around. Sometimes x,y itself
                         # is that point and sometimes a neighbor, depending on how the hole was patched.
@@ -2532,7 +2533,14 @@ class FlashlightTool(Button):
                                 continue
                             if lines[xi,yi] != 255:
                                 break
+                                found = True
                         x,y = xi,yi
+
+                        if not found:
+                            layout.drawing_area().set_fading_mask(None)
+                            hole_timer.stop()
+                            return
+
                     hole_timer.stop()
 
         fading_mask_and_skeleton = skeletonize_color_based_on_lines(color, lines, x, y)
@@ -5263,7 +5271,11 @@ class TinymationWidget(QWidget):
         e = Event()
         e.type = {QEvent.TabletPress: pg.MOUSEBUTTONDOWN, QEvent.TabletMove: pg.MOUSEMOTION, QEvent.TabletRelease: pg.MOUSEBUTTONUP}.get(event.type())
         pos = event.position()
-        e.pos = (pos.x(), pos.y())
+        # there seems to be a disagreement in "where the center of the pixel is" - at integer coordinates 0,1,2...
+        # or at 0.5, 1.5, 2.5... between the tablet events and the coordinate system of xy2frame/frame2xy. I didn't give
+        # it much thought after observing that the below seems to work in the sense of drawing reasonably "exactly"
+        # where the cursor hotspot is (which isn't happening without this correction)
+        e.pos = (pos.x()-.5, pos.y()-.5)
         layout.on_event(e)
         self.redrawLayoutIfNeeded(event)
         self.redrawScreen()
