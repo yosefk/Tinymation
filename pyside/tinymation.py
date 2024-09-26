@@ -1,9 +1,8 @@
-import imageio.v3
 import numpy as np
 import sys
 import os
+from PySide6.QtGui import QImage
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pygame version
-os.environ['TBB_NUM_THREADS'] = '16'
 
 on_windows = os.name == 'nt'
 
@@ -11,7 +10,8 @@ on_windows = os.name == 'nt'
 # and sys.argv[0] as the command line and python then hides its own executable from the sys.argv
 # of the subprocess, but this doesn't happen with a pyinstaller produced executables
 # so you end up seeing another argument at the beginning of sys.argv; this code strips it
-if len(sys.argv) > 1 and sys.argv[0].endswith('.exe') and sys.argv[1].endswith('.exe'):
+def is_exe(s): return s.endswith('.exe') or s=='tinymation'
+if len(sys.argv) > 1 and is_exe(sys.argv[0]) and is_exe(sys.argv[1]):
     sys.argv = sys.argv[1:]
 
 # we spawn subprocesses to compress BMPs to PNGs and remove the BMPs
@@ -19,9 +19,8 @@ if len(sys.argv) > 1 and sys.argv[0].endswith('.exe') and sys.argv[1].endswith('
 
 def compress_and_remove(filepairs):
     for infile, outfile in zip(filepairs[0::2], filepairs[1::2]):
-        pixels = imageio.v3.imread(infile)
-        imageio.imwrite(outfile, pixels)
-        if np.array_equal(imageio.v3.imread(outfile), pixels):
+        image = QImage(infile)
+        if image.save(outfile) and QImage(outfile) == image:
             os.unlink(infile)
 
 if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
@@ -448,6 +447,7 @@ class MovieData:
     def gif_path(self): return os.path.realpath(self.dir)+'-GIF.gif'
     def mp4_path(self): return os.path.realpath(self.dir)+'-MP4.mp4'
     def png_path(self, i): return os.path.join(os.path.realpath(self.dir), FRAME_FMT%i)
+    def png_wildcard(self): return os.path.join(os.path.realpath(self.dir), 'frame*.png')
 
     def exported_files_exist(self):
         if not os.path.exists(self.gif_path()) or not os.path.exists(self.mp4_path()):
@@ -484,6 +484,12 @@ class MovieData:
 # separately about installing ffmpeg. imageio also fails in a "TiffWriter" at the
 # time of writing, or if the "fps" parameter is removed, creates a giant .mp4
 # output file that nothing seems to be able to play.
+#
+# as to cv2.VideoWriter, it doesn't seem to support H264 or any of the codecs eg TikTok requires,
+# at least in the build you get with `pip install opencv-python-headless`; you also can't seem
+# to have control eg over the pixel format (like yuv420p, see below)
+#
+# finally, Qt's media writer classes seem to rely on ffmpeg, same as imageio.
 class MP4:
     def __init__(self, fname, width, height, fps):
         self.output = av.open(fname, 'w', format='mp4')
@@ -516,38 +522,42 @@ def check_if_interrupted():
 def transpose_xy(image):
     return np.transpose(image, [1,0,2]) if len(image.shape)==3 else np.transpose(image, [1,0])
 
+import cv2
+
 def export(clipdir):
     #print('exporting',clipdir)
     movie = MovieData(clipdir, read_pixels=False)
     check_if_interrupted()
 
     assert FRAME_RATE==12
-    with imageio.get_writer(movie.gif_path(), fps=FRAME_RATE, loop=0) as gif_writer:
-        with MP4(movie.mp4_path(), IWIDTH, IHEIGHT, fps=24) as mp4_writer:
-            for i in range(len(movie.frames)):
-                # TODO: render the PNGs transparently to the exported sequence
-                for layer in movie.layers:
-                    layer.frame(i).read_pixels()
+    with MP4(movie.mp4_path(), IWIDTH, IHEIGHT, fps=24) as mp4_writer:
+        for i in range(len(movie.frames)):
+            # TODO: render the PNGs transparently to the exported sequence
+            for layer in movie.layers:
+                layer.frame(i).read_pixels()
 
-                frame = movie._blit_layers(movie.layers, i)
-                check_if_interrupted()
-                pixels = transpose_xy(pygame.surfarray.pixels3d(frame))
-                check_if_interrupted()
-                gif_writer.append_data(pixels)
-                # append each frame twice at MP4 to get a standard 24 fps frame rate
-                # (for GIFs there's less likelihood that something has a problem with
-                # "non-standard 12 fps" (?))
-                check_if_interrupted() 
-                mp4_writer.write_frame(pixels)
-                check_if_interrupted() 
-                mp4_writer.write_frame(pixels)
-                check_if_interrupted() 
-                imageio.imwrite(movie.png_path(i), pixels)
-                check_if_interrupted()
+            frame = movie._blit_layers(movie.layers, i)
+            check_if_interrupted()
+            pixels = transpose_xy(pygame.surfarray.pixels3d(frame))
+            check_if_interrupted()
+            #gif_writer.append_data(pixels)
+            # append each frame twice at MP4 to get a standard 24 fps frame rate
+            # (for GIFs there's less likelihood that something has a problem with
+            # "non-standard 12 fps" (?))
+            check_if_interrupted() 
+            mp4_writer.write_frame(pixels)
+            check_if_interrupted() 
+            mp4_writer.write_frame(pixels)
+            check_if_interrupted() 
+            cv2.imwrite(movie.png_path(i), cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR))
+            check_if_interrupted()
 
-                for layer in movie.layers:
-                    layer.frame(i).del_pixels() # save memory footprint - we might have several background export processes
-                check_if_interrupted()
+            for layer in movie.layers:
+                layer.frame(i).del_pixels() # save memory footprint - we might have several background export processes
+            check_if_interrupted()
+
+    # FIXME Windows, proper path
+    os.system(f'../gifski/gifski-linux --width 1920 -r {FRAME_RATE} --quiet {movie.png_wildcard()} --output {movie.gif_path()}')
 
     #print('done with',clipdir)
 
@@ -3003,14 +3013,15 @@ class DrawingArea(LayoutElemBase):
         with draw_top_timer:
             surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
 
-        with draw_light_timer:
-            mask = layout.timeline_area().combined_light_table_mask()
-            if mask:
-                surfaces.append(mask)
+        if not layout.is_playing:
+            with draw_light_timer:
+                mask = layout.timeline_area().combined_light_table_mask()
+                if mask:
+                    surfaces.append(mask)
 
-        if self.fading_mask:
-            with draw_fading_timer:
-                surfaces.append(self.scaled_fading_mask())
+            if self.fading_mask:
+                with draw_fading_timer:
+                    surfaces.append(self.scaled_fading_mask())
 
         with draw_blits_timer:
             self.subsurface.blits([(surface, starting_point) for surface in surfaces])
