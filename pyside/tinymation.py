@@ -3040,12 +3040,12 @@ class DrawingArea(LayoutElemBase):
         iscale = 1/self.xscale
 
         with draw_bottom_timer:
-            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
+            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale, subset=scaled_roi_subset))
         if movie.layers[movie.layer_pos].visible:
             with draw_curr_timer:
                 surfaces.append(movie.get_thumbnail(pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
         with draw_top_timer:
-            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
+            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale, subset=scaled_roi_subset))
 
         if not layout.is_playing:
             with draw_light_timer:
@@ -3120,8 +3120,8 @@ class DrawingArea(LayoutElemBase):
         iscale = 1/self.xscale
 
         # take the full-region cached surface and take the needed integer sub-region (faster than computing the sub-region by passing roi=src_roi)
-        bottom = movie.curr_bottom_layers_surface(movie.pos, highlight=True, roi=full_step_aligned_frame_roi, inv_scale=iscale).subsurface(full_scaled_roi_subset)
-        top = movie.curr_top_layers_surface(movie.pos, highlight=True, roi=full_step_aligned_frame_roi, inv_scale=iscale).subsurface(full_scaled_roi_subset)
+        bottom = movie.curr_bottom_layers_surface(movie.pos, highlight=True, roi=full_step_aligned_frame_roi, inv_scale=iscale, subset=full_scaled_roi_subset)
+        top = movie.curr_top_layers_surface(movie.pos, highlight=True, roi=full_step_aligned_frame_roi, inv_scale=iscale, subset=full_scaled_roi_subset)
         mask = layout.timeline_area().combined_light_table_mask()
 
         src_roi = (xmin, ymin, xmax-xmin, ymax-ymin)
@@ -4332,23 +4332,21 @@ class Movie(MovieData):
         self.edited_since_export = True
         return f
 
-    def _set_undrawable_layers_grid(self, s, x=0, y=0):
+    def _set_undrawable_layers_grid(self, s):
         alpha = pg.surfarray.pixels3d(s)
-        xo = x % (WIDTH*3) #layout.drawing_area().xoffset# % (WIDTH*3)
-        yo = y % (WIDTH*3) #layout.drawing_area().yoffset# % (WIDTH*3)
-        alpha[xo::WIDTH*3, yo::WIDTH*3, :] = 0
-        alpha[xo+1::WIDTH*3, yo::WIDTH*3, :] = 0
-        alpha[xo::WIDTH*3, yo+1::WIDTH*3, :] = 0
-        alpha[xo+1::WIDTH*3, yo+1::WIDTH*3, :] = 0
+        alpha[::WIDTH*3, ::WIDTH*3, :] = 0
+        alpha[1::WIDTH*3, ::WIDTH*3, :] = 0
+        alpha[::WIDTH*3, 1::WIDTH*3, :] = 0
+        alpha[1::WIDTH*3, 1::WIDTH*3, :] = 0
 
-    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None):
+    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None, subset=None):
         if not width and not inv_scale: width=IWIDTH
         if not height and not inv_scale: height=IHEIGHT
         if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
 
         class CachedBottomLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi, inv_scale)
+                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi, inv_scale, subset)
             def compute_value(_):
                 layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
                 s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
@@ -4373,21 +4371,24 @@ class Movie(MovieData):
                 # to save a copy of just the alpha pixels [those we really need]...
                 layers.blit(cache.fetch(BelowImage()), (0,0))
                 rgba_array(layers)[0][:,:,3] = rgba[:,:,3]
-                #self._set_undrawable_layers_grid(layers, roi[0], roi[1]) # FIXME: to resurrect this we have to know the right offset for the dots
+                if subset is not None:
+                    s = s.subsurface(subset)
+                    layers = layers.subsurface(subset)
+                self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
 
                 return s
 
         return cache.fetch(CachedBottomLayers())
 
-    def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None):
+    def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None, subset=None):
         if not width and not inv_scale: width=IWIDTH
         if not height and not inv_scale: height=IHEIGHT
         if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
 
         class CachedTopLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height, roi, inv_scale)
+                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height, roi, inv_scale, subset)
             def compute_value(_):
                 layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
                 if not highlight or self.layer_pos == len(self.layers)-1:
@@ -4405,9 +4406,12 @@ class Movie(MovieData):
                         above_image.set_alpha(128)
                         above_image.fill(LAYERS_ABOVE)
                         return above_image
+                if subset is not None:
+                    s = s.subsurface(subset)
+                    layers = layers.subsurface(subset)
                 rgba = np.copy(rgba_array(layers)[0])
                 layers.blit(cache.fetch(AboveImage()), (0,0))
-                #self._set_undrawable_layers_grid(layers) # FIXME: offsets
+                self._set_undrawable_layers_grid(layers)
                 s.blit(layers, (0,0))
                 rgba_array(s)[0][:,:,3] = rgba[:,:,3]
                 s.set_alpha(192)
