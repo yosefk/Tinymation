@@ -4332,12 +4332,13 @@ class Movie(MovieData):
         self.edited_since_export = True
         return f
 
-    def _set_undrawable_layers_grid(self, s):
+    def _set_undrawable_layers_grid(self, s, color, x=0, y=0):
         alpha = pg.surfarray.pixels3d(s)
-        alpha[::WIDTH*3, ::WIDTH*3, :] = 0
-        alpha[1::WIDTH*3, ::WIDTH*3, :] = 0
-        alpha[::WIDTH*3, 1::WIDTH*3, :] = 0
-        alpha[1::WIDTH*3, 1::WIDTH*3, :] = 0
+        color = np.array(color)
+        alpha[x::WIDTH*3, y::WIDTH*3, :] = color
+        alpha[x+1::WIDTH*3, y::WIDTH*3, :] = color
+        alpha[x::WIDTH*3, y+1::WIDTH*3, :] = color
+        alpha[x+1::WIDTH*3, y+1::WIDTH*3, :] = color
 
     def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None, subset=None):
         if not width and not inv_scale: width=IWIDTH
@@ -4374,7 +4375,7 @@ class Movie(MovieData):
                 if subset is not None:
                     s = s.subsurface(subset)
                     layers = layers.subsurface(subset)
-                self._set_undrawable_layers_grid(layers)
+                self._set_undrawable_layers_grid(layers, (0,0,255))
                 s.blit(layers, (0,0))
 
                 return s
@@ -4411,7 +4412,7 @@ class Movie(MovieData):
                     layers = layers.subsurface(subset)
                 rgba = np.copy(rgba_array(layers)[0])
                 layers.blit(cache.fetch(AboveImage()), (0,0))
-                self._set_undrawable_layers_grid(layers)
+                self._set_undrawable_layers_grid(layers, (255,0,0), x=WIDTH*3//2, y=WIDTH**3//2)
                 s.blit(layers, (0,0))
                 rgba_array(s)[0][:,:,3] = rgba[:,:,3]
                 s.set_alpha(192)
