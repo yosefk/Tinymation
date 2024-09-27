@@ -1305,7 +1305,7 @@ pg.init()
 
 from PySide6.QtWidgets import QApplication, QWidget, QFileDialog
 from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor, QPixmap
-from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication, QSize
+from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication, QEventLoop, QSize
 
 app = QApplication(sys.argv)
 
@@ -1638,7 +1638,6 @@ def try_set_cursor(c):
     except Exception as e:
         print('Failed to set cursor',e)
         pass
-try_set_cursor(pencil_cursor[0])
 
 def restore_cursor():
     try_set_cursor(prev_cursor)
@@ -3878,16 +3877,16 @@ class ProgressBar:
         text_surface = font.render(self.title, True, UNUSED)
         pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
         screen.blit(text_surface, pos)
-        try:
-            print('redrawScreen', self.done, self.total)
-            widget.redrawScreen()
-            print('processing events')
-            QCoreApplication.processEvents()
-            print('done')
-        except:
-            pass # FIXME create widget earlier
-        #pg.display.flip()
-        #pg.event.pump()
+            
+        widget.redrawScreen()
+        # this is arguably better than just calling processEvents and letting the user eg draw on the frame
+        # which will be soon replaced by another and not saved, while messing up the UI due to redrawing not being
+        # designed for this case etc. this is arguably still not great because the events are queued rather than
+        # dropped and then after the progress bar is done, we get "delayed action", which teaches kids the sad lesson
+        # that you shouldn't interact with a busy computer in the usual arguably too-harsh way. however to do this "right"
+        # is not easy (eg if you had a mouse-down event you probably don't want to drop the mouse-up event when you're
+        # in the progress bar?.. what other nasty cases can there be?..)
+        QCoreApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
 def open_movie_with_progress_bar(clipdir):
     progress_bar = ProgressBar('Loading...')
@@ -4867,8 +4866,6 @@ def load_clips_dir():
     global movie_list
     movie_list = MovieList()
 
-load_clips_dir()
-
 class SwapWidthHeightHistoryItem(HistoryItemBase):
     def __init__(self): HistoryItemBase.__init__(self, restore_pos_before_undo=False)
     def undo(self):
@@ -4994,8 +4991,6 @@ def clear_history():
     drawing_area = layout.drawing_area()
     drawing_area.set_fading_mask(fading_mask)
     drawing_area.fade_per_frame = 255/(FADING_RATE*10)
-
-history = History()
 
 escape = False
 
@@ -5225,7 +5220,7 @@ def process_keydown_event(event):
         keyboard_shortcuts_enabled = not keyboard_shortcuts_enabled
         print('Ctrl-A pressed -','enabling' if keyboard_shortcuts_enabled else 'disabling','keyboard shortcuts')
 
-layout.draw()
+#layout.draw()
 #pygame.display.flip()
 
 export_on_exit = True
@@ -5284,7 +5279,16 @@ class TinymationWidget(QWidget):
         self.playback_timer.timeout.connect(self.on_playback_timer)
         self.playback_timer.start(1000/12)
 
+    def start_loading(self):
+        load_clips_dir()
+        global history
+        history = History()
+        layout.draw()
+        self.redrawScreen()
+
     def on_playback_timer(self):
+        if layout is None:
+            return
         class Event: pass
         e = Event()
         e.type = PLAYBACK_TIMER_EVENT
@@ -5355,6 +5359,7 @@ class TinymationWidget(QWidget):
 
 widget = TinymationWidget()
 try_set_cursor(pencil_cursor[0])
+QTimer.singleShot(0, widget.start_loading)
 status = app.exec()
 
 
