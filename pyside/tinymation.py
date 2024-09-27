@@ -535,34 +535,64 @@ def export(clipdir):
     check_if_interrupted()
 
     assert FRAME_RATE==12
-    with MP4(movie.mp4_path(), IWIDTH, IHEIGHT, fps=24) as mp4_writer:
+    opaque_ext = '.opaque.png'
+    try:
+        with MP4(movie.mp4_path(), IWIDTH, IHEIGHT, fps=24) as mp4_writer:
+            for i in range(len(movie.frames)):
+                for layer in movie.layers:
+                    layer.frame(i).read_pixels()
+                    check_if_interrupted()
+
+                frame = movie._blit_layers(movie.layers, i)
+                transparent_frame = movie._blit_layers(movie.layers, i, transparent=True)
+                frame = pg.Surface((IWIDTH, IHEIGHT), pg.SRCALPHA)
+                frame.fill(BACKGROUND)
+                frame.blit(transparent_frame, (0,0))
+
+                check_if_interrupted()
+                pixels = transpose_xy(pygame.surfarray.pixels3d(frame))
+                check_if_interrupted()
+
+                # append each frame twice at MP4 to get a standard 24 fps frame rate
+                # (for GIFs there's less likelihood that something has a problem with
+                # "non-standard 12 fps" (?))
+
+                mp4_writer.write_frame(pixels)
+                check_if_interrupted() 
+                mp4_writer.write_frame(pixels)
+                check_if_interrupted() 
+                transparent_pixels = transpose_xy(pg.surfarray.pixels3d(transparent_frame))
+                transparent_pixels = np.dstack([cv2.cvtColor(transparent_pixels, cv2.COLOR_RGB2BGR), transpose_xy(pg.surfarray.pixels_alpha(transparent_frame))])
+
+                cv2.imwrite(movie.png_path(i), transparent_pixels)
+                check_if_interrupted()
+                # non-transparent PNGs for the GIF generation, see also below
+                cv2.imwrite(movie.png_path(i)+opaque_ext, cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR))
+                check_if_interrupted()
+
+                for layer in movie.layers:
+                    layer.frame(i).del_pixels() # save memory footprint - we might have several background export processes
+                check_if_interrupted()
+
+        # we fill the background color rather than producing transparent GIFs for 2.5 reasons:
+        # * GIF transparency is binary so you get ugly aliasing artifacts
+        # * when you upload GIFs (eg to Twitter or WhatsApp), transparent pixels are filled with arbitrary background color (eg white or black) anyway
+        # * gifski docs say that transparent GIFs are limited to 256 colors whereas non-transparent GIFs can actually have more; this is unlikely
+        #   to be a big deal for us given our fairly restricted use of color but still.
+        # so transparent GIFs are not as great as one might have hoped for. the sophisticated user knowing what they're doing gets transparent PNGs
+        # that can be converted into any format, including transparent GIF/WebP/APNG. someone who just wants to get a GIF to upload is probably better
+        # served by a WYSIWYG non-transparent GIF with the same background color they see when viewing the clip in Tinymation
+ 
+        # FIXME Windows, proper path
+        os.system(f'../gifski/gifski-linux --width 1920 -r {FRAME_RATE} --quiet {movie.png_wildcard()+opaque_ext} --output {movie.gif_path()}')
+ 
+    finally:
+        # remove the non-transparent PNGs created for GIF generation
         for i in range(len(movie.frames)):
-            # TODO: render the PNGs transparently to the exported sequence
-            for layer in movie.layers:
-                layer.frame(i).read_pixels()
-
-            frame = movie._blit_layers(movie.layers, i)
-            check_if_interrupted()
-            pixels = transpose_xy(pygame.surfarray.pixels3d(frame))
-            check_if_interrupted()
-            #gif_writer.append_data(pixels)
-            # append each frame twice at MP4 to get a standard 24 fps frame rate
-            # (for GIFs there's less likelihood that something has a problem with
-            # "non-standard 12 fps" (?))
-            check_if_interrupted() 
-            mp4_writer.write_frame(pixels)
-            check_if_interrupted() 
-            mp4_writer.write_frame(pixels)
-            check_if_interrupted() 
-            cv2.imwrite(movie.png_path(i), cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR))
-            check_if_interrupted()
-
-            for layer in movie.layers:
-                layer.frame(i).del_pixels() # save memory footprint - we might have several background export processes
-            check_if_interrupted()
-
-    # FIXME Windows, proper path
-    os.system(f'../gifski/gifski-linux --width 1920 -r {FRAME_RATE} --quiet {movie.png_wildcard()} --output {movie.gif_path()}')
+            try:
+                os.unlink(movie.png_path(i)+opaque_ext)
+            except:
+                continue
 
     #print('done with',clipdir)
 
