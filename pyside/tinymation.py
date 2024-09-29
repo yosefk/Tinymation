@@ -5011,10 +5011,6 @@ FADING_TIMER_EVENT = user_event()
 PAINTING_TIMER_EVENT = user_event()
 HISTORY_TIMER_EVENT = user_event()
 
-pygame.time.set_timer(PLAYBACK_TIMER_EVENT, 1000//FRAME_RATE) # we play back at 12 fps
-pygame.time.set_timer(SAVING_TIMER_EVENT, 15*1000) # we save the current frame every 15 seconds
-pygame.time.set_timer(FADING_TIMER_EVENT, 1000//FADING_RATE)
-
 timer_events = [
     PLAYBACK_TIMER_EVENT,
     SAVING_TIMER_EVENT,
@@ -5258,7 +5254,7 @@ class TinymationWidget(QWidget):
         self.lineWidth = 2.5
 
     def initUI(self):
-        self.setWindowTitle('Tablet Drawing')
+        self.setWindowTitle('Tinymation')
         self.showFullScreen()
         
         # Get the size of the primary screen
@@ -5280,9 +5276,13 @@ class TinymationWidget(QWidget):
         self.rect = np.zeros(4, dtype=np.int32)
         self.region = arr_base_ptr(self.rect)
 
-        self.playback_timer = QTimer(self)
-        self.playback_timer.timeout.connect(self.on_playback_timer)
-        self.playback_timer.start(1000/12)
+        self.timers = []
+        # we save the current frame every 15 seconds
+        for event, rate in ((PLAYBACK_TIMER_EVENT, 1000/FRAME_RATE), (SAVING_TIMER_EVENT, 15*1000), (FADING_TIMER_EVENT, 1000/FADING_RATE)):
+            timer = QTimer(self)
+            timer.timeout.connect(lambda event=event: self.on_timer(event))
+            timer.start(rate)
+            self.timers.append(timer)
 
     def start_loading(self):
         load_clips_dir()
@@ -5291,12 +5291,12 @@ class TinymationWidget(QWidget):
         layout.draw()
         self.redrawScreen()
 
-    def on_playback_timer(self):
+    def on_timer(self, event):
         if layout is None:
             return
         class Event: pass
         e = Event()
-        e.type = PLAYBACK_TIMER_EVENT
+        e.type = event
         layout.on_event(e)
         self.redrawLayoutIfNeeded(e)
         self.redrawScreen()
@@ -5306,11 +5306,10 @@ class TinymationWidget(QWidget):
         self.update()
 
     def redrawLayoutIfNeeded(self, event=None):
-        if layout.is_playing or event is None or event.type != PLAYBACK_TIMER_EVENT: #(layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events:
-            if event is None or event.type == PLAYBACK_TIMER_EVENT or event.type() != QEvent.TabletMove or layout.is_pressed:
-                layout.draw()
-                if not layout.is_playing:
-                    cache.collect_garbage()
+        if event is None or (layout.is_playing and event.type == PLAYBACK_TIMER_EVENT) or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events:
+            layout.draw()
+            if not layout.is_playing:
+               cache.collect_garbage()
 
     def paintEvent(self, event):
         painter = QPainter(self)
