@@ -1372,6 +1372,12 @@ class PenTool(Button):
 
         tinylib.brush_flood_fill_color_based_on_mask(self.brush, color_ptr, mask_ptr, color_stride, mask_stride, 0, flood_code, new_color_value)
 
+    def init_brush(self, x, y, smoothDist=0):
+        ptr, ystride, width, height = greyscale_c_params(self.lines_array)
+        lineWidth = 2.5 if self.width == WIDTH else self.width*layout.drawing_area().xscale
+        # FIXME use event timestamps
+        self.brush = tinylib.brush_init_paint(x, y, time.time_ns()*1000000, lineWidth, smoothDist, 1 if self.eraser else 0, ptr, width, height, 4, ystride)
+
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
             return
@@ -1379,23 +1385,20 @@ class PenTool(Button):
         self.points = []
         self.bucket_color = None
         self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
-        self.pen_mask = self.lines_array == 255
 
-        drawing_area = layout.drawing_area()
-        cx, cy = drawing_area.xy2frame(x, y)
-        ptr, ystride, width, height = greyscale_c_params(self.lines_array)
-        smoothDist = 20#40
-        lineWidth = 2.5 if self.width == WIDTH else self.width*drawing_area.xscale
-        # FIXME use event timestamps
-        self.brush = tinylib.brush_init_paint(cx, cy, time.time_ns()*1000000, lineWidth, smoothDist, 1 if self.eraser else 0, ptr, width, height, 4, ystride)
+        cx, cy = layout.drawing_area().xy2frame(x, y)
+        self.init_brush(cx, cy, smoothDist=20)
         if self.eraser:
+            self.pen_mask = self.lines_array == 255
             self.brush_flood_fill_color_based_on_mask()
 
         self.new_history_item()
 
         self.prev_drawn = (x,y) # Krita feeds the first x,y twice - in init-paint and in paint, here we do, too
         self.on_mouse_move(x,y)
-        self.set_history_timer()
+        if layout.subpixel or self.eraser: # when we smooth the curve it's not that clear what "undoing a part of the curve" means
+            # so we don't use the history timer. we don't smooth erasers - see also below
+            self.set_history_timer()
         pen_down_timer.stop()
 
     def set_history_timer(self):
@@ -1418,18 +1421,55 @@ class PenTool(Button):
         xmin, ymin, xmax, ymax = self.short_term_bbox
         self.short_term_bbox = (min(xmin, rxmin), min(ymin, rymin), max(xmax, rxmax), max(ymax, rymax))
 
+    def smooth_line(self):
+        try:
+            px, py = bspline_interp(self.points, smoothing=len(self.points)/(layout.drawing_area().zoom*2))
+        except:
+            return # if we can't smooth the line (eg not enough points), NP, we'll just keep the raw input
+
+        self.lines_history_item.undo()
+        self.color_history_item.undo()
+        self.new_history_item()
+
+        self.init_brush(px[0], py[0])
+        if self.eraser:
+            self.pen_mask = self.lines_array == 255
+            self.brush_flood_fill_color_based_on_mask()
+
+        xarr = np.zeros(1)
+        yarr = np.zeros(1)
+        t = 0
+        for x,y in zip(px,py):
+            t += 7
+            xarr[0] = x
+            yarr[0] = y
+            tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, self.region)
+            self.update_bbox()
+
+        tinylib.brush_end_paint(self.brush, self.region)
+        self.update_bbox()
+
     def on_mouse_up(self, x, y):
         if curr_layer_locked():
             return
         pen_up_timer.start()
 
         pg.time.set_timer(PAINTING_TIMER_EVENT, 0, 0)
-        if self.timer.isActive():
+        if self.timer is not None and self.timer.isActive():
             self.timer.stop()
 
         movie.edit_curr_frame()
         tinylib.brush_end_paint(self.brush, self.region)
         self.update_bbox()
+
+        # the code in smooth_line() works for erasers ATM but it doesn't sound good to smooth "mice erasers"
+        # because while nominally pens and erasers are basically the same, you draw with a pen to get nice lines,
+        # so you prefer them smoothed rather than getting the ugly mouse artefacts, but you use erasers to get
+        # rid of what you're erasing, so you don't want to aim the eraser paintakingly at something and then
+        # suddenly have slightly different things erased because of smoothing when you lift the pen.
+        if not layout.subpixel and not self.eraser:
+            self.smooth_line()
+
         self.brush = 0
         self.prev_drawn = None
 
@@ -1485,7 +1525,7 @@ class PenTool(Button):
         if self.eraser and self.bucket_color is None:
             nx, ny = round(cx), round(cy)
             if nx>=0 and ny>=0 and nx<self.lines_array.shape[0] and ny<self.lines_array.shape[1] and self.lines_array[nx,ny] == 0:
-                self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((cx,cy))
+                self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((nx,ny))
                 self.brush_flood_fill_color_based_on_mask()
         self.points.append((cx,cy))
 
@@ -1900,7 +1940,7 @@ def splev(x, tck):
     assert ier == 0
     return y.reshape(xshape)
 
-def bspline_interp(points):
+def bspline_interp(points, smoothing=None):
     x = np.array([1.*p[0] for p in points])
     y = np.array([1.*p[1] for p in points])
 
@@ -1908,7 +1948,8 @@ def bspline_interp(points):
         return math.sqrt((x[i1]-x[i2])**2 + (y[i1]-y[i2])**2)
     curve_length = sum([dist(i, i+1) for i in range(len(x)-1)])
 
-    smoothing = len(x) / 15
+    if smoothing is None:
+        smoothing = len(x) / 15
     # scipy.interpolate.splrep works like this:
     #tck, u = splprep([x, y], s=smoothing)
     #ufirst, ulast = u[0], u[-1] # these evaluate to 0, 1
@@ -2034,11 +2075,11 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     t = 0
     rect = np.zeros(4, dtype=np.int32)
     region = arr_base_ptr(rect)
-    for x,y in zip(px[1:],py[1:]):
+    for x,y in zip(px,py):
+        t += 7
         xarr[0] = x
         yarr[0] = y
         tinylib.brush_paint(brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, region)
-        t += 7
 
     tinylib.brush_end_paint(brush, region)
 
@@ -2238,6 +2279,7 @@ class Layout:
                     if self.hidden(elem):
                         continue
                     if elem.hit(x,y):
+                        self.subpixel = event.subpixel
                         self._dispatch_event(elem, event, x, y)
                         dispatched = True
                         break
@@ -3934,7 +3976,7 @@ class Movie(MovieData):
             if f.endswith('-deleted') and f.startswith('layer-') and os.path.isdir(full):
                 shutil.rmtree(full)
 
-    def save_and_start_export(self):
+    def save_and_start_export(self, export=True):
         self.frame(self.pos).save()
         self.save_meta()
 
@@ -3943,7 +3985,7 @@ class Movie(MovieData):
             for frame in layer.frames:
                 frame.wait_for_compression_to_finish()
 
-        if self.edited_since_export or not self.exported_files_exist():
+        if export and (self.edited_since_export or not self.exported_files_exist()):
 
             # remove old pngs so we don't have stale ones lying around that don't correspond to a valid frame;
             # also, we use them for getting the status of the export progress...
@@ -3953,8 +3995,8 @@ class Movie(MovieData):
 
             movie_list.start_export()
 
-    def save_before_closing(self):
-        self.save_and_start_export()
+    def save_before_closing(self, export=True):
+        self.save_and_start_export(export)
 
         movie_list.save_history()
         global history
@@ -4771,6 +4813,23 @@ class TinymationWidget(QWidget):
         painter.end()
         event.accept()
 
+    def mouseEvent(self, event, type):
+        class Event:
+            pass
+        e = Event()
+        e.type = type
+        pos = event.position()
+        e.pos = (pos.x(), pos.y())
+        e.subpixel = False
+        layout.on_event(e)
+        self.redrawLayoutIfNeeded(event)
+        self.redrawScreen()
+        event.accept()
+
+    def mousePressEvent(self, event): self.mouseEvent(event, pg.MOUSEBUTTONDOWN)
+    def mouseMoveEvent(self, event): self.mouseEvent(event, pg.MOUSEMOTION)
+    def mouseReleaseEvent(self, event): self.mouseEvent(event, pg.MOUSEBUTTONUP)
+
     def tabletEvent(self, event):
         class Event:
             pass
@@ -4782,6 +4841,7 @@ class TinymationWidget(QWidget):
         # it much thought after observing that the below seems to work in the sense of drawing reasonably "exactly"
         # where the cursor hotspot is (which isn't happening without this correction)
         e.pos = (pos.x()-.5, pos.y()-.5)
+        e.subpixel = True
         layout.on_event(e)
         self.redrawLayoutIfNeeded(event)
         self.redrawScreen()
@@ -4807,7 +4867,7 @@ class TinymationWidget(QWidget):
     def shutdown(self, export_on_exit):
         timers.show()
 
-        movie.save_before_closing()
+        movie.save_before_closing(export_on_exit)
         if export_on_exit:
             movie_list.wait_for_all_exporting_to_finish()
         else:
