@@ -420,8 +420,24 @@ class MovieData:
             self.layer_pos = clip['layer_pos']
             self.frames = self.layers[self.layer_pos].frames
 
+            # we can't update Layout at this point since upon startup we load a clip
+            # before initializing the layout [since we don't know the aspect ratio we need
+            # before loading the clip...]
+            self.loaded_on_light_table = dict((int(k),v) for k,v in clip.get('on_light_table', {}).items())
+            self.loaded_zoom = clip.get('zoom', 1)
+            self.loaded_xyoffset = clip.get('xyoffset', [0, 0])
+            self.loaded_zoom_center = clip.get('zoom_center', [0, 0])
+
+    def restore_viewing_params(self):
+        da = layout.drawing_area()
+        da.set_zoom(self.loaded_zoom)
+        da.set_xyoffset(*self.loaded_xyoffset)
+        da.set_zoom_center(self.loaded_zoom_center)
+        if self.loaded_on_light_table:
+            layout.timeline_area().on_light_table = self.loaded_on_light_table
+
     def save_meta(self):
-        # TODO: save light table settings
+        da = layout.drawing_area()
         clip = {
             'resolution':[IWIDTH, IHEIGHT],
             'frame_pos':self.pos,
@@ -431,6 +447,10 @@ class MovieData:
             'layer_visible':[layer.visible for layer in self.layers],
             'layer_locked':[layer.locked for layer in self.layers],
             'hold':[[frame.hold for frame in layer.frames] for layer in self.layers],
+            'on_light_table':layout.timeline_area().on_light_table,
+            'zoom':da.zoom,
+            'xyoffset':[da.xoffset, da.yoffset],
+            'zoom_center':list(da.zoom_center),
         }
         fname = os.path.join(self.dir, CLIP_FILE)
         text = json.dumps(clip,indent=2)
@@ -665,45 +685,6 @@ class ExportProgressStatus:
 
 _empty_frame = Frame('')
 
-# backups
-#import zipfile
-
-def create_backup(on_progress):
-    backup_file = os.path.join(WD, f'Tinymation-backup-{format_now()}.zip')
-    zip_dir(backup_file, WD, on_progress)
-    return backup_file
-
-def zip_dir(backup_file, dirname, on_progress, rel_path_root=None):
-    if rel_path_root is None:
-        rel_path_root = dirname
-    files_to_back_up = []
-    for root, dirs, files in os.walk(dirname):
-        for file in files:
-            ext = file.split('.')[-1].lower() if '.' in file else None
-            if ext not in ['gif','mp4','zip','bmp']:
-                files_to_back_up.append(os.path.join(root, file))
-
-    total_bytes = sum([os.path.getsize(f) for f in files_to_back_up])
-    compressed_bytes = 0
-
-    with zipfile.ZipFile(backup_file, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
-        for file_path in files_to_back_up:
-            relative_path = os.path.relpath(file_path, rel_path_root) 
-            zipf.write(file_path, relative_path)
-
-            compressed_bytes += os.path.getsize(file_path)
-            on_progress(compressed_bytes, total_bytes)
-
-# we do NOT overwrite already existing files - the user needs to actively delete them.
-def unzip_files(zip_file, on_progress):
-    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-        files = zip_ref.infolist()
-        total_bytes = sum([f.file_size for f in files])
-
-        for f in files:
-            if not os.path.exists(os.path.join(WD, f.filename)):
-                zip_ref.extract(f, WD)
-    
 # logging
 
 if on_windows:
@@ -2230,13 +2211,6 @@ class Layout:
     # note that pygame seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
     def on_event(self,event):
-        if event.type == REDRAW_LAYOUT_EVENT:
-            return
-
-        if event.type == RELOAD_MOVIE_LIST_EVENT:
-            clips_were_inserted_via_filesystem()
-            return
-
         if event.type == PLAYBACK_TIMER_EVENT:
             if self.is_playing:
                 self.playing_index = (self.playing_index + 1) % len(movie.frames)
@@ -2351,9 +2325,7 @@ class DrawingArea(LayoutElemBase):
         self.yoffset = 0
         self.fading_mask_version = 0
         self.restore_tool_on_mouse_up = False
-    def _internal_layout(self):
-        if self.iwidth and self.iheight:
-            return
+
         left, bottom, width, height = self.rect
         self.iwidth, self.iheight = scale_and_fully_preserve_aspect_ratio(IWIDTH, IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
         assert (self.iwidth / IWIDTH) - (self.iheight / IHEIGHT) < 1e-9
@@ -2377,8 +2349,8 @@ class DrawingArea(LayoutElemBase):
         for i in range(3):
             rgb[:,:,i] = (BACKGROUND[i]*grad +MARGIN[i]*(1-grad))
         alpha[:] = MARGIN[-1]*norm_dist
+
     def set_xyoffset(self, xoffset, yoffset):
-        self._internal_layout()
         prevxo, prevyo = self.xoffset, self.yoffset
 
         # we want xyoffset to be an integer (in the scaled image coordinates; we don't care
@@ -2389,30 +2361,6 @@ class DrawingArea(LayoutElemBase):
 
         self.xoffset = int(round(min(max(xoffset, 0), self.iwidth*(self.zoom - 1))))
         self.yoffset = int(round(min(max(yoffset, 0), self.iheight*(self.zoom - 1))))
-
-        zx, zy = self.zoom_center
-        self.zoom_center = zx - (self.xoffset - prevxo), zy - (self.yoffset - prevyo)
-        return
-
-        self.xoffset = min(max(xoffset, 0), self.iwidth*(self.zoom - 1))
-        self.yoffset = min(max(yoffset, 0), self.iheight*(self.zoom - 1))
-        # make sure xoffset,yoffset correspond to an integer coordinate in the non-zoomed image,
-        # otherwise the scaled image cannot match xoffset, yoffset exactly. NOTE: this causes "dancing"
-        # when zooming - xy offset jumps... could be called a bad consequence of using off the shelf
-        # scaling code that doesn't support backward warping from non-integer source coordinates...
-        xm = self.xmargin * IWIDTH / self.iwidth
-        ym = self.ymargin * IHEIGHT / self.iheight
-        x, y = [c/self.zoom for c in (self.xoffset*IWIDTH/self.iwidth - xm, self.yoffset*IHEIGHT/self.iheight - ym)]
-        self.xoffset = (math.floor(x) * self.zoom + xm) * self.iwidth / IWIDTH
-        self.yoffset = (math.floor(y) * self.zoom + ym) * self.iheight / IHEIGHT
-
-        #step = self.zoom_int_step
-        #def align(n): return (int(round(n)) // step) * step
-        #self.xoffset = align(xoffset)
-        #self.yoffset = align(yoffset)
-        #self.xoffset = min(max(self.xoffset, 0), self.iwidth*(self.zoom - 1))
-        #self.yoffset = min(max(self.yoffset, 0), self.iheight*(self.zoom - 1))
-        print('xoft',self.xoffset, self.xoffset * self.xscale, 'yoft',self.yoffset, self.yoffset * self.yscale)
 
         zx, zy = self.zoom_center
         self.zoom_center = zx - (self.xoffset - prevxo), zy - (self.yoffset - prevyo)
@@ -2525,7 +2473,6 @@ class DrawingArea(LayoutElemBase):
             return surface
         return surface.subsurface((self.xoffset, self.yoffset, self.iwidth, self.iheight))
     def scale_and_cache(self, surface, key, get_key=False):
-        self._internal_layout()
         class ScaledSurface:
             def compute_key(_):
                 id2version, comp = key
@@ -2559,7 +2506,6 @@ class DrawingArea(LayoutElemBase):
     def draw(self):
         drawing_area_draw_timer.start()
 
-        self._internal_layout()
         left, bottom, width, height = self.rect
 
         if layout.is_playing:
@@ -3471,7 +3417,7 @@ class MovieList:
     def open_history(self, clip_pos):
         global history
         history = self.histories.get(self.clips[clip_pos], History())
-        layout.drawing_area().reset_zoom_pan_params()
+        movie.restore_viewing_params()
     def save_history(self):
         if self.clips:
             self.histories[self.clips[self.clip_pos]] = history
@@ -4117,12 +4063,6 @@ def insert_clip():
     movie.render_and_save_current_frame() # write out CURRENT_FRAME_FILE for MovieListArea.reload...
     movie_list.reload()
 
-def clips_were_inserted_via_filesystem():
-    global movie
-    movie.save_before_closing()
-    movie_list.reload()
-    movie = Movie(default_clip_dir()[0])
-
 def remove_clip():
     if len(movie_list.clips) <= 1:
         return # we don't remove the last clip - if we did we'd need to create a blank one,
@@ -4410,6 +4350,7 @@ def load_clips_dir():
     movie.edited_since_export = is_new_dir
 
     init_layout()
+    movie.restore_viewing_params()
 
     global movie_list
     movie_list = MovieList()
@@ -4562,9 +4503,6 @@ timer_events = [
     HISTORY_TIMER_EVENT,
 ]
 
-REDRAW_LAYOUT_EVENT = user_event() 
-RELOAD_MOVIE_LIST_EVENT = user_event()
-
 interesting_event_attrs = 'type pos key mod rep'.split() # rep means "replayed event" - we log these same as others
 interesting_events = [
     pygame.KEYDOWN,
@@ -4572,8 +4510,6 @@ interesting_events = [
     pygame.MOUSEMOTION,
     pygame.MOUSEBUTTONDOWN,
     pygame.MOUSEBUTTONUP,
-    REDRAW_LAYOUT_EVENT,
-    RELOAD_MOVIE_LIST_EVENT,
 ] + timer_events
 
 event2timer = {}

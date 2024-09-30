@@ -590,6 +590,9 @@ class FloodFillingPainter : public ImagePainter
     }
     virtual void onLinePainted(const Point2D& start, const Point2D& end)
     {
+        if(_seeds_x.empty()) {
+            return;
+        }
         //theoretically just one of the points should suffice...
         int region[4];
         flood_fill_color_based_on_mask_many_seeds(_color, _mask, _color_stride, _mask_stride, _width, _height, region, _8_connectivity, _mask_new_val, _new_color_value,

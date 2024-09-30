@@ -1,4 +1,43 @@
 
+# backups
+#import zipfile
+
+def create_backup(on_progress):
+    backup_file = os.path.join(WD, f'Tinymation-backup-{format_now()}.zip')
+    zip_dir(backup_file, WD, on_progress)
+    return backup_file
+
+def zip_dir(backup_file, dirname, on_progress, rel_path_root=None):
+    if rel_path_root is None:
+        rel_path_root = dirname
+    files_to_back_up = []
+    for root, dirs, files in os.walk(dirname):
+        for file in files:
+            ext = file.split('.')[-1].lower() if '.' in file else None
+            if ext not in ['gif','mp4','zip','bmp']:
+                files_to_back_up.append(os.path.join(root, file))
+
+    total_bytes = sum([os.path.getsize(f) for f in files_to_back_up])
+    compressed_bytes = 0
+
+    with zipfile.ZipFile(backup_file, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+        for file_path in files_to_back_up:
+            relative_path = os.path.relpath(file_path, rel_path_root) 
+            zipf.write(file_path, relative_path)
+
+            compressed_bytes += os.path.getsize(file_path)
+            on_progress(compressed_bytes, total_bytes)
+
+# we do NOT overwrite already existing files - the user needs to actively delete them.
+def unzip_files(zip_file, on_progress):
+    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        files = zip_ref.infolist()
+        total_bytes = sum([f.file_size for f in files])
+
+        for f in files:
+            if not os.path.exists(os.path.join(WD, f.filename)):
+                zip_ref.extract(f, WD)
+    
 # Student server & teacher client: turn screen on/off, save/restore backups
 
 #import threading
