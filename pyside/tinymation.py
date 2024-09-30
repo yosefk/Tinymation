@@ -1359,6 +1359,7 @@ class PenTool(Button):
         self.region = arr_base_ptr(self.rect)
         self.bbox = None
         self.history_time_period = 1000 if eraser else 500
+        self.timer = None
 
     def brush_flood_fill_color_based_on_mask(self):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
@@ -1394,8 +1395,15 @@ class PenTool(Button):
 
         self.prev_drawn = (x,y) # Krita feeds the first x,y twice - in init-paint and in paint, here we do, too
         self.on_mouse_move(x,y)
-        pg.time.set_timer(HISTORY_TIMER_EVENT, self.history_time_period, 1)
+        self.set_history_timer()
         pen_down_timer.stop()
+
+    def set_history_timer(self):
+        if self.timer is None:
+            self.timer = QTimer(widget)
+            self.timer.setSingleShot(True)
+            self.timer.timeout.connect(self.on_history_timer)
+        self.timer.start(self.history_time_period)
 
     def new_history_item(self):
         self.bbox = (1000000, 1000000, -1, -1)
@@ -1416,7 +1424,8 @@ class PenTool(Button):
         pen_up_timer.start()
 
         pg.time.set_timer(PAINTING_TIMER_EVENT, 0, 0)
-        pg.time.set_timer(HISTORY_TIMER_EVENT, 0, 0)
+        if self.timer.isActive():
+            self.timer.stop()
 
         movie.edit_curr_frame()
         tinylib.brush_end_paint(self.brush, self.region)
@@ -1439,7 +1448,7 @@ class PenTool(Button):
     def on_history_timer(self):
         self.save_history_item()
         self.new_history_item()
-        pg.time.set_timer(HISTORY_TIMER_EVENT, self.history_time_period, 1)
+        self.set_history_timer()
 
     def on_painting_timer(self):
         if self.prev_drawn:
