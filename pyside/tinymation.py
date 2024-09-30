@@ -685,8 +685,6 @@ class ExportProgressStatus:
 
 _empty_frame = Frame('')
 
-# logging
-
 if on_windows:
     import winpath
     MY_DOCUMENTS = winpath.get_my_documents()
@@ -701,50 +699,8 @@ def set_wd(wd):
     
 set_wd(os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymation'))
 
-LOGDIR = os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Logs-Tinymation')
-if not os.path.exists(LOGDIR):
-    os.makedirs(LOGDIR)
-
-import datetime
+import datetime, time
 def format_now(): return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-import logging
-import time
-from logging.handlers import RotatingFileHandler
-
-class StreamLogger:
-    def __init__(self, stream, logger):
-        self.stream = stream
-        self.logger = logger
-        self.lastline = ''
-    def write(self, buf):
-        self.stream.write(buf)
-        if '\n' in buf:
-            self.stream.flush()
-        self.logger.log(logging.INFO, buf)
-    def flush(self):
-        self.stream.flush()
-        
-def make_rotating_logger(name, max_bytes):
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    handler = RotatingFileHandler(os.path.join(LOGDIR, name+'.txt'), maxBytes=max_bytes, backupCount=5)
-    handler.terminator = ''
-    logger.addHandler(handler)
-    return logger
-
-prints_logger = make_rotating_logger('prints', max_bytes=1024**2)
-sys.stdout = StreamLogger(sys.stdout, prints_logger)
-sys.stderr = StreamLogger(sys.stderr, prints_logger)
-
-events_logger = make_rotating_logger('events', max_bytes=1024**2)
-last_event_us = 0
-def log_event(d):
-    global last_event_us
-    now = int(time.time_ns() * 0.001)
-    d['usd'] = now - last_event_us
-    last_event_us = now
-    events_logger.log(logging.INFO, json.dumps(d)+'\n')
 
 print('>>> STARTING',format_now())
 
@@ -814,9 +770,6 @@ else:
     #screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
     #screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     screen = pg.Surface((1920, 1200), pg.SRCALPHA)#pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-    print(screen.get_size())
-
-log_event(dict(STARTING=True, width=screen.get_width(), height=screen.get_height()))
 
 screen.fill(BACKGROUND)
 #pygame.display.flip()
@@ -1281,7 +1234,6 @@ class LayoutElemBase:
     def on_mouse_down(self, x, y): pass
     def on_mouse_move(self, x, y): pass
     def on_mouse_up(self, x, y): pass
-    def on_painting_timer(self): pass
     def on_history_timer(self): pass
 
 class Button(LayoutElemBase):
@@ -1435,7 +1387,6 @@ class PenTool(Button):
             return
         pen_up_timer.start()
 
-        pg.time.set_timer(PAINTING_TIMER_EVENT, 0, 0)
         if self.timer is not None and self.timer.isActive():
             self.timer.stop()
 
@@ -1471,10 +1422,6 @@ class PenTool(Button):
         self.new_history_item()
         self.set_history_timer()
 
-    def on_painting_timer(self):
-        if self.prev_drawn:
-            self.on_mouse_move(*self.prev_drawn,from_timer=True)
-
     def on_mouse_move(self, x, y, from_timer=False):
         if curr_layer_locked():
             return
@@ -1490,19 +1437,6 @@ class PenTool(Button):
             pen_move_timer.stop()
             return
 
-        if not from_timer:
-            # if we get no mouse-move events in the next 20 ms, it means the pen stopped; since we're smoothing the pen
-            # points by averaging with past points, the line will have stopped before we reach the cursor. this timer will
-            # call on_mouse_move with from_timer=True and we'll then keep "hammering" the last point until the line
-            # gets close enough to that point.
-            #
-            # TODO: in Krita things work differently; there seems to be a 7ms timer repeating the point if no new event
-            # is found but seemingly _not_ to address the issue above [then for what? airbrushing?..] - with a timer like
-            # that "hammering" the point you'd see the line approaching the cursor, the larger the smoothing distance the
-            # more time it would take - we can implement a 7ms timer here and see the effect, and this also happens with OpenToonz
-            # smoothing brushes, but not in Krita. How do things work in Krita then?..
-            pg.time.set_timer(PAINTING_TIMER_EVENT, 20, 1)
-
         if self.eraser and self.bucket_color is None:
             nx, ny = round(cx), round(cy)
             if nx>=0 and ny>=0 and nx<self.lines_array.shape[0] and ny<self.lines_array.shape[1] and self.lines_array[nx,ny] == 0:
@@ -1511,22 +1445,11 @@ class PenTool(Button):
         self.points.append((cx,cy))
 
         if self.prev_drawn:
-            close_enough = False
             self.short_term_bbox = (1000000, 1000000, -1, -1)
-            while not close_enough:
-                xarr = np.array([cx])
-                yarr = np.array([cy])
-                tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), time.time_ns()*1000000, drawing_area.xscale, self.region)
-                self.update_bbox()
-                if from_timer:
-                    # "keep hammering the point or stop?"
-                    dx = xarr[0] - cx
-                    dy = yarr[0] - cy
-                    close_enough = math.sqrt(dx*dx + dy*dy) < 1
-                    if pg.event.peek(pg.MOUSEMOTION):
-                        break
-                else:
-                    break
+            xarr = np.array([cx])
+            yarr = np.array([cy])
+            tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), time.time_ns()*1000000, drawing_area.xscale, self.region)
+            self.update_bbox()
 
             if self.short_term_bbox[-1] >= 0:
                 layout.drawing_area().draw_region(self.short_term_bbox)
@@ -2186,7 +2109,7 @@ class Layout:
         if self.is_pressed:
             if self.focus_elem is self.drawing_area():
                 return
-            if not self.focus_elem.redraw:
+            if self.focus_elem is None or not self.focus_elem.redraw:
                 return
 
         layout_draw_timer.start()
@@ -2228,9 +2151,6 @@ class Layout:
 
         if event.type == SAVING_TIMER_EVENT:
             movie.frame(movie.pos).save()
-
-        if event.type == PAINTING_TIMER_EVENT:
-            self.tool.on_painting_timer()
 
         if event.type == HISTORY_TIMER_EVENT:
             self.tool.on_history_timer()
@@ -2300,7 +2220,6 @@ class Layout:
             
 # assumes either 16:9 or 9:16
 def scale_and_fully_preserve_aspect_ratio(w, h, width, height):
-    print(width, height, w, h, width/height>w/h)
     alignw, alignh = (16,9) if w>h  else (9,16)
     if width/height > w/h:
         scaled_width = (round(w*height/h) // alignw) * alignw
@@ -4130,7 +4049,7 @@ FUNCTIONS = {
     'remove-frame': (remove_frame, '-_', load_image('garbage.png')),
     'next-frame': (next_frame, '.<', None),
     'prev-frame': (prev_frame, ',>', None),
-    'toggle-playing': (toggle_playing, '\r', None),
+    'toggle-playing': (toggle_playing, [Qt.Key_Enter, Qt.Key_Return], None),
     'toggle-loop-mode': (toggle_loop_mode, 'c', None),
     'toggle-frame-hold': (toggle_frame_hold, 'h', None),
     'toggle-layer-lock': (toggle_layer_lock, 'l', None),
@@ -4494,14 +4413,12 @@ def user_event():
 PLAYBACK_TIMER_EVENT = user_event()
 SAVING_TIMER_EVENT = user_event() 
 FADING_TIMER_EVENT = user_event()
-PAINTING_TIMER_EVENT = user_event()
 HISTORY_TIMER_EVENT = user_event()
 
 timer_events = [
     PLAYBACK_TIMER_EVENT,
     SAVING_TIMER_EVENT,
     FADING_TIMER_EVENT,
-    PAINTING_TIMER_EVENT,
     HISTORY_TIMER_EVENT,
 ]
 
@@ -4515,7 +4432,7 @@ interesting_events = [
 ] + timer_events
 
 event2timer = {}
-event_names = 'KEYDOWN KEYUP MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING PAINTING HISTORY'.split()
+event_names = 'KEYDOWN KEYUP MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING HISTORY'.split()
 for i,event in enumerate(interesting_events):
     event2timer[event] = timers.add(event_names[i])
 
@@ -4656,14 +4573,19 @@ def process_keydown_event(event):
     # other keyboard shortcuts are enabled/disabled by Ctrl-A
     global keyboard_shortcuts_enabled
 
+    def quiet_ord(x):
+        try:
+            return ord(x)
+        except:
+            return x
     if keyboard_shortcuts_enabled:
         for tool in TOOLS.values():
-            if event.key() in [ord(c) for c in tool.chars]:
+            if event.key() in list(tool.chars) or event.key() in [quiet_ord(c) for c in tool.chars]:
                 set_tool(tool)
                 return
 
         for func, chars, _ in FUNCTIONS.values():
-            if event.key() in [ord(c) for c in chars]:
+            if event.key() in list(chars) or event.key() in [quiet_ord(c) for c in chars]:
                 func()
                 return
                 
@@ -4794,6 +4716,13 @@ class TinymationWidget(QWidget):
             self.shutdown(export_on_exit=not (event.modifiers() & Qt.ShiftModifier))
             self.close()
             return
+
+        if layout.is_pressed:
+            return # ignore keystrokes (except ESC) when a mouse tool is being used
+
+        if layout.is_playing and not (keyboard_shortcuts_enabled and event.key() in [Qt.Key_Enter, Qt.Key_Return]):
+            return # ignore keystrokes (except ESC and ENTER) during playback
+
         process_keydown_event(event)
         self.redrawLayoutIfNeeded(event)
         self.redrawScreen()
@@ -4802,7 +4731,7 @@ class TinymationWidget(QWidget):
     def keyReleaseEvent(self, event):
         process_keyup_event(event)
 
-    def shutdown(self, export_on_exit):
+    def shutdown(self, export_on_exit=True):
         timers.show()
 
         movie.save_before_closing(export_on_exit)
@@ -4813,118 +4742,17 @@ class TinymationWidget(QWidget):
 
 widget = TinymationWidget()
 try_set_cursor(pencil_cursor[0])
+
+def signal_handler(sig, frame):
+    print("\nInterrupted by Ctrl+C!")
+    widget.shutdown()
+    QApplication.quit()
+signal.signal(signal.SIGINT, signal_handler)
+
 QTimer.singleShot(0, widget.start_loading)
 status = app.exec()
 
-
 pygame.quit()
+
 sys.exit(status)
 
-try:
-    screen_lock = ScreenLock()
-    while not escape: 
-        try:
-            event = replay_log.events[replayed_event_index]
-            replayed_event_index += 1
-            events = [event]
-            if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
-                raise Exception('not quitting')
-        except:
-            # pygame.event.get() returns an empty list when there are no events,
-            # so a loop using it uses 100% of CPU
-            events = [pygame.event.wait()]
-        for event in events:
-            if event.type not in interesting_events:
-                continue
-            
-            if event.type in [pg.MOUSEBUTTONDOWN, pg.MOUSEBUTTONUP] and getattr(event, 'button', 1) != 1:
-                continue
-            if event.type == pg.MOUSEMOTION and getattr(event, 'buttons', (1,0,0)) != (1,0,0):
-                continue
-
-            if screen_lock.is_locked():
-                continue
-
-            event_attrs = {}
-            for attr in interesting_event_attrs:
-                val = getattr(event, attr, None)
-                if val is not None:
-                    event_attrs[attr] = val
-            log_event(event_attrs)
-            #pickle.dump(event_attrs, event_log)
-
-            timer = event2timer[event.type]
-            #if event.type not in timer_events:
-            #   print(pg.event.event_name(event.type),tdiff(),event.type,pygame.key.get_mods())
-
-            if event.type == pygame.QUIT:
-                escape = True
-                break
-
-            try:
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE: # ESC pressed
-                        escape = True
-                        shift = event.mod & pg.KMOD_SHIFT
-                        export_on_exit = not shift # don't export upon Shift+ESC [for faster development cycles]
-                        break
-
-                    if layout.is_pressed:
-                        continue # ignore keystrokes (except ESC) when a mouse tool is being used
-
-                    if layout.is_playing and not (keyboard_shortcuts_enabled and event.key == pygame.K_RETURN):
-                        continue # ignore keystrokes (except ESC and ENTER) during playback
-
-                    timer.start()
-                    process_keydown_event(event)
-
-                else:
-                    timer.start()
-
-                    if event.type == pygame.KEYUP:
-                        process_keyup_event(event)
-                    else:
-                        layout.on_event(event)
-
-                # TODO: might be good to optimize repainting beyond "just repaint everything
-                # upon every event"
-                if layout.is_playing or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events:
-                    # don't repaint upon depressed mouse movement. this is important to avoid the pen
-                    # lagging upon "first contact" when a mouse motion event is sent before a mouse down
-                    # event at the same coordinate; repainting upon that mouse motion event loses time
-                    # when we should have been receiving the next x,y coordinates
-                    if event.type != pygame.MOUSEMOTION or layout.is_pressed:
-                        layout.draw()
-                        if not layout.is_playing:
-                            cache.collect_garbage()
-                    pygame.display.flip()
-
-                took = timer.stop()
-                if took > 70:
-                    print(f'Slow event ({timer.name}: {took} ms, {layout.focus_elem.__class__.__name__} in focus) - printing timing data:')
-                    timers.show()
-                    print()
-
-            except KeyboardInterrupt:
-                print('Ctrl-C - exiting')
-                escape = True
-                break
-            except:
-                print('INTERNAL ERROR (printing and continuing)')
-                import traceback
-                traceback.print_exc()
-except KeyboardInterrupt:
-    print('Ctrl-C - exiting')
-      
-timers.show()
-
-movie.save_before_closing()
-if export_on_exit:
-    movie_list.wait_for_all_exporting_to_finish()
-else:
-    print('Shift-Escape pressed - skipping export to GIF and MP4!')
-
-pygame.display.quit()
-pygame.quit()
-
-print('>>> QUITTING',format_now())
