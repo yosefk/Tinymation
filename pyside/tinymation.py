@@ -2298,13 +2298,15 @@ class Layout:
         self.is_playing = not self.is_playing
         self.playing_index = 0
             
-# FIXME: handle more cases (eg 9:16 and not just 16:9)
+# assumes either 16:9 or 9:16
 def scale_and_fully_preserve_aspect_ratio(w, h, width, height):
+    print(width, height, w, h, width/height>w/h)
+    alignw, alignh = (16,9) if w>h  else (9,16)
     if width/height > w/h:
-        scaled_width = (round(w*height/h) // 16) * 16
+        scaled_width = (round(w*height/h) // alignw) * alignw
         scaled_height = h*scaled_width/w
     else:
-        scaled_height = (round(h*width/w) // 9) * 9
+        scaled_height = (round(h*width/w) // alignh) * alignh
         scaled_width = w*scaled_height/h
     return round(scaled_width), round(scaled_height)
 
@@ -4639,7 +4641,7 @@ def process_keydown_event(event):
             return
 
     # Ctrl-R: rotate
-    if ctrl and event.key == Qt.Key_R:
+    if ctrl and event.key() == Qt.Key_R:
         swap_width_height()
         return
 
