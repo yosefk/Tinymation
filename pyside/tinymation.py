@@ -1291,7 +1291,7 @@ class PenTool(Button):
         self.rect = np.zeros(4, dtype=np.int32)
         self.region = arr_base_ptr(self.rect)
         self.bbox = None
-        self.history_time_period = 1000 if eraser else 500
+        self.history_time_period = 1000
         self.timer = None
 
     def brush_flood_fill_color_based_on_mask(self):
@@ -1329,8 +1329,12 @@ class PenTool(Button):
 
         self.prev_drawn = (x,y) # Krita feeds the first x,y twice - in init-paint and in paint, here we do, too
         self.on_mouse_move(x,y)
-        if layout.subpixel or self.eraser: # when we smooth the curve it's not that clear what "undoing a part of the curve" means
-            # so we don't use the history timer. we don't smooth erasers - see also below
+        if self.eraser: # we split eraser gestures into 1-second parts since sometimes you erase for a lot of time
+            # without ever putting down the eraser and at some point erase too much and you don't want to undo all
+            # that time spend erasing. with drawing it's less like it (undoing a part of the line seems less likely
+            # to be what you want and you naturally break drawing into separate "gestures" making sense "as a whole";
+            # if we do decide to split lines into parts for undo purposes, we should not doing when not layout.subpixel
+            # since this doesn't work with smoothing)
             self.set_history_timer()
         pen_down_timer.stop()
 
@@ -1745,13 +1749,18 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
         flashlight_timer.stop()
         return
 
-    close_diagonal_holes(pen_mask)
-
     ff_timer.start()
     flood_code = 2
     flood_mask = np.ascontiguousarray(pen_mask.astype(np.uint8))
     cv2.floodFill(flood_mask, None, seedPoint=(y, x), newVal=flood_code, loDiff=(0, 0, 0, 0), upDiff=(0, 0, 0, 0))
-    flood_mask = flood_mask == flood_code
+    flood_mask = flood_mask != flood_code
+    # note that we should close the diagnoal holes _after_ flood fill (which uses 4-connectivity and doesn't need
+    # them closed to work correctly) and not _before_ flood-fill (because it can actually make an 4-connectivity
+    # hole into an 8-connectivity hole in some cases and then flood fill will not find it; not a problem after flood-fill
+    # since skeletonize uses 8-connectivity)
+    close_diagonal_holes(flood_mask)
+    flood_mask = ~flood_mask
+
     #flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
     ff_timer.stop()
         
