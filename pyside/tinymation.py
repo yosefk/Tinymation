@@ -1061,19 +1061,30 @@ class HistoryItemBase:
         self.restore_pos_before_undo = restore_pos_before_undo
         self.pos_before_undo = movie.pos
         self.layer_pos_before_undo = movie.layer_pos
-        self.zoom_before_undo = layout.drawing_area().get_zoom_pan_params()
     def is_drawing_change(self): return False
     def from_curr_pos(self): return self.pos_before_undo == movie.pos and self.layer_pos_before_undo == movie.layer_pos
     def byte_size(history_item): return 128
     def nop(history_item): return False
+    def bounding_rect(self): return None
     def make_undone_changes_visible(self):
+        needed_change = False
         if not self.restore_pos_before_undo:
-            return
-        da = layout.drawing_area()
-        if movie.pos != self.pos_before_undo or movie.layer_pos != self.layer_pos_before_undo or da.get_zoom_pan_params() != self.zoom_before_undo:
+            return needed_change
+
+        if movie.pos != self.pos_before_undo or movie.layer_pos != self.layer_pos_before_undo:
             movie.seek_frame_and_layer(self.pos_before_undo, self.layer_pos_before_undo)
-            da.restore_zoom_pan_params(self.zoom_before_undo)
-            return True
+            needed_change = True
+
+        rect = self.bounding_rect()
+        if rect is not None:
+            da = layout.drawing_area()
+            l, b, w, h = da.rois(just_the_misaligned_frame_roi=True)
+            l1, b1, r1, t1 = rect
+            if l1<l or b1<b or r1>l+w or t1>b+h: # bounding rect outside the zoom ROI
+                da.reset_zoom_pan_params()
+                needed_change = True
+
+        return needed_change
 
 class HistoryItem(HistoryItemBase):
     def __init__(self, surface_id, bbox=None):
@@ -1099,6 +1110,10 @@ class HistoryItem(HistoryItemBase):
                 self.saved_rgb = self.saved_rgb[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
             self.optimized = True
 
+    def bounding_rect(self):
+        if self.optimized:
+            return self.minx, self.miny, self.maxx+1, self.maxy+1
+        return 0, 0, IWIDTH, IHEIGHT
     def is_drawing_change(self): return True
     def curr_surface(self):
         return movie.edit_curr_frame().surf_by_id(self.surface_id)
@@ -1168,6 +1183,18 @@ class HistoryItemSet(HistoryItemBase):
             if not item.is_drawing_change():
                 return False
         return True
+    def bounding_rect(self):
+        rect = None
+        for item in self.items:
+            irect = item.bounding_rect()
+            if irect is not None:
+                if rect is None:
+                    rect = irect
+                else:
+                    l1, b1, r1, t1 = rect
+                    l2, b2, r2, t2 = irect
+                    rect = min(l1,l2), min(b1,b2), max(r1,r2), max(t1,t2)
+        return rect
     def nop(self):
         for item in self.items:
             if not item.nop():
@@ -2307,7 +2334,7 @@ class DrawingArea(LayoutElemBase):
 
         self.set_zoom_center(center)
 
-    def rois(self):
+    def rois(self, just_the_misaligned_frame_roi=False):
         '''step_aligned_frame_roi, scaled_roi_subset, drawing_area_starting_point = da.rois()
 
         step_aligned_frame_roi is the region in the frame coordinates corresponding to what is shown
@@ -2328,7 +2355,7 @@ class DrawingArea(LayoutElemBase):
         '''
         frame_roi = (self.xoffset * self.xscale, self.yoffset * self.yscale, self.iwidth * self.xscale, self.iheight * self.yscale)
 
-        step = self.zoom_int_step_orig
+        step = 1 if just_the_misaligned_frame_roi else self.zoom_int_step_orig
         def align_down(n): return int((math.floor(n) // step) * step)
         def align_up(n): return int(((math.ceil(n) + step - 1) // step) * step)
 
@@ -2348,6 +2375,8 @@ class DrawingArea(LayoutElemBase):
             return int(r)
 
         step_aligned_frame_roi = (frame_roi_left, frame_roi_bottom, frame_roi_right - frame_roi_left, frame_roi_top - frame_roi_bottom)
+        if just_the_misaligned_frame_roi:
+            return step_aligned_frame_roi # actually it's "aligned" to the step of 1
 
         # compute target width & height exactly as OpenCV resize would
         scale_target_width = round(step_aligned_frame_roi[2] * (1/self.xscale))
@@ -2504,6 +2533,9 @@ class DrawingArea(LayoutElemBase):
         if ymax < IHEIGHT:
             yshrink += step
 
+        if xmax<=xmin or ymax<=ymin:
+            return # drawing outside the visible area
+
         full_step_aligned_frame_roi, full_scaled_roi_subset, full_starting_point = self.rois()
         iscale = 1/self.xscale
 
@@ -2523,6 +2555,9 @@ class DrawingArea(LayoutElemBase):
             return x,y,right-x,top-y
         roi = (sx, sy, scaled_layer.get_width() - xshrink, scaled_layer.get_height() - yshrink)
         trimmed_roi = trim(*roi, self.subsurface)
+        if trimmed_roi[2] <= 0 or trimmed_roi[3] <= 0:
+            return # drawing outside the visible area - nothing to repaint
+
         sub = self.subsurface.subsurface(trimmed_roi)
 
         other_layers_roi = trim(trimmed_roi[0] - full_starting_point[0], trimmed_roi[1] - full_starting_point[1], trimmed_roi[2], trimmed_roi[3], bottom)
