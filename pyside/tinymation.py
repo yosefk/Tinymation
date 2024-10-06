@@ -704,31 +704,6 @@ def format_now(): return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
 print('>>> STARTING',format_now())
 
-class ReplayedEvent:
-    def __init__(self, d):
-        self.__dict__ = d
-        self.rep = 1
-class ReplayedEventLog:
-    def __init__(self, width, height, events):
-        self.width = width
-        self.height = height
-        self.events = events
-    def screen_dimensions(self): return self.width, self.height
-
-def parse_replay_log():
-    logfiles = reversed(sorted([f for f in os.listdir(LOGDIR) if f.startswith('events.txt')]))
-    log = sum([open(os.path.join(LOGDIR, f)).read().splitlines() for f in logfiles], [])
-    start = None
-    for i, line in enumerate(log):
-        if 'STARTING' in line:
-            start = i
-    if start is None:
-        raise Exception('failed to parse the event log')
-    d = json.loads(log[start])
-    events = [ReplayedEvent(json.loads(line)) for line in log[start+1:]]
-    replayed = ReplayedEventLog(d['width'], d['height'], events)
-    return replayed
-
 
 import subprocess
 import pygame.gfxdraw
@@ -759,17 +734,11 @@ def pgsurf2qtimage(src, dst):
     oattached[:] = iattached[:]
 
 
-replay_log = None
-if len(sys.argv) > 1 and sys.argv[1] == 'replay':
-    print('replaying events from log')
-    replay_log = parse_replay_log()
-    screen = pg.display.set_mode(replay_log.screen_dimensions(), pg.RESIZABLE)
-else:
-    #screen = pygame.display.set_mode((800, 350*2), pygame.RESIZABLE)
-    #screen = pygame.display.set_mode((350, 800), pygame.RESIZABLE)
-    #screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
-    #screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-    screen = pg.Surface((1920, 1200), pg.SRCALPHA)#pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+#screen = pygame.display.set_mode((800, 350*2), pygame.RESIZABLE)
+#screen = pygame.display.set_mode((350, 800), pygame.RESIZABLE)
+#screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
+#screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+screen = pg.Surface((1920, 1200), pg.SRCALPHA)#pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
 
 screen.fill(BACKGROUND)
 #pygame.display.flip()
@@ -4431,7 +4400,6 @@ timer_events = [
     HISTORY_TIMER_EVENT,
 ]
 
-interesting_event_attrs = 'type pos key mod rep'.split() # rep means "replayed event" - we log these same as others
 interesting_events = [
     pygame.KEYDOWN,
     pygame.KEYUP,
@@ -4607,8 +4575,6 @@ def process_keydown_event(event):
 
 export_on_exit = True
 
-replayed_event_index = 0
-
 class TinymationWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -4760,8 +4726,6 @@ signal.signal(signal.SIGINT, signal_handler)
 
 QTimer.singleShot(0, widget.start_loading)
 status = app.exec()
-
 pygame.quit()
-
 sys.exit(status)
 
