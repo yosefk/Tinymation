@@ -1611,6 +1611,12 @@ def integer_points_near_line_segment(x1, y1, x2, y2, distance):
     return result_points.astype(np.int32)
 
 class PaintBucketTool(Button):
+    color2tool = {}
+    last_color = BACKGROUND+(0,)
+    @staticmethod
+    def choose_last_color():
+        set_tool(PaintBucketTool.color2tool[PaintBucketTool.last_color])
+
     def __init__(self,color):
         Button.__init__(self)
         self.color = color
@@ -1646,6 +1652,8 @@ class PaintBucketTool(Button):
 
             layout.drawing_area().draw_region(bbox)
             widget.redrawScreen()
+
+        PaintBucketTool.last_color = self.color
         
         paint_bucket_timer.stop()
 
@@ -4043,9 +4051,9 @@ def zoom_to_film_res():
 TOOLS = {
     'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
     'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
-    'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'eE'),
-    'eraser-medium': Tool(PenTool(BACKGROUND, MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'rR'),
-    'eraser-big': Tool(PenTool(BACKGROUND, BIG_ERASER_WIDTH), eraser_big_cursor, 'tT'),
+    'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'wW'),
+    'eraser-medium': Tool(PenTool(BACKGROUND, MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
+    'eraser-big': Tool(PenTool(BACKGROUND, BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
     'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'fF'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
@@ -4060,15 +4068,16 @@ TOOLS = {
 }
 
 FUNCTIONS = {
-    'insert-frame': (insert_frame, '=+', load_image('sheets.png')),
-    'remove-frame': (remove_frame, '-_', load_image('garbage.png')),
-    'next-frame': (next_frame, '.<', None),
-    'prev-frame': (prev_frame, ',>', None),
-    'toggle-playing': (toggle_playing, [Qt.Key_Enter, Qt.Key_Return], None),
-    'toggle-loop-mode': (toggle_loop_mode, 'c', None),
-    'toggle-frame-hold': (toggle_frame_hold, 'h', None),
-    'toggle-layer-lock': (toggle_layer_lock, 'l', None),
-    'zoom-to-film-res': (zoom_to_film_res, '1', None),
+    'insert-frame': (insert_frame, '=+'),
+    'remove-frame': (remove_frame, '-_'),
+    'next-frame': (next_frame, '.<'),
+    'prev-frame': (prev_frame, ',>'),
+    'toggle-playing': (toggle_playing, [Qt.Key_Enter, Qt.Key_Return]),
+    'toggle-loop-mode': (toggle_loop_mode, 'c'),
+    'toggle-frame-hold': (toggle_frame_hold, 'h'),
+    'toggle-layer-lock': (toggle_layer_lock, 'l'),
+    'zoom-to-film-res': (zoom_to_film_res, '1'),
+    'last-paint-bucket': (PaintBucketTool.choose_last_color, 'kK'),
 }
 
 tool_change = 0
@@ -4250,6 +4259,8 @@ def init_layout():
                     continue
             if not tool:
                 tool = Tool(PaintBucketTool(palette.colors[len(palette.colors)-row-1][col]), palette.cursors[len(palette.colors)-row-1][col], '')
+            if isinstance(tool.tool, PaintBucketTool):
+                PaintBucketTool.color2tool[tool.tool.color] = tool
             layout.add((TOOLBAR_X_START+x,y,color_w,color_w), ToolSelectionButton(tool))
             i += 1
 
@@ -4598,7 +4609,7 @@ def process_keydown_event(event):
                 set_tool(tool)
                 return
 
-        for func, chars, _ in FUNCTIONS.values():
+        for func, chars in FUNCTIONS.values():
             if event.key() in list(chars) or event.key() in [quiet_ord(c) for c in chars]:
                 func()
                 return
