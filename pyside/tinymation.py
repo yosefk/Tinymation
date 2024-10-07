@@ -746,7 +746,7 @@ screen.fill(BACKGROUND)
 
 font = pygame.font.Font(size=screen.get_height()//15)
 
-FADING_RATE = 3
+FADING_RATE = 12
 UNDRAWABLE = (220, 215, 190)
 MARGIN = (220-80, 215-80, 190-80, 192)
 SELECTED = (220-80, 215-80, 190-80)
@@ -1291,6 +1291,7 @@ class PenTool(Button):
         self.bbox = None
         self.history_time_period = 1000
         self.timer = None
+        self.patching = False
 
     def brush_flood_fill_color_based_on_mask(self):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
@@ -1311,6 +1312,10 @@ class PenTool(Button):
 
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
+            return
+        self.patching = ctrl_is_pressed()
+        if self.patching:
+            FlashlightTool().on_mouse_down(x,y)
             return
         pen_down_timer.start()
         self.points = []
@@ -1385,7 +1390,7 @@ class PenTool(Button):
         self.update_bbox()
 
     def on_mouse_up(self, x, y):
-        if curr_layer_locked():
+        if self.patching or curr_layer_locked():
             return
         pen_up_timer.start()
 
@@ -1425,7 +1430,7 @@ class PenTool(Button):
         self.set_history_timer()
 
     def on_mouse_move(self, x, y, from_timer=False):
-        if curr_layer_locked():
+        if self.patching or curr_layer_locked():
             return
 
         pen_move_timer.start()
@@ -1624,9 +1629,8 @@ class PaintBucketTool(Button):
         self.py = None
         self.bboxes = []
         self.pen_mask = None
+        self.patching = False
     def fill(self, x, y):
-        if curr_layer_locked():
-            return
         paint_bucket_timer.start()
 
         x, y = layout.drawing_area().xy2frame(x,y)
@@ -1658,6 +1662,12 @@ class PaintBucketTool(Button):
         paint_bucket_timer.stop()
 
     def on_mouse_down(self, x, y):
+        if curr_layer_locked():
+            return
+        self.patching = ctrl_is_pressed()
+        if self.patching:
+            FlashlightTool().on_mouse_down(x,y)
+            return
         self.history_item = HistoryItem('color')
         self.bboxes = []
         self.px = None
@@ -1667,11 +1677,15 @@ class PaintBucketTool(Button):
 
         self.fill(x,y)
     def on_mouse_move(self, x, y):
+        if self.patching or curr_layer_locked():
+            return
         if self.pen_mask is None: # pen_mask is None has been known to happen in flood_fill_color_based_on_mask_many_seeds...
             self.on_mouse_down(x,y)
         else:
             self.fill(x,y)
     def on_mouse_up(self, x, y):
+        if self.patching or curr_layer_locked():
+            return
         self.on_mouse_move(x,y)
         if self.bboxes: # we had changes
             inf = 10**9
@@ -2006,6 +2020,9 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
 last_skeleton = None
 
+def ctrl_is_pressed():
+    return QGuiApplication.queryKeyboardModifiers() & Qt.ControlModifier
+
 class FlashlightTool(Button):
     def __init__(self):
         Button.__init__(self)
@@ -2013,7 +2030,7 @@ class FlashlightTool(Button):
         x, y = layout.drawing_area().xy2frame(x,y)
         x, y = round(x), round(y)
 
-        try_to_patch = QGuiApplication.queryKeyboardModifiers() & Qt.ControlModifier
+        try_to_patch = ctrl_is_pressed()
         frame = movie.edit_curr_frame() if try_to_patch else movie.curr_frame()
 
         color = pygame.surfarray.pixels3d(frame.surf_by_id('color'))
@@ -4528,17 +4545,28 @@ def open_clip_dir():
         set_wd(file_path)
         load_clips_dir()
 
+def patching_tool_selected():
+    for cls in FlashlightTool, PaintBucketTool, PenTool:
+        if isinstance(layout.tool, cls):
+            return True
+
+needle_cursor_selected = False
+
 def process_keyup_event(event):
     ctrl = event.modifiers() & Qt.ControlModifier
-    if not ctrl and isinstance(layout.tool, FlashlightTool):
-        try_set_cursor(flashlight_cursor[0])
+    global needle_cursor_selected
+    if not ctrl and needle_cursor_selected:
+        try_set_cursor(layout.full_tool.cursor[0])
+        needle_cursor_selected = False
 
 def process_keydown_event(event):
     ctrl = event.modifiers() & Qt.ControlModifier
     shift = event.modifiers() & Qt.ShiftModifier
 
-    if ctrl and isinstance(layout.tool, FlashlightTool):
+    global needle_cursor_selected
+    if ctrl and not needle_cursor_selected and patching_tool_selected():
         try_set_cursor(needle_cursor[0])
+        needle_cursor_selected = True
 
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
     if event.key() == Qt.Key_Space:
