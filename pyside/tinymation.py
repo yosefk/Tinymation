@@ -1079,8 +1079,10 @@ class HistoryItemBase:
         if rect is not None:
             da = layout.drawing_area()
             l, b, w, h = da.rois(just_the_misaligned_frame_roi=True)
+            r, t = l+w, b+h
             l1, b1, r1, t1 = rect
-            if l1<l or b1<b or r1>l+w or t1>b+h: # bounding rect outside the zoom ROI
+            il, ib, ir, it = max(l,l1), max(b,b1), min(r,r1), min(t,t1)
+            if ir-il <= 0 or it-ib <= 0 or (ir-il)*(it-ib) < 0.15*(r1-l1)*(t1-b1): # undone change nearly invisible in the drawing area
                 da.reset_zoom_pan_params()
                 needed_change = True
 
