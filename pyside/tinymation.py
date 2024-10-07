@@ -466,6 +466,7 @@ class MovieData:
 
     def gif_path(self): return os.path.realpath(self.dir)+'-GIF.gif'
     def mp4_path(self): return os.path.realpath(self.dir)+'-MP4.mp4'
+    def export_paths(self): return [self.gif_path(), self.mp4_path()]
     def png_path(self, i): return os.path.join(os.path.realpath(self.dir), FRAME_FMT%i)
     def png_wildcard(self): return os.path.join(os.path.realpath(self.dir), 'frame*.png')
 
@@ -714,7 +715,7 @@ import shutil
 pg = pygame
 pg.init()
 
-from PySide6.QtWidgets import QApplication, QWidget, QFileDialog
+from PySide6.QtWidgets import QApplication, QWidget, QFileDialog, QLineEdit, QVBoxLayout, QPushButton, QHBoxLayout, QDialog, QMessageBox
 from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor, QPixmap
 from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication, QEventLoop, QSize
 
@@ -3924,6 +3925,17 @@ class Movie(MovieData):
             for frame in layer.frames:
                 frame.fit_to_resolution()
 
+    def delete(self): self.rename(movie.dir + '-deleted')
+    def rename(self, new_path):
+        for f in self.export_paths():
+            if os.path.exists(f):
+                try:
+                    os.unlink(f)
+                except:
+                    pass
+        os.rename(self.dir, new_path)
+        self.dir = new_path
+
 class InsertFrameHistoryItem(HistoryItemBase):
     def __init__(self):
         HistoryItemBase.__init__(self)
@@ -4036,9 +4048,9 @@ def remove_clip():
         return # we don't remove the last clip - if we did we'd need to create a blank one,
         # which is a bit confusing. [we can't remove the last frame in a timeline, either]
     global movie
-    movie.save_before_closing()
+    movie.save_before_closing(export=False)
     movie_list.interrupt_export()
-    os.rename(movie.dir, movie.dir + '-deleted')
+    movie.delete()
     movie_list.delete_current_history()
     movie_list.reload()
 
@@ -4048,6 +4060,64 @@ def remove_clip():
     movie.edited_since_export = movie_list.export_in_progress()
     movie_list.open_history(new_clip_pos)
     movie_list.interrupt_export()
+
+class RenameDialog(QDialog):
+    def __init__(self, initial_text="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Rename clip")
+        
+        # Create main layout
+        main_layout = QVBoxLayout()
+        self.setLayout(main_layout)
+        
+        # Create line edit widget
+        self.edit_box = QLineEdit(self)
+        self.edit_box.setText(initial_text)
+        self.edit_box.selectAll()  # Select all text initially
+        
+        # Create buttons
+        button_layout = QHBoxLayout()
+        
+        self.ok_button = QPushButton("OK", self)
+        self.cancel_button = QPushButton("Cancel", self)
+        
+        # Connect buttons to slots
+        self.ok_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        
+        # Add buttons to button layout
+        button_layout.addStretch()
+        button_layout.addWidget(self.ok_button)
+        button_layout.addWidget(self.cancel_button)
+        
+        # Add widgets to main layout
+        main_layout.addWidget(self.edit_box)
+        main_layout.addLayout(button_layout)
+
+    def get_text(self):
+        return self.edit_box.text()
+
+import pathvalidate
+
+def rename_clip():
+    curr_name = os.path.basename(movie.dir)
+    done = False
+    while not done:
+        dialog = RenameDialog(curr_name, parent=widget)
+        if dialog.exec() == QDialog.Accepted:
+            try:
+                pathvalidate.validate_filename(dialog.get_text())
+            except Exception as e:
+                msg_box = QMessageBox()
+                msg_box.setWindowTitle('Invalid file name!')
+                msg_box.setText(f"'{dialog.get_text()}' is not a valid file name\n\n{e}")
+                msg_box.setStandardButtons(QMessageBox.Ok)
+                msg_box.exec()
+                continue
+
+            movie.rename(os.path.join(os.path.dirname(movie.dir), dialog.get_text()))
+            movie_list.clips[movie_list.clip_pos] = movie.dir
+        done = True
 
 def toggle_playing(): layout.toggle_playing()
 
@@ -4102,6 +4172,7 @@ FUNCTIONS = {
     'toggle-layer-lock': (toggle_layer_lock, 'l'),
     'zoom-to-film-res': (zoom_to_film_res, '1'),
     'last-paint-bucket': (PaintBucketTool.choose_last_color, 'kK'),
+    'rename-clip': (rename_clip, 'nN'),
 }
 
 tool_change = 0
@@ -4656,8 +4727,6 @@ def process_keydown_event(event):
 
 #layout.draw()
 #pygame.display.flip()
-
-export_on_exit = True
 
 class TinymationWidget(QWidget):
     def __init__(self):
