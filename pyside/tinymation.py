@@ -1082,7 +1082,7 @@ class HistoryItemBase:
             r, t = l+w, b+h
             l1, b1, r1, t1 = rect
             il, ib, ir, it = max(l,l1), max(b,b1), min(r,r1), min(t,t1)
-            if ir-il <= 0 or it-ib <= 0 or (ir-il)*(it-ib) < 0.15*(r1-l1)*(t1-b1): # undone change nearly invisible in the drawing area
+            if ir-il <= 0 or it-ib <= 0 or (ir-il)*(it-ib) < min(0.15*(r1-l1)*(t1-b1), (WIDTH*5)**2): # undone change nearly invisible in the drawing area
                 da.reset_zoom_pan_params()
                 needed_change = True
 
@@ -3353,7 +3353,7 @@ class MovieList:
         self.clips = []
         self.images = []
         single_image_height = screen.get_height() * MOVIES_Y_SHARE
-        for clipdir in get_clip_dirs():
+        for clipdir in get_clip_dirs(sort_by='st_mtime'):
             fulldir = os.path.join(WD, clipdir)
             frame_file = os.path.join(fulldir, CURRENT_FRAME_FILE)
             image = load_image(frame_file) if os.path.exists(frame_file) else new_frame()
@@ -3361,7 +3361,7 @@ class MovieList:
             # TODO: avoid reloading images if the file didn't change since the last time
             self.images.append(scale_image(image, height=single_image_height))
             self.clips.append(fulldir)
-        self.clip_pos = 0 
+        self.clip_pos = [i for i,clip in enumerate(self.clips) if clip == movie.dir][0]
     def open_clip(self, clip_pos):
         if clip_pos == self.clip_pos:
             return
@@ -3419,6 +3419,13 @@ class MovieList:
 
         self.exporting_processes = {}
 
+# 2 questions for a movie list:
+# 1. ordering - why by creation date and not by last modification date?
+#    since we open the last edited clip upon program start, it seems that you wouldn't mind by-creation ordering very much
+#    (you don't often interleave work on several clips created far apart)
+#    on the other hand, ordering by last modification has a clear downside manifesting all the time, namely, the order
+#    changes all the time which is annoying (you remember where things were and now they all moved.)
+# 2. 
 class MovieListArea(LayoutElemBase):
     def init(self):
         self.show_pos = None
@@ -4175,7 +4182,7 @@ class Palette:
 
 palette = Palette('palette.png')
 
-def get_clip_dirs():
+def get_clip_dirs(sort_by): # sort_by is a stat struct attribute (st_something)
     '''returns the clip directories sorted by last modification time (latest first)'''
     wdfiles = os.listdir(WD)
     clipdirs = {}
@@ -4183,9 +4190,9 @@ def get_clip_dirs():
         try:
             if d.endswith('-deleted'):
                 continue
-            frame_order_file = os.path.join(os.path.join(WD, d), CLIP_FILE)
+            frame_order_file = os.path.join(os.path.join(WD, d), CURRENT_FRAME_FILE)
             s = os.stat(frame_order_file)
-            clipdirs[d] = s.st_mtime
+            clipdirs[d] = getattr(s, sort_by)
         except:
             continue
 
@@ -4300,7 +4307,7 @@ def init_layout():
 def new_movie_clip_dir(): return os.path.join(WD, format_now())
 
 def default_clip_dir():
-    clip_dirs = get_clip_dirs() 
+    clip_dirs = get_clip_dirs(sort_by='st_mtime')
     if not clip_dirs:
         # first clip - create a new directory
         return new_movie_clip_dir(), True
@@ -4310,6 +4317,7 @@ def default_clip_dir():
 def load_clips_dir():
     movie_dir, is_new_dir = default_clip_dir()
     global movie
+    print('opening movie from dir', movie_dir)
     movie = Movie(movie_dir) if is_new_dir else open_movie_with_progress_bar(movie_dir)
     movie.edited_since_export = is_new_dir
 
