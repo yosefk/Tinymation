@@ -715,7 +715,7 @@ import shutil
 pg = pygame
 pg.init()
 
-from PySide6.QtWidgets import QApplication, QWidget, QFileDialog, QLineEdit, QVBoxLayout, QPushButton, QHBoxLayout, QDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QWidget, QFileDialog, QLineEdit, QVBoxLayout, QPushButton, QHBoxLayout, QDialog, QMessageBox, QColorDialog
 from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor, QPixmap
 from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication, QEventLoop, QSize
 
@@ -1229,6 +1229,7 @@ class LayoutElemBase:
     def __init__(self): self.redraw = True
     def init(self): pass
     def hit(self, x, y): return True
+    def modify(self): pass
     def draw(self): pass
     def on_mouse_down(self, x, y): pass
     def on_mouse_move(self, x, y): pass
@@ -1623,9 +1624,10 @@ class PaintBucketTool(Button):
     def choose_last_color():
         set_tool(PaintBucketTool.color2tool[PaintBucketTool.last_color])
 
-    def __init__(self,color):
+    def __init__(self,color,change_color=None):
         Button.__init__(self)
         self.color = color
+        self.change_color = change_color
         self.px = None
         self.py = None
         self.bboxes = []
@@ -1700,6 +1702,18 @@ class PaintBucketTool(Button):
             history.append_item(self.history_item)
         self.history_item = None
         self.pen_mask = None
+    def modify(self):
+        if self.change_color is None:
+            return
+        widget.setEnabled(False)
+        try:
+            color = QColorDialog.getColor(QColor(*self.color), options=QColorDialog.DontUseNativeDialog | QColorDialog.ShowAlphaChannel)
+            if color.isValid():
+                self.color = color.toTuple()
+                layout.full_tool.cursor = self.change_color(self.color)
+                return True
+        finally:
+            widget.setEnabled(True)
 
 NO_PATH_DIST = 10**6
 
@@ -2021,8 +2035,8 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
 last_skeleton = None
 
-def ctrl_is_pressed():
-    return QGuiApplication.queryKeyboardModifiers() & Qt.ControlModifier
+def ctrl_is_pressed(): return QGuiApplication.queryKeyboardModifiers() & Qt.ControlModifier
+def shift_is_pressed(): return QGuiApplication.queryKeyboardModifiers() & Qt.ShiftModifier
 
 class FlashlightTool(Button):
     def __init__(self):
@@ -3315,6 +3329,10 @@ class ProgressBar:
         margin = WIDTH
         self.outer_rect = (left-margin, bottom-margin, width+margin*2, height+margin*2)
         self.draw()
+        widget.setEnabled(False) # this works better than processEvents(QEventLoop.ExcludeUserInputEvents)
+        # which queues the events and then you get them after the progress bar rendering is done
+    def __del__(self):
+        widget.setEnabled(True)
     def on_progress(self, done, total):
         self.done = done
         self.total = total
@@ -3328,16 +3346,9 @@ class ProgressBar:
         text_surface = font.render(self.title, True, UNUSED)
         pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
         screen.blit(text_surface, pos)
-            
+
         widget.redrawScreen()
-        # this is arguably better than just calling processEvents and letting the user eg draw on the frame
-        # which will be soon replaced by another and not saved, while messing up the UI due to redrawing not being
-        # designed for this case etc. this is arguably still not great because the events are queued rather than
-        # dropped and then after the progress bar is done, we get "delayed action", which teaches kids the sad lesson
-        # that you shouldn't interact with a busy computer in the usual arguably too-harsh way. however to do this "right"
-        # is not easy (eg if you had a mouse-down event you probably don't want to drop the mouse-up event when you're
-        # in the progress bar?.. what other nasty cases can there be?..)
-        QCoreApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        QCoreApplication.processEvents()
 
 def open_movie_with_progress_bar(clipdir):
     progress_bar = ProgressBar('Loading...')
@@ -3518,6 +3529,12 @@ class ToolSelectionButton(LayoutElemBase):
     def hit(self,x,y): return self.tool.tool.hit(x,y,self.rect)
     def on_mouse_down(self,x,y):
         set_tool(self.tool)
+        if shift_is_pressed():
+            layout.draw()
+            widget.redrawScreen()
+            if self.tool.tool.modify():
+                set_tool(self.tool)
+                self.tool.tool.button_surface = None # update from the new icon
     def on_mouse_up(self,x,y): pass
     def on_mouse_move(self,x,y): pass
 
@@ -3541,7 +3558,11 @@ class TogglePlaybackButton(Button):
     def on_mouse_up(self,x,y): pass
     def on_mouse_move(self,x,y): pass
 
-Tool = collections.namedtuple('Tool', ['tool', 'cursor', 'chars'])
+class Tool:
+    def __init__(self, tool, cursor, chars):
+        self.tool = tool
+        self.cursor = cursor
+        self.chars = chars
 
 class Movie(MovieData):
     def __init__(self, dir, progress=default_progress_callback):
@@ -4102,22 +4123,26 @@ import pathvalidate
 def rename_clip():
     curr_name = os.path.basename(movie.dir)
     done = False
-    while not done:
-        dialog = RenameDialog(curr_name, parent=widget)
-        if dialog.exec() == QDialog.Accepted:
-            try:
-                pathvalidate.validate_filename(dialog.get_text())
-            except Exception as e:
-                msg_box = QMessageBox()
-                msg_box.setWindowTitle('Invalid file name!')
-                msg_box.setText(f"'{dialog.get_text()}' is not a valid file name\n\n{e}")
-                msg_box.setStandardButtons(QMessageBox.Ok)
-                msg_box.exec()
-                continue
+    widget.setEnabled(False)
+    try:
+        while not done:
+            dialog = RenameDialog(curr_name, parent=widget)
+            if dialog.exec() == QDialog.Accepted:
+                try:
+                    pathvalidate.validate_filename(dialog.get_text())
+                except Exception as e:
+                    msg_box = QMessageBox()
+                    msg_box.setWindowTitle('Invalid file name!')
+                    msg_box.setText(f"'{dialog.get_text()}' is not a valid file name\n\n{e}")
+                    msg_box.setStandardButtons(QMessageBox.Ok)
+                    msg_box.exec()
+                    continue
 
-            movie.rename(os.path.join(os.path.dirname(movie.dir), dialog.get_text()))
-            movie_list.clips[movie_list.clip_pos] = movie.dir
-        done = True
+                movie.rename(os.path.join(os.path.dirname(movie.dir), dialog.get_text()))
+                movie_list.clips[movie_list.clip_pos] = movie.dir
+            done = True
+    finally:
+        widget.setEnabled(True)
 
 def toggle_playing(): layout.toggle_playing()
 
@@ -4237,19 +4262,28 @@ class Palette:
 
         self.init_cursors()
 
+    def bucket(self,color):
+        radius = PAINT_BUCKET_WIDTH//2
+        return add_circle(color_image(paint_bucket_cursor[0], color), radius)
+
     def init_cursors(self):
         radius = PAINT_BUCKET_WIDTH//2
-        def bucket(color): return add_circle(color_image(paint_bucket_cursor[0], color), radius)
-
         self.cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
         for row in range(self.rows):
             for col in range(self.columns):
-                sc = bucket(self.colors[row][col])
-                self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], self.colors[row][col]))
+                self.change_color(row, col, self.colors[row][col])
 
-        sc = bucket(self.bg_color)
+        sc = self.bucket(self.bg_color)
         cursor = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], self.bg_color))
         self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width()))
+        
+    def change_color_func(self, r, c): return lambda color: self.change_color(r, c, color)
+    def change_color(self, row, col, color):
+        radius = PAINT_BUCKET_WIDTH//2
+        self.colors[row][col] = color
+        sc = self.bucket(color)
+        self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], color))
+        return self.cursors[row][col]
 
 palette = Palette('palette.png')
 
@@ -4353,7 +4387,8 @@ def init_layout():
                 else:
                     continue
             if not tool:
-                tool = Tool(PaintBucketTool(palette.colors[len(palette.colors)-row-1][col]), palette.cursors[len(palette.colors)-row-1][col], '')
+                r = len(palette.colors)-row-1
+                tool = Tool(PaintBucketTool(palette.colors[r][col], palette.change_color_func(r,col)), palette.cursors[r][col], '')
             if isinstance(tool.tool, PaintBucketTool):
                 PaintBucketTool.color2tool[tool.tool.color] = tool
             layout.add((TOOLBAR_X_START+x,y,color_w,color_w), ToolSelectionButton(tool))
@@ -4388,7 +4423,6 @@ def default_clip_dir():
 def load_clips_dir():
     movie_dir, is_new_dir = default_clip_dir()
     global movie
-    print('opening movie from dir', movie_dir)
     movie = Movie(movie_dir) if is_new_dir else open_movie_with_progress_bar(movie_dir)
     movie.edited_since_export = is_new_dir
 
@@ -4610,7 +4644,7 @@ def export_and_open_explorer():
     open_explorer(movie.gif_path())
 
 def open_dir_path_dialog():
-    dialog = QFileDialog(widget)
+    dialog = QFileDialog()
     dialog.setFileMode(QFileDialog.Directory)
     dialog.setViewMode(QFileDialog.Detail)
     dialog.setAcceptMode(QFileDialog.AcceptOpen)
@@ -4618,9 +4652,17 @@ def open_dir_path_dialog():
     dialog.setLabelText(QFileDialog.LookIn, '')
     dialog.setLabelText(QFileDialog.FileType, '')
     dialog.setWindowTitle('Open a folder with zero or more Tinymation clips')
-    if dialog.exec():
-        fileNames = dialog.selectedFiles()
-        return fileNames[0]
+
+    # setEnabled(False) keeps mouse events from getting to the main window (with modality/
+    # other we keep getting mouse events though not keyboard events, setEnabled is the only thing
+    # that seems to block it; no parent widget set for the dialog or setEnabled(False) disables the dialog, too
+    widget.setEnabled(False)
+    try:
+        if dialog.exec():
+            fileNames = dialog.selectedFiles()
+            return fileNames[0]
+    finally:
+        widget.setEnabled(True)
 
 def open_clip_dir():
     file_path = open_dir_path_dialog()
@@ -4645,6 +4687,7 @@ def process_keyup_event(event):
         try_set_cursor(layout.full_tool.cursor[0])
         needle_cursor_selected = False
 
+# TODO: proper test for modifiers; less use of Ctrl
 def process_keydown_event(event):
     ctrl = event.modifiers() & Qt.ControlModifier
     shift = event.modifiers() & Qt.ShiftModifier
