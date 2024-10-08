@@ -4560,11 +4560,17 @@ for i,event in enumerate(interesting_events):
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard
 
+def set_clipboard_image(surface):
+  image = QImage(QSize(surface.get_width(), surface.get_height()), QImage.Format_ARGB32)
+  pgsurf2qtimage(surface, image)
+  QApplication.clipboard().setPixmap(QPixmap.fromImage(image))
+
 cut_frame_content = None
 
 def copy_frame():
     global cut_frame_content
     cut_frame_content = movie.curr_frame().get_content()
+    set_clipboard_image(movie.curr_frame().surface())
 
 def cut_frame():
     history_item = HistoryItemSet([HistoryItem('color'), HistoryItem('lines')])
@@ -4572,6 +4578,7 @@ def cut_frame():
     global cut_frame_content
     frame = movie.edit_curr_frame()
     cut_frame_content = frame.get_content()
+    set_clipboard_image(frame.surface())
     frame.clear()
 
     history_item.optimize()
