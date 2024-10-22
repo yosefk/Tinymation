@@ -1,5 +1,5 @@
-#include "f2c.h"
 #include <vector>
+#include "f2c.h"
 
 int splev_(doublereal *t, integer *n, doublereal *c__, 
 	integer *k, doublereal *x, doublereal *y, integer *m, integer *ier);

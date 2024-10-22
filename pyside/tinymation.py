@@ -5,6 +5,7 @@ from PySide6.QtGui import QImage
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pygame version
 
 on_windows = os.name == 'nt'
+on_linux = sys.platform == 'linux'
 
 # a hack for pyinstaller - when we spawn a subprocess in python, we pass sys.executable
 # and sys.argv[0] as the command line and python then hides its own executable from the sys.argv
@@ -178,9 +179,13 @@ def new_frame():
 def load_image(fname):
     s = pg.image.load(fname)
     # surfaces loaded from file have a different RGB/BGR layout - normalize it
-    ret = pg.Surface((s.get_width(), s.get_height()), pg.SRCALPHA)
-    pg.surfarray.pixels3d(ret)[:] = pg.surfarray.pixels3d(s)
-    pg.surfarray.pixels_alpha(ret)[:] = pg.surfarray.pixels_alpha(s)
+    # FIXME: why do we need try/except?..
+    try:
+        ret = pg.Surface((s.get_width(), s.get_height()), pg.SRCALPHA)
+        pg.surfarray.pixels3d(ret)[:] = pg.surfarray.pixels3d(s)
+        pg.surfarray.pixels_alpha(ret)[:] = pg.surfarray.pixels_alpha(s)
+    except:
+        return ret
     return ret
 
 class Frame:
@@ -429,6 +434,8 @@ class MovieData:
             self.loaded_zoom_center = clip.get('zoom_center', [0, 0])
 
     def restore_viewing_params(self):
+        if getattr(self, 'loaded_zoom', None) is None:
+            return
         da = layout.drawing_area()
         da.set_zoom(self.loaded_zoom)
         da.set_xyoffset(*self.loaded_xyoffset)
@@ -437,7 +444,10 @@ class MovieData:
             layout.timeline_area().on_light_table = self.loaded_on_light_table
 
     def save_meta(self):
-        da = layout.drawing_area()
+        try:
+            da = layout.drawing_area()
+        except:
+            return
         clip = {
             'resolution':[IWIDTH, IHEIGHT],
             'frame_pos':self.pos,
@@ -604,8 +614,9 @@ def export(clipdir):
         # that can be converted into any format, including transparent GIF/WebP/APNG. someone who just wants to get a GIF to upload is probably better
         # served by a WYSIWYG non-transparent GIF with the same background color they see when viewing the clip in Tinymation
  
-        # FIXME Windows, proper path
-        os.system(f'../gifski/gifski-linux --width 1920 -r {FRAME_RATE} --quiet {movie.png_wildcard()+opaque_ext} --output {movie.gif_path()}')
+        # FIXME proper path
+        gifski = '..\\gifski\\gifski-win.exe' if on_windows else '../gifski/gifski-linux'
+        os.system(f'{gifski} --width 1920 -r {FRAME_RATE} --quiet {movie.png_wildcard()+opaque_ext} --output {movie.gif_path()}')
  
     finally:
         # remove the non-transparent PNGs created for GIF generation
@@ -978,7 +989,7 @@ def surf2cursor(surface, hotx, hoty):
   pixmap = QPixmap.fromImage(image)
   return QCursor(pixmap, hotX=hotx, hotY=hoty)
 
-def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=192, edit=lambda x: x, hot_spot_offset=(0,0)):
+def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=255 if on_linux else 192, edit=lambda x: x, hot_spot_offset=(0,0)):
   surface = load_image(file)
   surface = scale_image(surface, size, size*surface.get_height()/surface.get_width())#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
@@ -1011,12 +1022,12 @@ eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5), edit
 eraser_medium_cursor = (eraser_medium_cursor[0], eraser_cursor[1])
 eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2), edit=lambda s: add_circle(s, BIG_ERASER_WIDTH//2), hot_spot_offset=(BIG_ERASER_WIDTH//2,-BIG_ERASER_WIDTH//2))
 eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
-flashlight_cursor = load_cursor('flashlight.png')
-flashlight_cursor = (flashlight_cursor[0], load_image('flashlight-tool.png')) 
+needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE*2))
+flashlight_cursor = needle_cursor
+flashlight_cursor = (flashlight_cursor[0], load_image('needle-tool.png')) 
 paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], load_image('bucket-tool.png'))
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
-needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE*2))
 zoom_cursor = load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*2))
 pan_cursor = load_cursor('pan.png', hot_spot=(0.5, 0.5), size=int(CURSOR_SIZE*2))
 finger_cursor = load_cursor('finger.png', hot_spot=(0.85, 0.17))
@@ -1278,6 +1289,17 @@ def curr_layer_locked():
         layout.drawing_area().fade_per_frame = 192/(FADING_RATE*3)
     return effectively_locked
 
+def find_nearest(array, center_x, center_y, value):
+    '''Find the coordinates of the element having the given value that is closest to the given center point.'''
+    ones_coords = np.where(array == value)
+    if len(ones_coords[0]) == 0:
+        return None
+    points = np.column_stack(ones_coords)
+    distances = np.sqrt((points[:, 0] - center_x)**2 + 
+                       (points[:, 1] - center_y)**2)
+    nearest_idx = np.argmin(distances)
+    return tuple(points[nearest_idx])
+
 class PenTool(Button):
     def __init__(self, eraser=False, width=WIDTH):
         Button.__init__(self)
@@ -1302,9 +1324,32 @@ class PenTool(Button):
         color = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
         color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color)
         assert color_width == width and color_height == height
-        new_color_value = make_color_int(self.bucket_color if self.bucket_color else (0,0,0,0), bgr)
+        # the RGB values of transparent colors can actually matter in some (stupid) contexts - pasting into
+        # some apps with no transparency support exposes these RGB values...
+        # TODO: make sure we fill with BACKGROUND in all flows
+        new_color_value = make_color_int(self.bucket_color if self.bucket_color else BACKGROUND+(0,), bgr)
 
         tinylib.brush_flood_fill_color_based_on_mask(self.brush, color_ptr, mask_ptr, color_stride, mask_stride, 0, flood_code, new_color_value)
+
+    def find_bucket_color(self, x, y):
+        w = 10
+        h = 10
+        while True:
+            area = max(0, round(x-w/2)), max(0, round(y-h/2)), min(IWIDTH, round(x+w/2)), min(IHEIGHT, round(y+h/2))
+            if area == (0, 0, IWIDTH, IHEIGHT):
+                break
+            l,b,r,t = area
+            tdiff()
+            nearest_fully_transparent = find_nearest(self.lines_array[l:r,b:t], x, y, 0)
+            if nearest_fully_transparent is None:
+                # no transparent pixels found - search in a larger area (we could just search the entire
+                # image but it would be slower)
+                w *= 2
+                h *= 2
+                continue
+            nx, ny = nearest_fully_transparent
+            self.bucket_color = movie.curr_frame().surf_by_id('color').get_at((nx+l,ny+b))
+            break
 
     def init_brush(self, x, y, smoothDist=0):
         ptr, ystride, width, height = greyscale_c_params(self.lines_array)
@@ -1328,6 +1373,7 @@ class PenTool(Button):
         self.init_brush(cx, cy, smoothDist=20)
         if self.eraser:
             self.pen_mask = self.lines_array == 255
+            self.find_bucket_color(cx, cy)
             self.brush_flood_fill_color_based_on_mask()
 
         self.new_history_item()
@@ -1446,11 +1492,6 @@ class PenTool(Button):
             pen_move_timer.stop()
             return
 
-        if self.eraser and self.bucket_color is None:
-            nx, ny = round(cx), round(cy)
-            if nx>=0 and ny>=0 and nx<self.lines_array.shape[0] and ny<self.lines_array.shape[1] and self.lines_array[nx,ny] == 0:
-                self.bucket_color = movie.edit_curr_frame().surf_by_id('color').get_at((nx,ny))
-                self.brush_flood_fill_color_based_on_mask()
         self.points.append((cx,cy))
 
         if self.prev_drawn:
@@ -2603,6 +2644,8 @@ class DrawingArea(LayoutElemBase):
         sub = self.subsurface.subsurface(trimmed_roi)
 
         other_layers_roi = trim(trimmed_roi[0] - full_starting_point[0], trimmed_roi[1] - full_starting_point[1], trimmed_roi[2], trimmed_roi[3], bottom)
+        # printout for the bug where the top surface doesn't contain other_layers_roi
+        #print(bottom.get_rect(),top.get_rect(),other_layers_roi)
         sub.blit(bottom.subsurface(other_layers_roi), (0,0)) 
         sub.blit(scaled_layer.subsurface(trim(xoft - (roi[0] - trimmed_roi[0]), yoft - (roi[1] - trimmed_roi[1]), roi[2], roi[3], scaled_layer)), (0,0))
         sub.blit(top.subsurface(other_layers_roi), (0,0)) 
@@ -3373,7 +3416,7 @@ class MovieList:
             # TODO: avoid reloading images if the file didn't change since the last time
             self.images.append(scale_image(image, height=single_image_height))
             self.clips.append(fulldir)
-        self.clip_pos = [i for i,clip in enumerate(self.clips) if clip == movie.dir][0]
+        self.clip_pos = 0#[i for i,clip in enumerate(self.clips) if clip == movie.dir][0]
     def open_clip(self, clip_pos):
         if clip_pos == self.clip_pos:
             return
@@ -4225,6 +4268,9 @@ def color_image(s, rgba):
     if rgba[-1] == 0:
         alphas = pg.surfarray.pixels_alpha(sc)
         alphas[:] = np.minimum(alphas[:], 255 - pixels[:,:,0])
+    #if rgba[-1] < 255:
+    #    alphas = pg.surfarray.pixels_alpha(sc)
+    #    alphas[:] = alphas * (alphas<255) + rgba[-1] * (alphas==255)#np.minimum(alphas[:], 255 - pixels[:,:,0])
     return sc
 
 class Palette:
@@ -4782,12 +4828,9 @@ class TinymationWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
-        self.eraser = False
-        self.lineWidth = 2.5
 
     def initUI(self):
         self.setWindowTitle('Tinymation')
-        self.showFullScreen()
         
         # Get the size of the primary screen
         scr = QGuiApplication.primaryScreen().geometry()
@@ -4798,6 +4841,8 @@ class TinymationWidget(QWidget):
         self.sz = scr.size()
         self.image.fill(Qt.black)
         pgsurf2qtimage(screen, self.image)
+
+        self.showFullScreen()
         
         # Enable tablet tracking
         #self.setAttribute(Qt.WidgetAttribute.WA_TabletTracking)
