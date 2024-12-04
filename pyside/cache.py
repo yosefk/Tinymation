@@ -30,7 +30,7 @@ class CachedItem:
         is created computing a different key because the movie was edited,
         you'll get a cache miss as expected.
         '''
-        return {}, None
+        return (tuple(),)
 
     def compute_value(self):
         '''returns the value - used upon cache miss. note that CachedItems
@@ -96,8 +96,10 @@ class Cache:
 
     def _has_room_for(self, size):
         '''evicts the least recently used item until there's enough room'''
+        if size >= MAX_CACHE_BYTE_SIZE:
+           return False # don't evict stuff to fit something that can never fit anyway (notably unknown type)
         while self.cache_size + size > MAX_CACHE_BYTE_SIZE or len(self.key2value) > MAX_CACHED_ITEMS-1:
-            if not self.key2value: # nothing to pop - must be trying to cache a giant item
+            if not self.key2value: # nothing left to evict...
                 return False
             key, value = self.key2value.popitem(last=False)
             self.cache_size -= self._size(value)
@@ -134,6 +136,30 @@ class Cache:
 # tests
 #######
 
+# we mainly test that the cache actually caches, stays below the size limits using LRU eviction,
+# and collects garbage using the ID to version mapping.
+
+def test_default_cached_item():
+    cache = Cache()
+    item = CachedItem()
+    k, v = cache.fetch_kv(item)
+    assert v is None
+    k, v = cache.fetch_kv(item)
+    assert v is None
+    assert cache.cached_items() == 1
+    assert cache.cached_bytes() == 0
+
+def test_unknown_value_type():
+    cache = Cache()
+    class Item(CachedItem):
+        def compute_key(self): return (('unique',0),)
+        def compute_value(self): return 'unknown type'
+    cache.fetch(CachedItem())
+    assert cache.cached_items() == 1
+    for i in range(3):
+        cache.fetch(Item())
+        assert cache.cached_items() == 1 # make sure we haven't evicted our previous item
+
 def test_cache_size_limits():
     limits = ((10300, 200, 10000, 25), (10300, 15, 6000, 15), (10, 10, 0, 0), (10000, 0, 0, 0))
     class Value: pass
@@ -168,3 +194,41 @@ def test_cache_size_limits():
 
     MAX_CACHED_ITEMS, MAX_CACHE_BYTE_SIZE = orig
     
+def test_garbage_collection():
+    class Value: pass
+    value = Value()
+    value.shape = [40, 10]
+    cache = Cache()
+    for i in range(5):
+        for vals in range(1,5):
+            for u in range(2):
+                class CachedItem:
+                    def compute_key(_): return (tuple([(v,i) for v in range(vals)]),u)
+                    def compute_value(_): return value
+                k, v = cache.fetch_kv(CachedItem())
+    cache.update_id(0,3)
+    cache.update_id(1,3)
+    cache.update_id(2,3)
+    cache.collect_garbage() # this should delete everything with ID 3 (which unlike 0, 1 and 2 has no version
+    # set for it by update_id()), as well as everything with version < 3 (which is now the version of IDs 0, 1 and 2)
+    for ((id2version, _), _) in cache.key2value.keys():
+        for id, version in id2version:
+            assert id in [0,1,2]
+            assert version >= 3
+    assert cache.cached_items() == 12
+
+    cache.update_id(2,4)
+    cache.collect_garbage()
+    for ((id2version, _), _) in cache.key2value.keys():
+        for id, version in id2version:
+            assert id != 2 or version == 4
+    assert cache.cached_items() == 10
+
+    cache.delete_id(2)
+    cache.delete_id(1)
+    cache.collect_garbage()
+    for ((id2version, _), _) in cache.key2value.keys():
+        for id, version in id2version:
+            assert id == 0
+    assert cache.cached_items() == 4
+
