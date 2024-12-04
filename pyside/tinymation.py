@@ -34,13 +34,12 @@ if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
 # we wait for all the exporting to finish so the user knows all the exported
 # data is ready upon exiting)
 
-import collections
 import signal
 import uuid
 import json
 
-IWIDTH = 1920
-IHEIGHT = 1080
+import res
+
 FRAME_RATE = 12
 CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
 # makes the png the image inside the directory icon displayed in Explorer... which is nice
@@ -49,129 +48,20 @@ CURRENT_FRAME_FILE = 'current_frame.png'
 BACKGROUND = (240, 235, 220)
 PEN = (20, 20, 20)
 
-class CachedItem:
-    def compute_key(self):
-        '''a key is a tuple of:
-        1. a list of tuples mapping IDs to versions. a cached item referencing
-        unknown IDs or IDs with old versions is eventually garbage-collected
-        2. any additional info making the key unique.
-        
-        compute_key returns the key computed from the current system state.
-        for example, CachedThumbnail(pos=5) might return a dictionary mapping
-        the IDs of frames making up frame 5 in every layer, and the string
-        "thumbnail." The number 5 is not a part of the key; if frame 6
-        is made of the same frames in every layer, CachedThumbnail(pos=6)
-        will compute the same key. If in the future a CachedThumbnail(pos=5)
-        is created computing a different key because the movie was edited,
-        you'll get a cache miss as expected.
-        '''
-        return {}, None
-
-    def compute_value(self):
-        '''returns the value - used upon cached miss. note that CachedItems
-        are not kept in the cache themselves - only the keys and the values.'''
-        return None
-
-# there are 2 reasons to evict a cached item:
-# * no more room in the cache - evict the least recently used items until there's room
-# * the cached item has no chance to be useful - eg it was computed from a deleted or
-#   since-edited frame - this is done by collect_garbage() and assisted by update_id()
-#   and delete_id()
-class Cache:
-    class Miss:
-        pass
-    MISS = Miss()
-    def __init__(self):
-        self.key2value = collections.OrderedDict()
-        self.id2version = {}
-        self.debug = False
-        self.gc_iter = 0
-        self.last_check = {}
-        # these are per-gc iteration counters
-        self.computed_bytes = 0
-        self.cached_bytes = 0
-        # sum([self.size(value) for value in self.key2value.values()])
-        self.cache_size = 0
-        self.locked = False
-    def size(self,value):
-        try:
-            # surface
-            return value.get_width() * value.get_height() * 4
-        except:
-            try:
-                # numpy array
-                return reduce(lambda x,y: x*y, value.shape)
-            except:
-                return 0
-    def lock(self): self.locked = True
-    def unlock(self): self.locked = False
-    def fetch(self, cached_item): return self.fetch_kv(cached_item)[1]
-    def fetch_kv(self, cached_item):
-        key = (cached_item.compute_key(), (IWIDTH, IHEIGHT))
-        value = self.key2value.get(key, Cache.MISS)
-        if value is Cache.MISS:
-            value = cached_item.compute_value()
-            vsize = self.size(value)
-            self.computed_bytes += vsize
-            if self.locked:
-                return key[0], value
-            self.cache_size += vsize
-            self._evict_lru_as_needed()
-            self.key2value[key] = value
-        else:
-            self.key2value.move_to_end(key)
-            self.cached_bytes += self.size(value)
-            if self.debug and self.last_check.get(key, 0) < self.gc_iter:
-                # slow debug mode
-                ref = cached_item.compute_value()
-                if not np.array_equal(pg.surfarray.pixels3d(ref), pg.surfarray.pixels3d(value)) or not np.array_equal(pg.surfarray.pixels_alpha(ref), pg.surfarray.pixels_alpha(value)):
-                    print('HIT BUG!',key)
-                self.last_check[key] = self.gc_iter
-        return key[0], value
-
-    def _evict_lru_as_needed(self):
-        while self.cache_size > MAX_CACHE_BYTE_SIZE or len(self.key2value) > MAX_CACHED_ITEMS:
-            key, value = self.key2value.popitem(last=False)
-            self.cache_size -= self.size(value)
-
-    def update_id(self, id, version):
-        self.id2version[id] = version
-    def delete_id(self, id):
-        if id in self.id2version:
-            del self.id2version[id]
-    def stale(self, key):
-        id2version, _ = key[0]
-        for id, version in id2version:
-            current_version = self.id2version.get(id)
-            if current_version is None or version < current_version:
-                #print('stale',id,version,current_version)
-                return True
-        return False
-    def collect_garbage(self):
-        orig = len(self.key2value)
-        orig_size = self.cache_size
-        for key, value in list(self.key2value.items()):
-            if self.stale(key):
-                del self.key2value[key]
-                self.cache_size -= self.size(value)
-        #print('gc',orig,orig_size,'->',len(self.key2value),self.cache_size,'computed',self.computed_bytes,'cached',self.cached_bytes,tdiff())
-        self.gc_iter += 1
-        self.computed_bytes = 0
-        self.cached_bytes = 0
-
+from cache import Cache, CachedItem
 cache = Cache()
 
 def fit_to_resolution(surface):
     w,h = surface.get_width(), surface.get_height()
-    if w == IWIDTH and h == IHEIGHT:
+    if w == res.IWIDTH and h == res.IHEIGHT:
         return surface
-    elif w == IHEIGHT and h == IWIDTH:
+    elif w == res.IHEIGHT and h == res.IWIDTH:
         return pg.transform.rotate(surface, 90 * (1 if w>h else -1)) 
     else:
         return pg.transform.smoothscale(surface, (w, h))
 
 def new_frame():
-    frame = pygame.Surface((IWIDTH, IHEIGHT), pygame.SRCALPHA)
+    frame = pygame.Surface((res.IWIDTH, res.IHEIGHT), pygame.SRCALPHA)
     frame.fill(BACKGROUND)
     pg.surfarray.pixels_alpha(frame)[:] = 0
     return frame
@@ -259,8 +149,8 @@ class Frame:
         cache.update_id(self.cache_id(), self.version)
 
     def surf_ids(self): return ['lines','color']
-    def get_width(self): return IWIDTH
-    def get_height(self): return IHEIGHT
+    def get_width(self): return res.IWIDTH
+    def get_height(self): return res.IHEIGHT
     def get_rect(self): return empty_frame().color.get_rect()
 
     def surf_by_id(self, surface_id):
@@ -333,7 +223,7 @@ class Frame:
 _empty_frame = Frame('')
 def empty_frame():
     global _empty_frame
-    if not _empty_frame.empty() and (_empty_frame.color.get_width() != IWIDTH or _empty_frame.color.get_height() != IHEIGHT):
+    if not _empty_frame.empty() and (_empty_frame.color.get_width() != res.IWIDTH or _empty_frame.color.get_height() != res.IHEIGHT):
         _empty_frame = Frame('')
     _empty_frame._create_surfaces_if_needed()
     return _empty_frame
@@ -391,16 +281,15 @@ class MovieData:
         else:
             with open(os.path.join(dir, CLIP_FILE), 'r') as clip_file:
                 clip = json.loads(clip_file.read())
-            global IWIDTH, IHEIGHT
 
-            movie_width, movie_height = clip.get('resolution',(IWIDTH,IHEIGHT))
+            movie_width, movie_height = clip.get('resolution',(res.IWIDTH,res.IHEIGHT))
             frame_ids = clip['frame_order']
             layer_ids = clip['layer_order']
             holds = clip['hold']
             visible = clip.get('layer_visible', [True]*len(layer_ids))
             locked = clip.get('layer_locked', [False]*len(layer_ids))
 
-            IWIDTH, IHEIGHT = movie_width, movie_height
+            res.set_resolution(movie_width, movie_height)
 
             done = 0
             total = len(layer_ids) * len(frame_ids)
@@ -449,7 +338,7 @@ class MovieData:
         except:
             return
         clip = {
-            'resolution':[IWIDTH, IHEIGHT],
+            'resolution':[res.IWIDTH, res.IHEIGHT],
             'frame_pos':self.pos,
             'layer_pos':self.layer_pos,
             'frame_order':[frame.id for frame in self.frames],
@@ -490,9 +379,9 @@ class MovieData:
 
     def _blit_layers(self, layers, pos, transparent=False, include_invisible=False, width=None, height=None, roi=None, inv_scale=None):
         if not inv_scale:
-            if not width: width=IWIDTH
-            if not height: height=IHEIGHT
-        if not roi: roi = (0, 0, IWIDTH, IHEIGHT)
+            if not width: width=res.IWIDTH
+            if not height: height=res.IHEIGHT
+        if not roi: roi = (0, 0, res.IWIDTH, res.IHEIGHT)
         s = pygame.Surface((width if width else round(roi[2]*inv_scale), height if height else round(roi[3]*inv_scale)), pygame.SRCALPHA)
         if not transparent:
             s.fill(BACKGROUND)
@@ -500,7 +389,7 @@ class MovieData:
         for layer in layers:
             if not layer.visible and not include_invisible:
                 continue
-            if width==IWIDTH and height==IHEIGHT and roi==(0,0,IWIDTH,IHEIGHT):
+            if width==res.IWIDTH and height==res.IHEIGHT and roi==(0,0,res.IWIDTH,res.IHEIGHT):
                 f = layer.frame(pos)
                 surfaces.append(f.surf_by_id('color'))
                 surfaces.append(f.surf_by_id('lines'))
@@ -568,7 +457,7 @@ def export(clipdir):
     assert FRAME_RATE==12
     opaque_ext = '.opaque.png'
     try:
-        with MP4(movie.mp4_path(), IWIDTH, IHEIGHT, fps=24) as mp4_writer:
+        with MP4(movie.mp4_path(), res.IWIDTH, res.IHEIGHT, fps=24) as mp4_writer:
             for i in range(len(movie.frames)):
                 for layer in movie.layers:
                     layer.frame(i).read_pixels()
@@ -576,7 +465,7 @@ def export(clipdir):
 
                 frame = movie._blit_layers(movie.layers, i)
                 transparent_frame = movie._blit_layers(movie.layers, i, transparent=True)
-                frame = pg.Surface((IWIDTH, IHEIGHT), pg.SRCALPHA)
+                frame = pg.Surface((res.IWIDTH, res.IHEIGHT), pg.SRCALPHA)
                 frame.fill(BACKGROUND)
                 frame.blit(transparent_frame, (0,0))
 
@@ -773,8 +662,6 @@ BIG_ERASER_WIDTH = 20*WIDTH
 PAINT_BUCKET_WIDTH = 3*WIDTH
 CURSOR_SIZE = int(screen.get_width() * 0.055)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
-MAX_CACHE_BYTE_SIZE = 1*1024**3
-MAX_CACHED_ITEMS = 2000
 
 print('clips read from, and saved to',WD)
 
@@ -1127,7 +1014,7 @@ class HistoryItem(HistoryItemBase):
     def bounding_rect(self):
         if self.optimized:
             return self.minx, self.miny, self.maxx+1, self.maxy+1
-        return 0, 0, IWIDTH, IHEIGHT
+        return 0, 0, res.IWIDTH, res.IHEIGHT
     def is_drawing_change(self): return True
     def curr_surface(self):
         return movie.edit_curr_frame().surf_by_id(self.surface_id)
@@ -1335,8 +1222,8 @@ class PenTool(Button):
         w = 10
         h = 10
         while True:
-            area = max(0, round(x-w/2)), max(0, round(y-h/2)), min(IWIDTH, round(x+w/2)), min(IHEIGHT, round(y+h/2))
-            if area == (0, 0, IWIDTH, IHEIGHT):
+            area = max(0, round(x-w/2)), max(0, round(y-h/2)), min(res.IWIDTH, round(x+w/2)), min(res.IHEIGHT, round(y+h/2))
+            if area == (0, 0, res.IWIDTH, res.IHEIGHT):
                 break
             l,b,r,t = area
             tdiff()
@@ -1788,8 +1675,8 @@ def fixed_size_region_1d(center, part, full):
     return slice(start, start+part)
 
 def fixed_size_image_region(x, y, w, h):
-    xs = fixed_size_region_1d(x, w, IWIDTH)
-    ys = fixed_size_region_1d(y, h, IHEIGHT)
+    xs = fixed_size_region_1d(x, w, res.IWIDTH)
+    ys = fixed_size_region_1d(y, h, res.IHEIGHT)
     return xs, ys
 
 SK_WIDTH = 350
@@ -2052,8 +1939,8 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     margin = 5
     minx = max(0, math.floor(min(px)) - margin)
     miny = max(0, math.floor(min(py)) - margin)
-    maxx = min(IWIDTH-1, math.ceil(max(px)) + margin)
-    maxy = min(IHEIGHT-1, math.ceil(max(py)) + margin)
+    maxx = min(res.IWIDTH-1, math.ceil(max(px)) + margin)
+    maxy = min(res.IHEIGHT-1, math.ceil(max(py)) + margin)
     history_item = HistoryItem('lines', bbox=(minx, miny, maxx, maxy))
     history.append_item(history_item)
 
@@ -2336,8 +2223,8 @@ class DrawingArea(LayoutElemBase):
         self.restore_tool_on_mouse_up = False
 
         left, bottom, width, height = self.rect
-        self.iwidth, self.iheight = scale_and_fully_preserve_aspect_ratio(IWIDTH, IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
-        assert (self.iwidth / IWIDTH) - (self.iheight / IHEIGHT) < 1e-9
+        self.iwidth, self.iheight = scale_and_fully_preserve_aspect_ratio(res.IWIDTH, res.IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
+        assert (self.iwidth / res.IWIDTH) - (self.iheight / res.IHEIGHT) < 1e-9
         self.xmargin = round((width - self.iwidth)/2)
         self.ymargin = round((height - self.iheight)/2)
         self.set_zoom(self.zoom)
@@ -2375,8 +2262,8 @@ class DrawingArea(LayoutElemBase):
         self.zoom_center = zx - (self.xoffset - prevxo), zy - (self.yoffset - prevyo)
     def set_zoom(self, zoom, correct=True):
         self.zoom = zoom
-        self.xscale = IWIDTH/(self.iwidth * self.zoom)
-        self.yscale = IHEIGHT/(self.iheight * self.zoom)
+        self.xscale = res.IWIDTH/(self.iwidth * self.zoom)
+        self.yscale = res.IHEIGHT/(self.iheight * self.zoom)
         if not correct:
             return
 
@@ -2398,7 +2285,7 @@ class DrawingArea(LayoutElemBase):
         self.zoom_int_step_orig = int(round(best_int_step * self.xscale))
 
         corrected_xscale = round(orig_image_coordinates_corresponding_to_steps[pos_of_min_dist]) / best_int_step
-        corrected_zoom = IWIDTH / (self.iwidth * corrected_xscale)
+        corrected_zoom = res.IWIDTH / (self.iwidth * corrected_xscale)
         #print('corrected',zoom,corrected_zoom)
         self.set_zoom(corrected_zoom, correct=False)
 
@@ -2407,8 +2294,8 @@ class DrawingArea(LayoutElemBase):
         cx, cy = center
         framex, framey = self.xy2frame(cx, cy)
 
-        # in this class, "zoom=1" is zooming to iwidth,iheight; this is zooming to IWIDTH,IHEIGHT - what would normally be called "1x zoom"
-        self.set_zoom(IWIDTH / self.iwidth)
+        # in this class, "zoom=1" is zooming to iwidth,iheight; this is zooming to res.IWIDTH,res.IHEIGHT - what would normally be called "1x zoom"
+        self.set_zoom(res.IWIDTH / self.iwidth)
 
         # set xyoffset s.t. the center stays at the same screen location (=we zoom around the center)
         xoffset = framex + self.xmargin - cx
@@ -2449,8 +2336,8 @@ class DrawingArea(LayoutElemBase):
 
         frame_roi_left = align_down(max(0, self.xoffset - self.xmargin) * self.xscale)
         frame_roi_bottom = align_down(max(0, self.yoffset - self.ymargin) * self.yscale)
-        frame_roi_right = min(IWIDTH, align_up((self.xoffset + self.iwidth + self.xmargin*2) * self.xscale))
-        frame_roi_top = min(IHEIGHT, align_up((self.yoffset + self.iheight + self.ymargin*2) * self.yscale))
+        frame_roi_right = min(res.IWIDTH, align_up((self.xoffset + self.iwidth + self.xmargin*2) * self.xscale))
+        frame_roi_top = min(res.IHEIGHT, align_up((self.yoffset + self.iheight + self.ymargin*2) * self.yscale))
 
         def rnd_chk(x):
             r = round(x)
@@ -2588,9 +2475,9 @@ class DrawingArea(LayoutElemBase):
         def align_down(n): return (n // step) * step
         def align_up(n): return ((n + step - 1) // step) * step
         xmin = max(align_down(xmin) - step, 0)
-        xmax = min(align_up(xmax) + step, IWIDTH)
+        xmax = min(align_up(xmax) + step, res.IWIDTH)
         ymin = max(align_down(ymin) - step, 0)
-        ymax = min(align_up(ymax) + step, IHEIGHT)
+        ymax = min(align_up(ymax) + step, res.IHEIGHT)
 
         x,y = self.frame2xy(xmin, ymin)
         #starting_point = x,y
@@ -2611,9 +2498,9 @@ class DrawingArea(LayoutElemBase):
             yshrink += step
             sy += step
             yoft = step
-        if xmax < IWIDTH:
+        if xmax < res.IWIDTH:
             xshrink += step
-        if ymax < IHEIGHT:
+        if ymax < res.IHEIGHT:
             yshrink += step
 
         if xmax<=xmin or ymax<=ymin:
@@ -2785,7 +2672,7 @@ class TimelineArea(LayoutElemBase):
         scale = 1
         mid_scale = 1
         step = 0.5
-        mid_width = IWIDTH * height / IHEIGHT
+        mid_width = res.IWIDTH * height / res.IHEIGHT
         def scaled_factors(scale):
             return [min(1, max(0.15, f*scale)) for f in factors]
         def slack(scale):
@@ -3193,9 +3080,9 @@ class LayersArea(LayoutElemBase):
     def init(self):
         left, bottom, width, height = self.rect
         max_height = height / MAX_LAYERS
-        max_width = IWIDTH * (max_height / IHEIGHT)
+        max_width = res.IWIDTH * (max_height / res.IHEIGHT)
         self.width = min(max_width, width)
-        self.thumbnail_height = int(self.width * IHEIGHT / IWIDTH)
+        self.thumbnail_height = int(self.width * res.IHEIGHT / res.IWIDTH)
 
         self.prevy = None
         self.color_images = {}
@@ -3609,9 +3496,9 @@ class Tool:
 
 class Movie(MovieData):
     def __init__(self, dir, progress=default_progress_callback):
-        iwidth, iheight = (IWIDTH, IHEIGHT)
+        iwidth, iheight = (res.IWIDTH, res.IHEIGHT)
         MovieData.__init__(self, dir, progress=progress)
-        if (iwidth, iheight) != (IWIDTH, IHEIGHT):
+        if (iwidth, iheight) != (res.IWIDTH, res.IHEIGHT):
             init_layout()
         self.edited_since_export = True # MovieList can set it safely to false - we don't know
         # if the last exporting process is done or not
@@ -3679,7 +3566,7 @@ class Movie(MovieData):
 
     def get_thumbnail(self, pos, width=None, height=None, highlight=True, transparent_single_layer=-1, roi=None, inv_scale=None):
         if roi is None:
-            roi = (0, 0, IWIDTH, IHEIGHT) # the roi is in the original image coordinates, not the thumbnail coordinates
+            roi = (0, 0, res.IWIDTH, res.IHEIGHT) # the roi is in the original image coordinates, not the thumbnail coordinates
         trans_single = transparent_single_layer >= 0
         layer_pos = self.layer_pos if not trans_single else transparent_single_layer
         def id2version(layers): return self._visible_layers_id2version(layers, pos, include_invisible=trans_single)
@@ -3694,7 +3581,7 @@ class Movie(MovieData):
                     return id2version(self.layers), ('thumbnail', width, height, roi, hl, inv_scale)
             def compute_value(_):
                 h = int(screen.get_height() * 0.15)
-                w = int(h * IWIDTH / IHEIGHT)
+                w = int(h * res.IWIDTH / res.IHEIGHT)
                 if inv_scale is not None or (w <= width and h <= height):
                     if trans_single:
                         return self.layers[layer_pos].frame(pos).thumbnail(width, height, roi, inv_scale)
@@ -3863,9 +3750,9 @@ class Movie(MovieData):
         alpha[x+1::WIDTH*3, y+1::WIDTH*3, :] = color
 
     def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None, subset=None):
-        if not width and not inv_scale: width=IWIDTH
-        if not height and not inv_scale: height=IHEIGHT
-        if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
+        if not width and not inv_scale: width=res.IWIDTH
+        if not height and not inv_scale: height=res.IHEIGHT
+        if not roi: roi=(0, 0, res.IWIDTH, res.IHEIGHT)
 
         class CachedBottomLayers:
             def compute_key(_):
@@ -3905,9 +3792,9 @@ class Movie(MovieData):
         return cache.fetch(CachedBottomLayers())
 
     def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None, subset=None):
-        if not width and not inv_scale: width=IWIDTH
-        if not height and not inv_scale: height=IHEIGHT
-        if not roi: roi=(0, 0, IWIDTH, IHEIGHT)
+        if not width and not inv_scale: width=res.IWIDTH
+        if not height and not inv_scale: height=res.IHEIGHT
+        if not roi: roi=(0, 0, res.IWIDTH, res.IHEIGHT)
 
         class CachedTopLayers:
             def compute_key(_):
@@ -4360,7 +4247,7 @@ def init_layout():
     global layout
     global MOVIES_Y_SHARE
 
-    vertical_movie_on_horizontal_screen = IWIDTH < IHEIGHT and screen.get_width() > 1.5*screen.get_height()
+    vertical_movie_on_horizontal_screen = res.IWIDTH < res.IHEIGHT and screen.get_width() > 1.5*screen.get_height()
 
     TIMELINE_Y_SHARE = 0.15
     TOOLBAR_X_SHARE = 0.15
@@ -4372,7 +4259,7 @@ def init_layout():
 
     if vertical_movie_on_horizontal_screen:
         DRAWING_AREA_Y_SHARE = 1
-        DRAWING_AREA_X_SHARE = (screen.get_height() * (IWIDTH/IHEIGHT)) / screen.get_width()
+        DRAWING_AREA_X_SHARE = (screen.get_height() * (res.IWIDTH/res.IHEIGHT)) / screen.get_width()
         DRAWING_AREA_X_START = 0
         DRAWING_AREA_Y_START = 0
         timeline_rect = (DRAWING_AREA_X_SHARE, 0, 1-DRAWING_AREA_X_SHARE, TIMELINE_Y_SHARE)
@@ -4485,9 +4372,7 @@ class SwapWidthHeightHistoryItem(HistoryItemBase):
         return SwapWidthHeightHistoryItem()
 
 def swap_width_height(from_history=False):
-    global IWIDTH
-    global IHEIGHT
-    IWIDTH, IHEIGHT = IHEIGHT, IWIDTH
+    res.set_resolution(res.IHEIGHT, res.IWIDTH)
     init_layout()
     movie.fit_to_resolution()
     if not from_history:
