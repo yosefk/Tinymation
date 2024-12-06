@@ -173,12 +173,11 @@ class Frame:
                 height = round(roi[3] * inv_scale)
             return empty.subsurface(0, 0, width, height)
 
-        with thumb_timer:
-            return scale_image(self.surface(roi), width, height, inv_scale)
-            # note that for a small ROI it's faster to blit lines onto color first, and then scale;
-            # for a large ROI, it's faster to scale first and then blit the smaller number of pixels.
-            # however this produces ugly artifacts where lines & color are eroded and you see through
-            # both into the layer below, so we don't do it
+        return scale_image(self.surface(roi), width, height, inv_scale)
+        # note that for a small ROI it's faster to blit lines onto color first, and then scale;
+        # for a large ROI, it's faster to scale first and then blit the smaller number of pixels.
+        # however this produces ugly artifacts where lines & color are eroded and you see through
+        # both into the layer below, so we don't do it
 
     def filenames_png_bmp(self,surface_id):
         fname = f'{self.id}-{surface_id}.'
@@ -674,90 +673,7 @@ def tdiff():
     prevts = now
     return diff
 
-class Timer:
-    CALL_HISTORY = 30
-    SCALE = 1/10**6
-    def __init__(self,name):
-        self.name = name
-        self.total = 0
-        self.calls = 0
-        self.min = 2**60
-        self.max = 0
-        self.history = []
-    def start(self):
-        self.start_ns = time.time_ns()
-    def stop(self):
-        took = time.time_ns() - self.start_ns
-        self.calls += 1
-        self.total += took
-        self.min = min(self.min, took)
-        self.max = max(self.max, took)
-        self.history.append(took)
-        if len(self.history) > Timer.CALL_HISTORY:
-            del self.history[0]
-        return took * Timer.SCALE
-    def show(self):
-        scale = Timer.SCALE
-        if self.calls>1:
-            history = ' '.join([str(round(scale*h)) for h in reversed(self.history)])
-            return f'{self.name}: {round(scale*self.total/self.calls)} ms [{round(scale*self.min)}, {round(scale*self.max)}] {history} in {self.calls} calls'
-        elif self.calls==1:
-            return f'{self.name}: {round(scale*self.total)} ms'
-        else:
-            return f'{self.name}: never called'
-    def __enter__(self):
-        self.start()
-    def __exit__(self, *args):
-        self.stop()
-
-class Timers:
-    def __init__(self):
-        self.timers = []
-        self.timer2children = {}
-    def add(self, name, indent=0):
-        timer = Timer(name)
-        timer.indent = indent
-        self.timers.append(timer)
-        return timer
-    def show(self):
-        for timer in self.timers:
-            print(timer.indent*'  '+timer.show())
-
 from trace import trace
-timers = Timers()
-layout_draw_timer = timers.add('Layout.draw')
-drawing_area_draw_timer = timers.add('DrawingArea.draw', indent=1)
-draw_bottom_timer = timers.add('bottom layers', indent=2)
-draw_curr_timer = timers.add('current layer', indent=2)
-draw_top_timer = timers.add('top layers', indent=2)
-draw_light_timer = timers.add('light table mask', indent=2)
-draw_fading_timer = timers.add('fading mask', indent=2)
-draw_blits_timer = timers.add('blit surfaces', indent=2)
-timeline_area_draw_timer = timers.add('TimelineArea.draw', indent=1)
-layers_area_draw_timer = timers.add('LayersArea.draw', indent=1)
-movie_list_area_draw_timer = timers.add('MovieListArea.draw', indent=1)
-pen_down_timer = timers.add('PenTool.on_mouse_down')
-pen_move_timer = timers.add('PenTool.on_mouse_move')
-pen_up_timer = timers.add('PenTool.on_mouse_up')
-pen_draw_lines_timer = timers.add('drawLines', indent=1)
-pen_suggestions_timer = timers.add('pen suggestions', indent=1)
-eraser_timer = timers.add('eraser',indent=1)
-pen_fading_mask_timer = timers.add('fading_mask', indent=1)
-paint_bucket_timer = timers.add('PaintBucketTool.fill')
-bucket_points_near_line_timer = timers.add('integer_points_near_line_segment', indent=1)
-bucket_flood_fill_timer = timers.add('flood_fill_color_based_on_lines', indent=1)
-timeline_down_timer = timers.add('TimelineArea.on_mouse_down')
-timeline_move_timer = timers.add('TimelineArea.on_mouse_move')
-flashlight_timer = timers.add('Flashlight')
-mask_timer = timers.add('pen_mask',indent=1)
-ff_timer = timers.add('flood_fill',indent=1)
-sk_timer = timers.add('skeletonize',indent=1)
-dist_timer = timers.add('distance',indent=1)
-hole_timer = timers.add('patch_hole',indent=1)
-rest_timer = timers.add('rest',indent=1)
-thumb_timer = timers.add('thumbnail')
-small_roi_timer = timers.add('small roi',indent=1)
-large_roi_timer = timers.add('large roi',indent=1)
 
 # interface with tinylib
 
@@ -1235,7 +1151,6 @@ class PenTool(Button):
         if self.patching:
             FlashlightTool().on_mouse_down(x,y)
             return
-        pen_down_timer.start()
         self.points = []
         self.bucket_color = None
         self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
@@ -1258,7 +1173,6 @@ class PenTool(Button):
             # if we do decide to split lines into parts for undo purposes, we should not doing when not layout.subpixel
             # since this doesn't work with smoothing)
             self.set_history_timer()
-        pen_down_timer.stop()
 
     def set_history_timer(self):
         if self.timer is None:
@@ -1311,7 +1225,6 @@ class PenTool(Button):
     def on_mouse_up(self, x, y):
         if self.patching or curr_layer_locked():
             return
-        pen_up_timer.start()
 
         if self.timer is not None and self.timer.isActive():
             self.timer.stop()
@@ -1335,8 +1248,6 @@ class PenTool(Button):
 
         self.lines_array = None
 
-        pen_up_timer.stop()
-
     def save_history_item(self):
         if self.bbox[-1] >= 0:
             history_item = HistoryItemSet([self.lines_history_item, self.color_history_item])
@@ -1352,7 +1263,6 @@ class PenTool(Button):
         if self.patching or curr_layer_locked():
             return
 
-        pen_move_timer.start()
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
 
@@ -1360,7 +1270,6 @@ class PenTool(Button):
         # note that sometimes you get something close but not quite equal to the first coordinate and it's clearly wrong because it's an outlier
         # relatively to the rest of the points; not sure if we should try to second-guess the input device enough to handle it...
         if len(self.points) < 6 and (cx, cy) in self.points:
-            pen_move_timer.stop()
             return
 
         self.points.append((cx,cy))
@@ -1377,7 +1286,6 @@ class PenTool(Button):
                 widget.redrawScreen()
             
         self.prev_drawn = (x,y) 
-        pen_move_timer.stop()
 
 MIN_ZOOM, MAX_ZOOM = 1, 5
 
@@ -1546,8 +1454,6 @@ class PaintBucketTool(Button):
         self.pen_mask = None
         self.patching = False
     def fill(self, x, y):
-        paint_bucket_timer.start()
-
         x, y = layout.drawing_area().xy2frame(x,y)
         x, y = round(x), round(y)
 
@@ -1556,16 +1462,14 @@ class PaintBucketTool(Button):
             self.py = y
 
         radius = (PAINT_BUCKET_WIDTH//2) * layout.drawing_area().xscale
-        with bucket_points_near_line_timer:
-            points = integer_points_near_line_segment(self.px, self.py, x, y, radius)
-            xs = points[:,0]
-            ys = points[:,1]
+        points = integer_points_near_line_segment(self.px, self.py, x, y, radius)
+        xs = points[:,0]
+        ys = points[:,1]
         self.px = x
         self.py = y
         
-        with bucket_flood_fill_timer:
-            color_rgba = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
-            bbox = flood_fill_color_based_on_mask_many_seeds(color_rgba, self.pen_mask, xs, ys, self.color)
+        color_rgba = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+        bbox = flood_fill_color_based_on_mask_many_seeds(color_rgba, self.pen_mask, xs, ys, self.color)
         if bbox:
             self.bboxes.append(bbox)
 
@@ -1574,8 +1478,6 @@ class PaintBucketTool(Button):
 
         PaintBucketTool.last_color = self.color
         
-        paint_bucket_timer.stop()
-
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
             return
@@ -1619,6 +1521,7 @@ class PaintBucketTool(Button):
             return
         widget.setEnabled(False)
         try:
+            trace.event('modify-color')
             color = QColorDialog.getColor(QColor(*self.color), options=QColorDialog.DontUseNativeDialog | QColorDialog.ShowAlphaChannel)
             if color.isValid():
                 self.color = color.toTuple()
@@ -1689,14 +1592,10 @@ def close_diagonal_holes(mask):
     mask[1:,:-1] |= diag2 
 
 def skeletonize_color_based_on_lines(color, lines, x, y):
-    mask_timer.start()
     pen_mask = lines == 255
-    mask_timer.stop()
     if pen_mask[x,y]:
-        flashlight_timer.stop()
         return
 
-    ff_timer.start()
     flood_code = 2
     flood_mask = np.ascontiguousarray(pen_mask.astype(np.uint8))
     cv2.floodFill(flood_mask, None, seedPoint=(y, x), newVal=flood_code, loDiff=(0, 0, 0, 0), upDiff=(0, 0, 0, 0))
@@ -1709,12 +1608,8 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
     flood_mask = ~flood_mask
 
     #flood_mask = flood_fill(pen_mask.astype(np.byte), (x,y), flood_code) == flood_code
-    ff_timer.stop()
-        
-    sk_timer.start()
     skx, sky = fixed_size_image_region(x, y, SK_WIDTH, SK_HEIGHT)
     skeleton = tl_skeletonize(np.ascontiguousarray(flood_mask[skx,sky])).astype(np.uint8)
-    sk_timer.stop()
 
     def dilation(img):
         kernel = np.ones((3, 3), np.uint8)
@@ -1722,10 +1617,7 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
     fmb = dilation(dilation(skeleton))
 
     # Compute distance from each point to the specified center
-    dist_timer.start()
     d, maxdist = skeleton_to_distances(skeleton, x-skx.start, y-sky.start)
-    dist_timer.stop()
-
 
     if maxdist != NO_PATH_DIST:
         d = (d == NO_PATH_DIST)*maxdist + (d != NO_PATH_DIST)*d # replace NO_PATH_DIST with maxdist
@@ -1741,7 +1633,6 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
 
     maxdist = min(700, maxdist)
 
-    rest_timer.start()
     inner = (255,255,255)
     outer = [255-ch for ch in color[x,y]]
     h,s,v = colorsys.rgb_to_hsv(*[o/255. for o in outer])
@@ -1755,7 +1646,6 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
          fm[skx,sky,ch] = outer[ch]*(1-skeleton) + inner[ch]*skeleton
     pg.surfarray.pixels_alpha(fading_mask)[skx,sky] = fmb*255*np.maximum(0,pow(1 - outer_d/maxdist, 3))
 
-    rest_timer.stop()
     return fading_mask, (skeleton, skx, sky)
 
 def splprep(points, weights=None, smoothing=None):
@@ -1964,14 +1854,12 @@ class FlashlightTool(Button):
         lines = pygame.surfarray.pixels_alpha(frame.surf_by_id('lines'))
         if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1] or lines[x,y] == 255:
             return
-        flashlight_timer.start()
 
         if try_to_patch:
             # Ctrl pressed - attempt to patch a hole using the previous skeleton (if relevant
             if last_skeleton:
                 skeleton, skx, sky = last_skeleton
                 if x >= skx.start and x < skx.stop and y >= sky.start and y < sky.stop:
-                    hole_timer.start()
                     found = False
                     if patch_hole(lines, x, y, skeleton, skx, sky):
                         # find a point to compute a new skeleton around. Sometimes x,y itself
@@ -1994,14 +1882,10 @@ class FlashlightTool(Button):
 
                         if not found:
                             layout.drawing_area().set_fading_mask(None)
-                            hole_timer.stop()
                             return
-
-                    hole_timer.stop()
 
         fading_mask_and_skeleton = skeletonize_color_based_on_lines(color, lines, x, y)
 
-        flashlight_timer.stop()
         if not fading_mask_and_skeleton:
             return
         fading_mask, skeleton = fading_mask_and_skeleton
@@ -2071,8 +1955,6 @@ class Layout:
             if self.focus_elem is None or not self.focus_elem.redraw:
                 return
 
-        layout_draw_timer.start()
-
         screen.fill(UNDRAWABLE)
         for elem in self.elems:
             if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
@@ -2087,8 +1969,6 @@ class Layout:
                     continue
                 if elem.draw_border:
                     pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
-
-        layout_draw_timer.stop()
 
     # note that pygame seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
@@ -2389,8 +2269,6 @@ class DrawingArea(LayoutElemBase):
         self.set_xyoffset(0, 0)
         self.set_zoom(1)
     def draw(self):
-        drawing_area_draw_timer.start()
-
         left, bottom, width, height = self.rect
 
         if layout.is_playing:
@@ -2413,26 +2291,20 @@ class DrawingArea(LayoutElemBase):
         step_aligned_frame_roi, scaled_roi_subset, starting_point = self.rois()
         iscale = 1/self.xscale
 
-        with draw_bottom_timer:
-            surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale, subset=scaled_roi_subset))
+        surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale, subset=scaled_roi_subset))
         if movie.layers[movie.layer_pos].visible:
-            with draw_curr_timer:
-                surfaces.append(movie.get_thumbnail(pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
-        with draw_top_timer:
-            surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale, subset=scaled_roi_subset))
+            surfaces.append(movie.get_thumbnail(pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
+        surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale, subset=scaled_roi_subset))
 
         if not layout.is_playing:
-            with draw_light_timer:
-                mask = layout.timeline_area().combined_light_table_mask()
-                if mask:
-                    surfaces.append(mask)
+            mask = layout.timeline_area().combined_light_table_mask()
+            if mask:
+                surfaces.append(mask)
 
             if self.fading_mask:
-                with draw_fading_timer:
-                    surfaces.append(self.scaled_fading_mask())
+                surfaces.append(self.scaled_fading_mask())
 
-        with draw_blits_timer:
-            self.subsurface.blits([(surface, starting_point) for surface in surfaces])
+        self.subsurface.blits([(surface, starting_point) for surface in surfaces])
 
         eps = 0.019
         if self.zoom > 1 + eps:
@@ -2443,8 +2315,6 @@ class DrawingArea(LayoutElemBase):
 
         if layout.is_playing:
             self.restore_zoom_pan_params(zoom_params)
-
-        drawing_area_draw_timer.stop()
 
     def draw_region(self, frame_region):
         xmin, ymin, xmax, ymax = frame_region
@@ -2886,8 +2756,6 @@ class TimelineArea(LayoutElemBase):
             if x >= left and x <= right:
                 return pos
     def draw(self):
-        timeline_area_draw_timer.start()
-
         surface = self.scroll_indicator.surface
         surface.fill(UNDRAWABLE)
 
@@ -2970,8 +2838,6 @@ class TimelineArea(LayoutElemBase):
 
         self.subsurface.blit(surface, (0,0))
 
-        timeline_area_draw_timer.stop()
-
     def draw_hold(self):
         left, bottom, width, height = self.rect
         # sort by position for nicer looking occlusion between adjacent icons
@@ -3014,9 +2880,7 @@ class TimelineArea(LayoutElemBase):
         left, _, _, _ = self.rect
         return x-left
     def on_mouse_down(self,x,y):
-        timeline_down_timer.start()
         self._on_mouse_down(x,y)
-        timeline_down_timer.stop()
     def _on_mouse_down(self,x,y):
         x = self.fix_x(x)
         self.prevx = None
@@ -3037,9 +2901,7 @@ class TimelineArea(LayoutElemBase):
         if self.prevx:
             restore_cursor()
     def on_mouse_move(self,x,y):
-        timeline_move_timer.start()
         self._on_mouse_move(x,y)
-        timeline_move_timer.stop()
     def _on_mouse_move(self,x,y):
         self.redraw = False
         x = self.fix_x(x)
@@ -3126,8 +2988,6 @@ class LayersArea(LayoutElemBase):
         return cache.fetch(CachedLayerThumbnail(color))
 
     def draw(self):
-        layers_area_draw_timer.start()
-
         surface = self.scroll_indicator.surface
         surface.fill(UNDRAWABLE)
 
@@ -3165,8 +3025,6 @@ class LayersArea(LayoutElemBase):
             blit_bottom += image.get_height()
 
         self.subsurface.blit(surface, (0, 0))
-
-        layers_area_draw_timer.stop()
 
     def y2frame(self, y):
         if not self.thumbnail_height:
@@ -3235,6 +3093,7 @@ class LayersArea(LayoutElemBase):
         if pos_dist != 0:
             self.redraw = True
             new_pos = min(max(0, movie.layer_pos + pos_dist), len(movie.layers)-1)
+            trace.event('seek-layer')
             movie.seek_layer(new_pos)
 
 class ProgressBar:
@@ -3271,6 +3130,7 @@ class ProgressBar:
         QCoreApplication.processEvents()
 
 def open_movie_with_progress_bar(clipdir):
+    trace.event('open-clip')
     progress_bar = ProgressBar('Loading...')
     return Movie(clipdir, progress=progress_bar.on_progress)
 
@@ -3364,8 +3224,6 @@ class MovieListArea(LayoutElemBase):
         self.prevx = None
         self.scroll_indicator = ScrollIndicator(self.subsurface.get_width(), self.subsurface.get_height())
     def draw(self):
-        movie_list_area_draw_timer.start()
-
         surface = self.scroll_indicator.surface
         surface.fill(UNDRAWABLE)
 
@@ -3392,7 +3250,6 @@ class MovieListArea(LayoutElemBase):
 
         self.subsurface.blit(surface, (0, 0))
 
-        movie_list_area_draw_timer.stop()
     def x2frame(self, x):
         if not movie_list.images or x is None:
             return None
@@ -3601,7 +3458,9 @@ class Movie(MovieData):
         self.clear_cache()
         self.save_meta()
 
-    def seek_frame(self,pos): self.seek_frame_and_layer(pos, self.layer_pos)
+    def seek_frame(self,pos):
+        trace.event('seek-frame')
+        self.seek_frame_and_layer(pos, self.layer_pos)
     def seek_layer(self,layer_pos): self.seek_frame_and_layer(self.pos, layer_pos)
 
     def next_frame(self): self.seek_frame((self.pos + 1) % len(self.frames))
@@ -3611,6 +3470,7 @@ class Movie(MovieData):
     def prev_layer(self): self.seek_layer((self.layer_pos - 1) % len(self.layers))
 
     def insert_frame(self):
+        trace.event('insert-frame')
         frame_id = str(uuid.uuid1())
         for layer in self.layers:
             frame = Frame(self.dir, layer.id)
@@ -3620,12 +3480,14 @@ class Movie(MovieData):
         self.next_frame()
 
     def insert_layer(self):
+        trace.event('insert-layer')
         frames = [Frame(self.dir, None, frame.id) for frame in self.frames]
         layer = Layer(frames, self.dir)
         self.layers.insert(self.layer_pos+1, layer)
         self.next_layer()
 
     def reinsert_frame_at_pos(self, pos, removed_frame_data):
+        trace.event('insert-frame')
         assert pos >= 0 and pos <= len(self.frames)
         removed_frames, first_holds = removed_frame_data
         assert len(removed_frames) == len(self.layers)
@@ -3643,6 +3505,7 @@ class Movie(MovieData):
         self.save_meta()
 
     def reinsert_layer_at_pos(self, layer_pos, removed_layer):
+        trace.event('insert-layer')
         assert layer_pos >= 0 and layer_pos <= len(self.layers)
         assert len(removed_layer.frames) == len(self.frames)
 
@@ -3656,6 +3519,7 @@ class Movie(MovieData):
         self.save_meta()
 
     def remove_frame(self, at_pos=-1, new_pos=-1):
+        trace.event('remove-frame')
         if len(self.frames) <= 1:
             return
 
@@ -3694,6 +3558,7 @@ class Movie(MovieData):
         return removed_frames, first_holds
 
     def remove_layer(self, at_pos=-1, new_pos=-1):
+        trace.event('remove-layer')
         if len(self.layers) <= 1:
             return
 
@@ -4041,6 +3906,7 @@ class RenameDialog(QDialog):
 import pathvalidate
 
 def rename_clip():
+    trace.event('rename-clip')
     curr_name = os.path.basename(movie.dir)
     done = False
     widget.setEnabled(False)
@@ -4362,6 +4228,7 @@ class SwapWidthHeightHistoryItem(HistoryItemBase):
         return SwapWidthHeightHistoryItem()
 
 def swap_width_height(from_history=False):
+    trace.event('swap-width-height')
     res.set_resolution(res.IHEIGHT, res.IWIDTH)
     init_layout()
     movie.fit_to_resolution()
@@ -4428,6 +4295,7 @@ class History:
         layout.drawing_area().clear_fading_mask() # new operations invalidate old skeletons
 
     def undo_item(self, drawing_changes_only):
+        trace.event('undo-redo')
         if self.suggestions:
             s = self.suggestions
             self.suggestions = None
@@ -4453,6 +4321,7 @@ class History:
         layout.drawing_area().clear_fading_mask() # changing canvas state invalidates old skeletons
 
     def redo_item(self):
+        trace.event('undo-redo')
         if self.redo:
             last_op = self.redo[-1]
             if last_op.make_undone_changes_visible():
@@ -4507,11 +4376,6 @@ interesting_events = [
     pygame.MOUSEBUTTONUP,
 ] + timer_events
 
-event2timer = {}
-event_names = 'KEYDOWN KEYUP MOVE DOWN UP REDRAW RELOAD PLAYBACK SAVING FADING HISTORY'.split()
-for i,event in enumerate(interesting_events):
-    event2timer[event] = timers.add(event_names[i])
-
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard
 
@@ -4523,11 +4387,13 @@ def set_clipboard_image(surface):
 cut_frame_content = None
 
 def copy_frame():
+    trace.event('copy-paste')
     global cut_frame_content
     cut_frame_content = movie.curr_frame().get_content()
     set_clipboard_image(movie.curr_frame().surface())
 
 def cut_frame():
+    trace.event('copy-paste')
     history_item = HistoryItemSet([HistoryItem('color'), HistoryItem('lines')])
 
     global cut_frame_content
@@ -4540,6 +4406,7 @@ def cut_frame():
     history.append_item(history_item)
 
 def paste_frame():
+    trace.event('copy-paste')
     if not cut_frame_content:
         return
 
@@ -4557,6 +4424,7 @@ def open_explorer(path):
         subprocess.Popen(['nautilus', '-s', path])
 
 def export_and_open_explorer():
+    trace.event('export-clip')
     movie.save_and_start_export()
     movie_list.wait_for_all_exporting_to_finish() # wait for this movie and others if we
     # were still exporting them - so that when we open explorer all the exported data is up to date
@@ -4586,6 +4454,7 @@ def open_dir_path_dialog():
         widget.setEnabled(True)
 
 def open_clip_dir():
+    trace.event('open-clip-dir')
     file_path = open_dir_path_dialog()
     global WD
     if file_path and os.path.realpath(file_path) != os.path.realpath(WD):
@@ -4749,9 +4618,10 @@ class TinymationWidget(QWidget):
         class Event: pass
         e = Event()
         e.type = event
-        layout.on_event(e)
-        self.redrawLayoutIfNeeded(e)
-        self.redrawScreen()
+        with trace.start({PLAYBACK_TIMER_EVENT:'playback-timer', SAVING_TIMER_EVENT:'saving-timer', FADING_TIMER_EVENT: 'fading-timer'}[event]):
+            layout.on_event(e)
+            self.redrawLayoutIfNeeded(e)
+            self.redrawScreen()
 
     def redrawScreen(self):
         pgsurf2qtimage(screen, self.image)
@@ -4764,27 +4634,27 @@ class TinymationWidget(QWidget):
                cache.collect_garbage()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        region = event.region()
-        rect = region.boundingRect()
-        painter.drawImage(rect, self.image, rect)
-        painter.end()
-        event.accept()
+        with trace.start('paint'):
+            painter = QPainter(self)
+            region = event.region()
+            rect = region.boundingRect()
+            painter.drawImage(rect, self.image, rect)
+            painter.end()
+            event.accept()
 
     def mouseEvent(self, event, type):
-        trace.start({pg.MOUSEBUTTONDOWN:'mouse-down',pg.MOUSEMOTION:'mouse-move',pg.MOUSEBUTTONUP:'mouse-up'}[type])
-        class Event:
-            pass
-        e = Event()
-        e.type = type
-        pos = event.position()
-        e.pos = (pos.x(), pos.y())
-        e.subpixel = False
-        layout.on_event(e)
-        self.redrawLayoutIfNeeded(event)
-        self.redrawScreen()
-        event.accept()
-        trace.stop()
+        with trace.start({pg.MOUSEBUTTONDOWN:'mouse-down',pg.MOUSEMOTION:'mouse-move',pg.MOUSEBUTTONUP:'mouse-up'}[type]):
+            class Event:
+                pass
+            e = Event()
+            e.type = type
+            pos = event.position()
+            e.pos = (pos.x(), pos.y())
+            e.subpixel = False
+            layout.on_event(e)
+            self.redrawLayoutIfNeeded(event)
+            self.redrawScreen()
+            event.accept()
 
     def mousePressEvent(self, event): self.mouseEvent(event, pg.MOUSEBUTTONDOWN)
     def mouseMoveEvent(self, event): self.mouseEvent(event, pg.MOUSEMOTION)
@@ -4795,19 +4665,18 @@ class TinymationWidget(QWidget):
             pass
         e = Event()
         e.type = {QEvent.TabletPress: pg.MOUSEBUTTONDOWN, QEvent.TabletMove: pg.MOUSEMOTION, QEvent.TabletRelease: pg.MOUSEBUTTONUP}.get(event.type())
-        trace.start({pg.MOUSEBUTTONDOWN:'stylus-down',pg.MOUSEMOTION:'stylus-move',pg.MOUSEBUTTONUP:'stylus-up'}[e.type])
-        pos = event.position()
-        # there seems to be a disagreement in "where the center of the pixel is" - at integer coordinates 0,1,2...
-        # or at 0.5, 1.5, 2.5... between the tablet events and the coordinate system of xy2frame/frame2xy. I didn't give
-        # it much thought after observing that the below seems to work in the sense of drawing reasonably "exactly"
-        # where the cursor hotspot is (which isn't happening without this correction)
-        e.pos = (pos.x()-.5, pos.y()-.5)
-        e.subpixel = True
-        layout.on_event(e)
-        self.redrawLayoutIfNeeded(event)
-        self.redrawScreen()
-        event.accept()
-        trace.stop() # TODO: with block
+        with trace.start({pg.MOUSEBUTTONDOWN:'stylus-down',pg.MOUSEMOTION:'stylus-move',pg.MOUSEBUTTONUP:'stylus-up'}[e.type]):
+            pos = event.position()
+            # there seems to be a disagreement in "where the center of the pixel is" - at integer coordinates 0,1,2...
+            # or at 0.5, 1.5, 2.5... between the tablet events and the coordinate system of xy2frame/frame2xy. I didn't give
+            # it much thought after observing that the below seems to work in the sense of drawing reasonably "exactly"
+            # where the cursor hotspot is (which isn't happening without this correction)
+            e.pos = (pos.x()-.5, pos.y()-.5)
+            e.subpixel = True
+            layout.on_event(e)
+            self.redrawLayoutIfNeeded(event)
+            self.redrawScreen()
+            event.accept()
 
     def update_region(self):
         xmin, ymin, xmax, ymax = self.rect
@@ -4825,17 +4694,17 @@ class TinymationWidget(QWidget):
         if layout.is_playing and not (keyboard_shortcuts_enabled and event.key() in [Qt.Key_Enter, Qt.Key_Return]):
             return # ignore keystrokes (except ESC and ENTER) during playback
 
-        process_keydown_event(event)
-        self.redrawLayoutIfNeeded(event)
-        self.redrawScreen()
-        event.accept()
+        with trace.start('key-down'):
+            process_keydown_event(event)
+            self.redrawLayoutIfNeeded(event)
+            self.redrawScreen()
+            event.accept()
 
     def keyReleaseEvent(self, event):
-        process_keyup_event(event)
+        with trace.start('key-up'):
+            process_keyup_event(event)
 
     def shutdown(self, export_on_exit=True):
-        timers.show()
-
         movie.save_before_closing(export_on_exit)
         if export_on_exit:
             movie_list.wait_for_all_exporting_to_finish()
