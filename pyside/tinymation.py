@@ -723,6 +723,7 @@ class Timers:
         for timer in self.timers:
             print(timer.indent*'  '+timer.show())
 
+from trace import trace
 timers = Timers()
 layout_draw_timer = timers.add('Layout.draw')
 drawing_area_draw_timer = timers.add('DrawingArea.draw', indent=1)
@@ -945,10 +946,10 @@ def restore_cursor():
 
 def bounding_rectangle_of_a_boolean_mask(mask):
     # Sum along the vertical and horizontal axes
-    vertical_sum = np.sum(mask, axis=1)
+    vertical_sum = np.sum(mask, axis=0)
     if not np.any(vertical_sum):
         return None
-    horizontal_sum = np.sum(mask, axis=0)
+    horizontal_sum = np.sum(mask, axis=1)
 
     minx, maxx = np.where(vertical_sum)[0][[0, -1]]
     miny, maxy = np.where(horizontal_sum)[0][[0, -1]]
@@ -992,25 +993,19 @@ class HistoryItem(HistoryItemBase):
         HistoryItemBase.__init__(self)
         self.surface_id = surface_id
         if not bbox:
-            surface = self.curr_surface().copy()
+            # perhaps allocating from a pool and copying via rgba_array would be faster but not sure it would matter
+            self.saved_surface = self.curr_surface().copy()
             self.minx = 10**9
             self.miny = 10**9
             self.maxx = -10**9
             self.maxy = -10**9
+            self.optimized = False
         else:
-            surface = self.curr_surface()        
             self.minx, self.miny, self.maxx, self.maxy = bbox
-
-        self.saved_alpha = pg.surfarray.pixels_alpha(surface)
-        self.saved_rgb = pg.surfarray.pixels3d(surface) if surface_id == 'color' else None
-        self.optimized = False
-
-        if bbox:
-            self.saved_alpha = self.saved_alpha[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
-            if self.saved_rgb is not None:
-                self.saved_rgb = self.saved_rgb[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
+            self.saved_surface = self.curr_surface().subsurface(self._subsurface_bbox()).copy()
             self.optimized = True
 
+    def _subsurface_bbox(self): return (self.minx, self.miny, self.maxx-self.minx+1, self.maxy-self.miny+1)
     def bounding_rect(self):
         if self.optimized:
             return self.minx, self.miny, self.maxx+1, self.maxy+1
@@ -1019,7 +1014,7 @@ class HistoryItem(HistoryItemBase):
     def curr_surface(self):
         return movie.edit_curr_frame().surf_by_id(self.surface_id)
     def nop(self):
-        return self.saved_alpha is None
+        return self.saved_surface is None
     def undo(self):
         if self.nop():
             return
@@ -1028,20 +1023,15 @@ class HistoryItem(HistoryItemBase):
             print(f'WARNING: HistoryItem at the wrong position! should be {self.pos_before_undo} [layer {self.layer_pos_before_undo}], but is {movie.pos} [layer {movie.layer_pos}]')
         movie.seek_frame_and_layer(self.pos_before_undo, self.layer_pos_before_undo) # we should already be here, but just in case (undoing in the wrong frame is a very unfortunate bug...)
 
-        # we could have created this item a bit more quickly with a bit more code but doesn't seem worth it
         redo = HistoryItem(self.surface_id)
 
         frame = self.curr_surface()
         if self.optimized:
-            pg.surfarray.pixels_alpha(frame)[self.minx:self.maxx+1, self.miny:self.maxy+1] = self.saved_alpha
-            if self.saved_rgb is not None:
-                pg.surfarray.pixels3d(frame)[self.minx:self.maxx+1, self.miny:self.maxy+1] = self.saved_rgb
-        else:
-            pg.surfarray.pixels_alpha(frame)[:] = self.saved_alpha
-            if self.saved_rgb is not None:
-                pg.surfarray.pixels3d(frame)[:] = self.saved_rgb
+            frame = frame.subsurface(self._subsurface_bbox())
+        
+        rgba_array(frame)[0][:] = rgba_array(self.saved_surface)[0]
 
-        redo.optimize()
+        redo.optimize((self.minx, self.miny, self.maxx, self.maxy) if self.optimized else None)
         return redo
     def optimize(self, bbox=None):
         if self.optimized:
@@ -1050,30 +1040,24 @@ class HistoryItem(HistoryItemBase):
         if bbox:
             self.minx, self.miny, self.maxx, self.maxy = bbox
         else:
-            mask = self.saved_alpha != pg.surfarray.pixels_alpha(self.curr_surface())
-            if self.saved_rgb is not None:
-                mask |= np.any(self.saved_rgb != pg.surfarray.pixels3d(self.curr_surface()), axis=2)
+            mask = np.any(rgba_array(self.saved_surface)[0] != rgba_array(self.curr_surface())[0], axis=2)
             brect = bounding_rectangle_of_a_boolean_mask(mask)
 
             if brect is None: # this can happen eg when drawing lines on an already-filled-with-lines area
-                self.saved_alpha = None
-                self.saved_rgb = None
+                self.saved_surface = None
                 return
 
-            self.minx, self.maxx, self.miny, self.maxy = brect
+            self.minx, self.maxx, self.miny, self.maxy = [int(c) for c in brect]
 
-        self.saved_alpha = self.saved_alpha[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
-        if self.saved_rgb is not None:
-            self.saved_rgb = self.saved_rgb[self.minx:self.maxx+1, self.miny:self.maxy+1].copy()
+        # TODO: test that this actually reduces memory consumption
+        self.saved_surface = self.saved_surface.subsurface(self._subsurface_bbox()).copy()
         self.optimized = True
 
     def __str__(self):
         return f'HistoryItem(pos={self.pos}, rect=({self.minx}, {self.miny}, {self.maxx}, {self.maxy}))'
 
     def byte_size(self):
-        if self.nop():
-            return 0
-        return self.saved_alpha.nbytes + (self.saved_rgb.nbytes if self.saved_rgb is not None else 0)
+        return self.saved_surface.get_width() * self.saved_surface.get_height() * 4 if not self.nop() else 0
 
 class HistoryItemSet(HistoryItemBase):
     def __init__(self, items):
@@ -2163,7 +2147,8 @@ class Layout:
             self.is_pressed = True
             self.focus_elem = elem
             if self.focus_elem:
-                elem.on_mouse_down(x,y)
+                trace.class_context(self.focus_elem)
+                self.focus_elem.on_mouse_down(x,y)
             if change == tool_change and self.new_delete_tool():
                 self.restore_tool_on_mouse_up = True
         elif event.type == pygame.MOUSEBUTTONUP:
@@ -2173,9 +2158,11 @@ class Layout:
                 self.restore_tool_on_mouse_up = False
                 return
             if self.focus_elem:
+                trace.class_context(self.focus_elem)
                 self.focus_elem.on_mouse_up(x,y)
         elif event.type == pygame.MOUSEMOTION and self.is_pressed:
             if self.focus_elem:
+                trace.class_context(self.focus_elem)
                 self.focus_elem.on_mouse_move(x,y)
 
     def drawing_area(self):
@@ -2591,10 +2578,13 @@ class DrawingArea(LayoutElemBase):
         if alt:
             set_tool(TOOLS['zoom'])
             layout.restore_tool_on_mouse_up = True
+        trace.class_context(layout.tool)
         layout.tool.on_mouse_down(*self.fix_xy(x,y))
     def on_mouse_up(self,x,y):
+        trace.class_context(layout.tool)
         layout.tool.on_mouse_up(*self.fix_xy(x,y))
     def on_mouse_move(self,x,y):
+        trace.class_context(layout.tool)
         layout.tool.on_mouse_move(*self.fix_xy(x,y))
 
 class ScrollIndicator:
@@ -4782,6 +4772,7 @@ class TinymationWidget(QWidget):
         event.accept()
 
     def mouseEvent(self, event, type):
+        trace.start({pg.MOUSEBUTTONDOWN:'mouse-down',pg.MOUSEMOTION:'mouse-move',pg.MOUSEBUTTONUP:'mouse-up'}[type])
         class Event:
             pass
         e = Event()
@@ -4793,6 +4784,7 @@ class TinymationWidget(QWidget):
         self.redrawLayoutIfNeeded(event)
         self.redrawScreen()
         event.accept()
+        trace.stop()
 
     def mousePressEvent(self, event): self.mouseEvent(event, pg.MOUSEBUTTONDOWN)
     def mouseMoveEvent(self, event): self.mouseEvent(event, pg.MOUSEMOTION)
@@ -4803,6 +4795,7 @@ class TinymationWidget(QWidget):
             pass
         e = Event()
         e.type = {QEvent.TabletPress: pg.MOUSEBUTTONDOWN, QEvent.TabletMove: pg.MOUSEMOTION, QEvent.TabletRelease: pg.MOUSEBUTTONUP}.get(event.type())
+        trace.start({pg.MOUSEBUTTONDOWN:'stylus-down',pg.MOUSEMOTION:'stylus-move',pg.MOUSEBUTTONUP:'stylus-up'}[e.type])
         pos = event.position()
         # there seems to be a disagreement in "where the center of the pixel is" - at integer coordinates 0,1,2...
         # or at 0.5, 1.5, 2.5... between the tablet events and the coordinate system of xy2frame/frame2xy. I didn't give
@@ -4814,6 +4807,7 @@ class TinymationWidget(QWidget):
         self.redrawLayoutIfNeeded(event)
         self.redrawScreen()
         event.accept()
+        trace.stop() # TODO: with block
 
     def update_region(self):
         xmin, ymin, xmax, ymax = self.rect
@@ -4859,6 +4853,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 QTimer.singleShot(0, widget.start_loading)
 status = app.exec()
+trace.save('event-trace')
 pygame.quit()
 sys.exit(status)
 
