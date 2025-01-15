@@ -7,3 +7,4 @@ __pycache__
 pygame/dist/*
 pygame/build/*
 pygame/combined-backup/*
+pyside/dist/*
