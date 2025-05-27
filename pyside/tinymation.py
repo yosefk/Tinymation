@@ -722,8 +722,8 @@ tinylib.fitpack_parcur.argtypes = [ctypes.c_void_p]*2 + [ctypes.c_int]*3 + [ctyp
 
 def rgba_array(surface):
     ptr, ystride, width, height, bgr = color_c_params(pg.surfarray.pixels3d(surface))
-    buffer = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * (width * ystride * 4))).contents
-    return np.ndarray((height,width,4), dtype=np.uint8, buffer=buffer, strides=(ystride, 4, 1)), bgr
+    buffer = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * (height * ystride * 4))).contents
+    return np.ndarray((width,height,4), dtype=np.uint8, buffer=buffer, strides=(4, ystride, 1)), bgr
 
 # these are simple functions to test the assumptions regarding Surface numpy array layout
 def meshgrid_color(rgb): tinylib.meshgrid_color(*color_c_params(rgb))
@@ -4715,7 +4715,8 @@ widget = TinymationWidget()
 try_set_cursor(pencil_cursor[0])
 
 def signal_handler(sig, frame):
-    print("\nInterrupted by Ctrl+C!")
+    print("\nInterrupted by Ctrl+C! Shutting down, please wait...")
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     widget.shutdown()
     QApplication.quit()
 signal.signal(signal.SIGINT, signal_handler)
