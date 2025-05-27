@@ -1,14 +1,23 @@
 import viztracer
+import collections
 import shutil
 import time
 import os
+
+MAX_TRACER_OBJECTS = 500 # we see "Failed to create Tss_Key" after ~1000 objects,
+# but better to be on the safe side since not sure what else creates Tss_Keys...
+
+class EventData:
+    def __init__(self):
+        self.tracer = None
+        self.start = 0
+        self.total = 0
 
 class Trace:
     '''collect trace data per event type in start()/stop(); save the
     trace of the slowest event per type in save()'''
     def __init__(self):
-        self.event2tracer = {}
-        self.event2slowest = {}
+        self.event2data = collections.OrderedDict()
         # we reuse tracer objects since apparently not doing so leaks some system resource,
         # as evidenced by the following error message upon the process abruptly exiting:
         #   Failed to create Tss_Key: Resource temporarily unavailable
@@ -20,6 +29,10 @@ class Trace:
         self.tracer_stack = []
 
     def start(self, event):
+        '''with trace.start('event-name'):
+            code()
+        ...will trace the code in the with  block
+        '''
         class TraceStopper:
             def __enter__(s): pass
             def __exit__(s, *args): self.stop()
@@ -28,6 +41,9 @@ class Trace:
         self.start_time = time.time()
         self._event = event
         if not self.tracer_pool:
+            if len(self.event2data) >= MAX_TRACER_OBJECTS:
+                self.event2data.popitem(last=False) # LRU eviction...
+                # better than process termination upon failing to create Tss_Key
             self.tracer = viztracer.VizTracer(ignore_frozen=True)
         else:
             self.tracer = self.tracer_pool.pop()
@@ -35,15 +51,17 @@ class Trace:
         return TraceStopper()
 
     def stop(self):
+        '''better use with trace.start(event): rather than call stop directly'''
         self.tracer.stop()
         total = time.time() - self.start_time
-        if total > self.event2slowest.get(self._event, 0):
-            self.event2slowest[self._event] = total
-            if self._event in self.event2tracer:
-                old_tracer = self.event2tracer[self._event]
-                old_tracer.clear()
-                self.tracer_pool.append(old_tracer)
-            self.event2tracer[self._event] = self.tracer
+        if total > self.event2data.setdefault(self._event, EventData()).total:
+            data = self.event2data[self._event]
+            data.start = self.start_time
+            data.total = total
+            if data.tracer is not None:
+                data.tracer.clear()
+                self.tracer_pool.append(data.tracer)
+            data.tracer = self.tracer
         else:
             self.tracer.clear()
             self.tracer_pool.append(self.tracer)
@@ -81,6 +99,8 @@ class Trace:
             self.tracer.start()
 
     def save(self, dir):
+        '''saves a trace json file per event (the slowest trace for that event),
+        and a slowest.txt report showing the worst case latency of each event and when it was observed'''
         try:
             shutil.rmtree(dir)
         except:
@@ -89,11 +109,35 @@ class Trace:
             os.makedirs(dir)
         except:
             pass
+        if not os.path.isdir(dir):
+            print('warning: could not create trace directory',dir)
+            return
         with open(os.path.join(dir, 'slowest.txt'), 'w') as f:
-            for event, slowest in reversed(sorted(self.event2slowest.items(), key=lambda t: t[1])):
-                f.write(f'{slowest*1000:.2f} {event}\n')
-        for event, tracer in self.event2tracer.items():
+            for event, data in reversed(sorted(self.event2data.items(), key=lambda t: t[1].total)):
+                start = time.strftime('%H:%M:%S', time.localtime(data.start))
+                f.write(f'{data.total*1000:.2f} {event} {start}\n')
+        for event, data in self.event2data.items():
             # prints "Loading finish", apparently from C code, despite verbose=0
-            tracer.save(os.path.join(dir, event+'.json'), verbose=0)
+            data.tracer.save(os.path.join(dir, event+'.json'), verbose=0)
 
 trace = Trace()
+
+# tests
+#######
+
+# we test that we don't create more than MAX_TRACER_OBJECTS events, and that nesting trace.start() calls works
+
+def test_nested_tracing(tmp_path):
+    global MAX_TRACER_OBJECTS
+    MAX_TRACER_OBJECTS = 20
+
+    for i in range(10):
+        with trace.start('outer%d'%i):
+            for j in range(10):
+                with trace.start('inner%d'%j):
+                    pass
+
+    trace.save(str(tmp_path))
+
+def test_invalid_dir():
+    test_nested_tracing('/not/found')
