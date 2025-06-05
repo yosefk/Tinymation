@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <random>
 
 struct Point2D
 {
@@ -85,6 +86,40 @@ Intersection intersection(const Line2D& l1, const Line2D& l2, Point2D *intersect
     return Intersection::BOUNDED;
 }
 
+struct SamplePoint
+{
+    Point2D pos;
+    double time = 0;
+    double pressure = 0;
+};
+
+class Noise2D
+{
+  private:
+    //TODO: better seeding
+    std::mt19937 rng;         // Random number generator
+    std::uniform_real_distribution<double> angleDist{0.0, 2.0 * M_PI}; // For random angle (0 to 2π)
+    std::uniform_real_distribution<double> magDist{0, 1};   // For random magnitude (0 to 1)
+
+  public:
+    // Helper function to add random noise to a point
+    Point2D addNoise(const Point2D& point, double maxNoise) {
+        if (maxNoise <= 0) {
+            return point;
+        }
+        double angle = angleDist(rng);
+        //sqrt would produce the same distribution all over the circle instead of higher density closer to the center
+        //as we'd get if we didn't correct for a circle closer to the center being shorter
+        //we use pow 0.7 to have a degree of pull towards the center (lowest-pressure pencil which has the highest
+        //circle center noise looks good with this setting, specifically)
+        double magnitude = pow(magDist(rng), 0.7) * maxNoise;
+        return Point2D{
+            point.x + magnitude * cos(angle),
+            point.y + magnitude * sin(angle)
+        };
+    }
+};
+
 class ImagePainter
 {
   public:
@@ -109,8 +144,132 @@ class ImagePainter
 
     void resetROI();
     void getROI(int* region);
+    //this is a "pen" line - solid with sharp antialised edges
     void drawLine(const Point2D& start, const Point2D& end, double width);
+
+    //this is inspired by Krita's "Pencil-2"; it draws circles with the diameter equaling the line width,
+    //placing them not too close to each other (it remembers the last center across calls)
+    //and adding some noise to the center location 
+    void drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& start, const SamplePoint& end, double width);
+
+  private:
+    void drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange);
+
+    //these are used by drawLineUsingWideSoftCiclesWithNoisyCenters
+    Point2D _lastCircleCenter; // Center of the last drawn circle
+    double _remainingDistance=0; // Distance until the next circle should be drawn
+    bool _isFirstSegment=true;      // True for the first segment of a polyline
+
+    Noise2D _noise2D;
 };
+
+void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange)
+{
+    // Extend the bounding box slightly to capture anti-aliased edges
+    double aa_margin = 1.0; // Extra pixels for smooth edges
+    int startx = floor(std::max(center.x - radius - aa_margin, 0.0));
+    int starty = floor(std::max(center.y - radius - aa_margin, 0.0));
+    int endx = floor(std::min(center.x + radius + aa_margin, double(_width)));
+    int endy = floor(std::min(center.y + radius + aa_margin, double(_height)));
+
+    int immutableVal = _erase ? 0 : 255;
+    for(int y = starty; y < endy; y++) {
+        for(int x = startx; x < endx; x++) {
+            int ind = y*_ystride + x*_xstride;
+            int oldVal = _image[ind];
+            if(oldVal == immutableVal) {
+                continue;
+            }
+            double d = distance(center, Point2D{double(x+0.5),double(y+0.5)});
+            // Anti-aliasing: Smooth transition near the edge
+            double aa_width = 1.0; // Width of the anti-aliasing band
+            double intensity = 0.0;
+
+            if (d <= radius - aa_width) {
+                // Fully inside the circle: use linear falloff
+                intensity = 1.0 - d / radius;
+            } else if (d < radius + aa_width) {
+                // In the anti-aliasing region: blend linear falloff with smooth edge
+                double t = (d - radius) / aa_width; // t in [-1, 1]
+                double s = 0.5 - 0.5 * t; // Linearly maps t from [-1,1] to [0,1]
+                double aa_factor = s * s * (3.0 - 2.0 * s); // Smoothstep for edge
+                // Linearly interpolate intensity from (1 - d/radius) at inner edge
+                intensity = (1.0 - d / radius) * aa_factor;
+            } else {
+                // Outside the circle
+                continue;
+            }
+
+            // Apply pixel value change
+            int pixValChange = round(double(greatestPixValChange) * intensity);
+            int newVal = std::max(0, std::min(oldVal + pixValChange, 255));
+            if(newVal != oldVal) {
+                _image[ind] = newVal;
+                _xmin = std::min(_xmin, x);
+                _ymin = std::min(_ymin, y);
+                _xmax = std::max(_xmax, x);
+                _ymax = std::max(_ymax, y);
+                onPixelPainted(x, y, _image[ind]);
+            }
+        }
+    }
+}
+
+void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& starts, const SamplePoint& ends, double width)
+{
+    Point2D start = starts.pos;
+    Point2D end = ends.pos;
+
+    double radius = width / 2;
+    double interval = radius * 0.3;
+    double pressure = (starts.pressure + ends.pressure)/2; //TODO: move this into the loop instead of being loop invariant
+    int greatestPixValChange =  -64*std::min(1., std::max(0., pressure*pressure + pressure*0.35));// 128 * pressure * (_erase ? -1 : 1);
+
+    double maxCenterNoise = radius * 0.25;
+    if(!_erase) {
+        interval = radius * 0.1;
+        greatestPixValChange = 2 + 64*std::min(1., std::max(0., pressure*pressure - 0.1 + pressure*0.2)) * (_erase ? -1 : 1);//std::max(0., pressure*pressure - 0.1);
+        maxCenterNoise = radius * (3.5 * (1-pressure)*(1-pressure) + 0.25);
+    }
+
+    // Compute segment length and direction
+    double segmentLength = distance(start, end);
+    Point2D direction = diff(end, start);
+
+    if (segmentLength == 0) {
+        if (_isFirstSegment) {
+            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange);
+            _lastCircleCenter = start;
+            _remainingDistance = interval;
+        }
+        return;
+    }
+
+    // Compute unit direction
+    Point2D unitDirection = mul(direction, 1.0 / segmentLength);
+
+    // For the first segment, start at the start point
+    if (_isFirstSegment) {
+        drawSoftCircle(start, radius, greatestPixValChange);
+        _lastCircleCenter = start;
+        _remainingDistance = interval;
+        _isFirstSegment = false;
+    }
+
+    // Draw circles at intervals, starting from _remainingDistance
+    double distanceToNext = _remainingDistance;
+    while (distanceToNext <= segmentLength + 1e-10) { // Small epsilon for floating-point errors
+        Point2D center = sum(start, mul(unitDirection, distanceToNext));
+        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange);
+        _lastCircleCenter = center;
+        distanceToNext += interval;
+    }
+
+    // Update remaining distance to the next circle
+    _remainingDistance = distanceToNext - segmentLength;
+
+    onLinePainted(start, end);
+}
 
 void ImagePainter::resetROI()
 {
@@ -211,13 +370,6 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
     onLinePainted(start, end);
 }
 
-struct SamplePoint
-{
-    Point2D pos;
-    double time = 0;
-    double pressure = 0;
-};
-
 Point2D tangent(const SamplePoint& p1, const SamplePoint& p2)
 {
     Point2D d = diff(p1.pos, p2.pos);
@@ -250,6 +402,7 @@ class Brush
     double _tailAggressiveness = 0;
     bool _smoothPressure = false;
     double _lineWidth = 3;
+    bool _softLines = false;
 
     //output image
     ImagePainter* _painter = nullptr;
@@ -501,11 +654,16 @@ void Brush::paintLine(const SamplePoint& p1, const SamplePoint& p2)
 {
     _paintedAtLeastOnce = true;
     if(_painter) {
-        _painter->drawLine(p1.pos, p2.pos, _lineWidth);
+        if(_softLines) {
+          _painter->drawLineUsingWideSoftCiclesWithNoisyCenters(p1, p2, _lineWidth);
+        }
+        else {
+          _painter->drawLine(p1.pos, p2.pos, _lineWidth);
+        }
     }
     else {
-      printf("{%f,%f},\n", p1.pos.x, p1.pos.y);
-      printf("{%f,%f},\n", p2.pos.x, p2.pos.y);
+        printf("{%f,%f},\n", p1.pos.x, p1.pos.y);
+        printf("{%f,%f},\n", p2.pos.x, p2.pos.y);
     }
 }
 
@@ -518,13 +676,14 @@ void Brush::paintAt(const SamplePoint& p)
 
 //extern "C" API
 
-extern "C" Brush* brush_init_paint(double x, double y, double time, double lineWidth, double smoothDist, int erase, unsigned char* image, int width, int height, int xstride, int ystride)
+extern "C" Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double smoothDist, int erase, int softLines, unsigned char* image, int width, int height, int xstride, int ystride)
 {
     Brush& brush = *new Brush;
     brush._smoothing = Smoothing::WEIGHTED;
     brush._lineWidth = lineWidth;
     brush._smoothDist = smoothDist;
     brush._tailAggressiveness = 0; //since we don't have pressure values, this parameter has no effect anyway
+    brush._softLines = softLines;
     
     ImagePainter& painter = *new ImagePainter;
     painter._image = image;
@@ -535,14 +694,14 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double lineW
     painter._erase = erase;
     brush._painter = &painter;
 
-    brush.initPaint({{x,y},time});
+    brush.initPaint({{x,y},time,pressure});
 
     return &brush;
 }
 
-extern "C" void brush_paint(Brush* brush, double* x, double* y, double time, double zoom, int* region)
+extern "C" void brush_paint(Brush* brush, double* x, double* y, double time, double pressure, double zoom, int* region)
 {
-    SamplePoint s{{*x,*y},time};
+    SamplePoint s{{*x,*y},time,pressure};
     brush->_painter->resetROI();
     brush->paint(s, zoom);
     *x = s.pos.x;
@@ -581,7 +740,7 @@ class FloodFillingPainter : public ImagePainter
     std::vector<int> _seeds_x;
     std::vector<int> _seeds_y;
 
-    virtual void onPixelPainted(int x, int y, int value)
+    void onPixelPainted(int x, int y, int value) override
     {
         if(value < 255) {
             _mask[_mask_stride*y + x] = 0;
@@ -589,7 +748,7 @@ class FloodFillingPainter : public ImagePainter
             _seeds_y.push_back(y);
         }
     }
-    virtual void onLinePainted(const Point2D& start, const Point2D& end)
+    void onLinePainted(const Point2D& start, const Point2D& end) override
     {
         if(_seeds_x.empty()) {
             return;

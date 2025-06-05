@@ -713,9 +713,9 @@ import numpy.ctypeslib as npct
 import ctypes
 tinylib = npct.load_library('tinylib','.')
 
-tinylib.brush_init_paint.argtypes = [ctypes.c_double]*5 + [ctypes.c_int, ctypes.c_void_p] + [ctypes.c_int]*4
+tinylib.brush_init_paint.argtypes = [ctypes.c_double]*6 + [ctypes.c_int]*2 + [ctypes.c_void_p] + [ctypes.c_int]*4
 tinylib.brush_init_paint.restype = ctypes.c_void_p
-tinylib.brush_paint.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_double]*2 + [ctypes.c_void_p]
+tinylib.brush_paint.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_double]*3 + [ctypes.c_void_p]
 tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]*2
 tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_int]*5
 tinylib.fitpack_parcur.argtypes = [ctypes.c_void_p]*2 + [ctypes.c_int]*3 + [ctypes.c_double] + [ctypes.c_void_p]*3
@@ -862,10 +862,10 @@ def restore_cursor():
 
 def bounding_rectangle_of_a_boolean_mask(mask):
     # Sum along the vertical and horizontal axes
-    vertical_sum = np.sum(mask, axis=0)
+    vertical_sum = np.sum(mask, axis=1)
     if not np.any(vertical_sum):
         return None
-    horizontal_sum = np.sum(mask, axis=1)
+    horizontal_sum = np.sum(mask, axis=0)
 
     minx, maxx = np.where(vertical_sum)[0][[0, -1]]
     miny, maxy = np.where(horizontal_sum)[0][[0, -1]]
@@ -1088,12 +1088,14 @@ def find_nearest(array, center_x, center_y, value):
     return tuple(points[nearest_idx])
 
 class PenTool(Button):
-    def __init__(self, eraser=False, width=WIDTH):
+    def __init__(self, eraser=False, soft=False, width=WIDTH, zoom_changes_pixel_width=True):
         Button.__init__(self)
         self.prev_drawn = None
         self.color = BACKGROUND if eraser else PEN
         self.eraser = eraser
+        self.soft = soft
         self.width = width
+        self.zoom_changes_pixel_width = zoom_changes_pixel_width
         self.circle_width = (width//2)*2
         self.points = []
         self.lines_array = None
@@ -1140,9 +1142,9 @@ class PenTool(Button):
 
     def init_brush(self, x, y, smoothDist=0):
         ptr, ystride, width, height = greyscale_c_params(self.lines_array)
-        lineWidth = 2.5 if self.width == WIDTH else self.width*layout.drawing_area().xscale
+        lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
         # FIXME use event timestamps
-        self.brush = tinylib.brush_init_paint(x, y, time.time_ns()*1000000, lineWidth, smoothDist, 1 if self.eraser else 0, ptr, width, height, 4, ystride)
+        self.brush = tinylib.brush_init_paint(x, y, time.time_ns()*1000000, layout.pressure, lineWidth, smoothDist, 1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride)
 
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
@@ -1216,7 +1218,7 @@ class PenTool(Button):
             t += 7
             xarr[0] = x
             yarr[0] = y
-            tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, self.region)
+            tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, 1, self.region)
             self.update_bbox()
 
         tinylib.brush_end_paint(self.brush, self.region)
@@ -1278,7 +1280,7 @@ class PenTool(Button):
             self.short_term_bbox = (1000000, 1000000, -1, -1)
             xarr = np.array([cx])
             yarr = np.array([cy])
-            tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), time.time_ns()*1000000, drawing_area.xscale, self.region)
+            tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), time.time_ns()*1000000, layout.pressure, drawing_area.xscale, self.region)
             self.update_bbox()
 
             if self.short_term_bbox[-1] >= 0:
@@ -1819,7 +1821,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     history.append_item(history_item)
 
     ptr, ystride, width, height = greyscale_c_params(lines)
-    brush = tinylib.brush_init_paint(px[0], py[0], 0, 2.5, 0, 0, ptr, width, height, 4, ystride)
+    brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, 2.5, 0, 0, 0, ptr, width, height, 4, ystride)
     xarr = np.zeros(1)
     yarr = np.zeros(1)
     t = 0
@@ -1829,7 +1831,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
         t += 7
         xarr[0] = x
         yarr[0] = y
-        tinylib.brush_paint(brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, region)
+        tinylib.brush_paint(brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, 1, region)
 
     tinylib.brush_end_paint(brush, region)
 
@@ -1930,6 +1932,7 @@ class Layout:
         self.focus_elem = None
         self.restore_tool_on_mouse_up = False
         self.mode = ANIMATION_LAYOUT
+        self.pressure = 1
 
     def aspect_ratio(self): return self.width/self.height
 
@@ -1996,6 +1999,8 @@ class Layout:
 
         if event.type not in [pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION]:
             return
+
+        self.pressure = getattr(event, 'pressure', 1)
 
         if event.type in [pg.MOUSEMOTION, pg.MOUSEBUTTONUP] and not self.is_pressed:
             return # this guards against processing mouse-up with a button pressed which isn't button 0,
@@ -3955,10 +3960,11 @@ def zoom_to_film_res():
 
 TOOLS = {
     'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
-    'pencil': Tool(PenTool(), pencil_cursor, 'bB'),
-    'eraser': Tool(PenTool(BACKGROUND, WIDTH), eraser_cursor, 'wW'),
-    'eraser-medium': Tool(PenTool(BACKGROUND, MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
-    'eraser-big': Tool(PenTool(BACKGROUND, BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
+    'pen': Tool(PenTool(width=2.5, zoom_changes_pixel_width=False), pencil_cursor, 'bB'),
+    'pencil': Tool(PenTool(soft=True, width=4, zoom_changes_pixel_width=False), pencil_cursor, 'sS'),
+    'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
+    'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
+    'eraser-big': Tool(PenTool(eraser=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
     'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'fF'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
@@ -4673,6 +4679,7 @@ class TinymationWidget(QWidget):
             # where the cursor hotspot is (which isn't happening without this correction)
             e.pos = (pos.x()-.5, pos.y()-.5)
             e.subpixel = True
+            e.pressure = event.pressure()
             layout.on_event(e)
             self.redrawLayoutIfNeeded(event)
             self.redrawScreen()
