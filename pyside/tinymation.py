@@ -715,7 +715,7 @@ tinylib = npct.load_library('tinylib','.')
 
 tinylib.brush_init_paint.argtypes = [ctypes.c_double]*6 + [ctypes.c_int]*2 + [ctypes.c_void_p] + [ctypes.c_int]*4
 tinylib.brush_init_paint.restype = ctypes.c_void_p
-tinylib.brush_paint.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_double]*3 + [ctypes.c_void_p]
+tinylib.brush_paint.argtypes = [ctypes.c_void_p, ctypes.c_int] + [ctypes.c_void_p]*4 + [ctypes.c_double] + [ctypes.c_void_p]
 tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]*2
 tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_int]*5
 tinylib.fitpack_parcur.argtypes = [ctypes.c_void_p]*2 + [ctypes.c_int]*3 + [ctypes.c_double] + [ctypes.c_void_p]*3
@@ -1186,7 +1186,8 @@ class PenTool(Button):
     def new_history_item(self):
         self.bbox = (1000000, 1000000, -1, -1)
         self.lines_history_item = HistoryItem('lines')
-        self.color_history_item = HistoryItem('color')
+        if self.eraser:
+            self.color_history_item = HistoryItem('color')
 
     def update_bbox(self):
         xmin, ymin, xmax, ymax = self.bbox
@@ -1197,32 +1198,32 @@ class PenTool(Button):
         self.short_term_bbox = (min(xmin, rxmin), min(ymin, rymin), max(xmax, rxmax), max(ymax, rymax))
 
     def smooth_line(self):
+        assert not self.eraser
         try:
             px, py = bspline_interp(self.points, smoothing=len(self.points)/(layout.drawing_area().zoom*2))
         except:
             return # if we can't smooth the line (eg not enough points), NP, we'll just keep the raw input
 
         self.lines_history_item.undo()
-        self.color_history_item.undo()
+
+        self.draw_line(list(zip(px,py)))
+
+    def draw_line(self, xys):
+        assert not self.eraser
         self.new_history_item()
+        x0, y0 = xys[0]
+        self.init_brush(x0, y0)
 
-        self.init_brush(px[0], py[0])
-        if self.eraser:
-            self.pen_mask = self.lines_array == 255
-            self.brush_flood_fill_color_based_on_mask()
+        xarr = np.array([xy[0] for xy in xys])
+        yarr = np.array([xy[1] for xy in xys])
 
-        xarr = np.zeros(1)
-        yarr = np.zeros(1)
-        t = 0
-        for x,y in zip(px,py):
-            t += 7
-            xarr[0] = x
-            yarr[0] = y
-            tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, 1, self.region)
-            self.update_bbox()
+        tinylib.brush_paint(self.brush, len(xys), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, 1, self.region)
+        self.update_bbox()
 
         tinylib.brush_end_paint(self.brush, self.region)
         self.update_bbox()
+
+        self.points = xys
 
     def on_mouse_up(self, x, y):
         if self.patching or curr_layer_locked():
@@ -1235,11 +1236,12 @@ class PenTool(Button):
         tinylib.brush_end_paint(self.brush, self.region)
         self.update_bbox()
 
-        # the code in smooth_line() works for erasers ATM but it doesn't sound good to smooth "mice erasers"
+        # it doesn't sound good to smooth "mice erasers"
         # because while nominally pens and erasers are basically the same, you draw with a pen to get nice lines,
         # so you prefer them smoothed rather than getting the ugly mouse artefacts, but you use erasers to get
         # rid of what you're erasing, so you don't want to aim the eraser paintakingly at something and then
-        # suddenly have slightly different things erased because of smoothing when you lift the pen.
+        # suddenly have slightly different things erased because of smoothing when you lift the pen (not to mention
+        # the "ripple effect" on color the way our erasers work)
         if not layout.subpixel and not self.eraser:
             self.smooth_line()
 
@@ -1250,9 +1252,12 @@ class PenTool(Button):
 
         self.lines_array = None
 
+        if not self.soft and not self.eraser: # pen rather than pencil or eraser
+            layout.last_pen_line = self.points
+
     def save_history_item(self):
         if self.bbox[-1] >= 0:
-            history_item = HistoryItemSet([self.lines_history_item, self.color_history_item])
+            history_item = HistoryItemSet([self.lines_history_item, self.color_history_item]) if self.eraser else self.lines_history_item
             history_item.optimize(self.bbox)
             history.append_item(history_item)
 
@@ -1261,7 +1266,7 @@ class PenTool(Button):
         self.new_history_item()
         self.set_history_timer()
 
-    def on_mouse_move(self, x, y, from_timer=False):
+    def on_mouse_move(self, x, y):
         if self.patching or curr_layer_locked():
             return
 
@@ -1280,7 +1285,9 @@ class PenTool(Button):
             self.short_term_bbox = (1000000, 1000000, -1, -1)
             xarr = np.array([cx])
             yarr = np.array([cy])
-            tinylib.brush_paint(self.brush, arr_base_ptr(xarr), arr_base_ptr(yarr), time.time_ns()*1000000, layout.pressure, drawing_area.xscale, self.region)
+            tarr = np.array([time.time_ns()*1000000]) #TODO: save the time for the shift tool?..
+            parr = np.array([layout.pressure])
+            tinylib.brush_paint(self.brush, 1, *[arr_base_ptr(arr) for arr in [xarr, yarr, tarr, parr]], drawing_area.xscale, self.region)
             self.update_bbox()
 
             if self.short_term_bbox[-1] >= 0:
@@ -1288,6 +1295,113 @@ class PenTool(Button):
                 widget.redrawScreen()
             
         self.prev_drawn = (x,y) 
+
+def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5):
+    if len(points) < 2:
+        return points
+    
+    def euclidean_distance(p1, p2):
+        return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+    
+    def segment_length(p1, p2):
+        return euclidean_distance(p1, p2)
+    
+    # Find the closest point to focus
+    closest_idx = min(range(len(points)), key=lambda i: euclidean_distance(points[i], focus))
+    closest_point = points[closest_idx]
+    
+    # Compute polyline distances from closest point
+    polyline_dists = [0] * len(points)
+    # Forward from closest point
+    for i in range(closest_idx + 1, len(points)):
+        polyline_dists[i] = polyline_dists[i-1] + segment_length(points[i-1], points[i])
+    # Backward from closest point
+    for i in range(closest_idx - 1, -1, -1):
+        polyline_dists[i] = polyline_dists[i+1] + segment_length(points[i], points[i+1])
+    
+    def effect_weight(poly_dist):
+        if poly_dist >= threshold:
+            return 0
+        # Cosine falloff: 1 at poly_dist=0, 0 at poly_dist=threshold
+        t = poly_dist / threshold
+        return 0.5 * (1 + math.cos(math.pi * t))
+    
+    # Compute pull direction (vector from closest point to focus)
+    pull_dir = (focus[0] - closest_point[0], focus[1] - closest_point[1])
+    pull_magnitude = euclidean_distance(closest_point, focus)
+    if pull_magnitude > 0:
+        pull_dir = (pull_dir[0] / pull_magnitude, pull_dir[1] / pull_magnitude)
+    else:
+        pull_dir = (0, 0)  # No pull if focus is at closest point
+    
+    new_points = []
+    for i in range(len(points)):
+        x, y = points[i]
+        poly_dist = polyline_dists[i]
+        
+        # Smoothing component
+        smooth_weight = min(effect_weight(poly_dist) * smoothness, 0.5)
+        if smooth_weight == 0:
+            smoothed_x, smoothed_y = x, y
+        else:
+            # Get neighbors for smoothing
+            neighbors = []
+            if i > 0:
+                neighbors.append(points[i-1])
+            if i < len(points) - 1:
+                neighbors.append(points[i+1])
+            
+            if neighbors:
+                avg_x = sum(p[0] for p in neighbors) / len(neighbors)
+                avg_y = sum(p[1] for p in neighbors) / len(neighbors)
+                smoothed_x = x * (1 - smooth_weight) + avg_x * smooth_weight
+                smoothed_y = y * (1 - smooth_weight) + avg_y * smooth_weight
+            else:
+                smoothed_x, smoothed_y = x, y
+        
+        # Pull component
+        pull = effect_weight(poly_dist) * pull_strength
+        if pull > 0 and pull_magnitude > 0:
+            # Move along pull direction, scaled by pull strength and distance
+            final_x = smoothed_x + pull * pull_magnitude * pull_dir[0]
+            final_y = smoothed_y + pull * pull_magnitude * pull_dir[1]
+        else:
+            final_x, final_y = smoothed_x, smoothed_y
+        
+        new_points.append((final_x, final_y))
+    
+    return new_points
+
+class PenLineShiftSmoothTool(Button):
+    def on_mouse_down(self, x, y):
+        pen = TOOLS['pen'].tool
+        pen.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
+
+    def on_mouse_up(self, x, y):
+        pen = TOOLS['pen'].tool
+        pen.lines_array = None
+
+    def on_mouse_move(self, x, y):
+        last_pen_line = getattr(layout, 'last_pen_line', None)
+        if not last_pen_line:
+            return
+        drawing_area = layout.drawing_area()
+        cx, cy = drawing_area.xy2frame(x, y)
+        pen = TOOLS['pen'].tool
+
+        # FIXME: clean this up
+        history.undo_item(drawing_changes_only=True)
+
+        pen.new_history_item()
+
+        pen.draw_line(smooth_polyline(last_pen_line, (cx,cy), pull_strength=layout.pressure))
+
+        pen.save_history_item()
+
+        layout.drawing_area().draw_region(pen.bbox)
+        layout.last_pen_line = pen.points
+
+
 
 MIN_ZOOM, MAX_ZOOM = 1, 5
 
@@ -1822,16 +1936,13 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     ptr, ystride, width, height = greyscale_c_params(lines)
     brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, 2.5, 0, 0, 0, ptr, width, height, 4, ystride)
-    xarr = np.zeros(1)
-    yarr = np.zeros(1)
-    t = 0
+
+    xarr = np.array(px)
+    yarr = np.array(py)
     rect = np.zeros(4, dtype=np.int32)
     region = arr_base_ptr(rect)
-    for x,y in zip(px,py):
-        t += 7
-        xarr[0] = x
-        yarr[0] = y
-        tinylib.brush_paint(brush, arr_base_ptr(xarr), arr_base_ptr(yarr), t, 1, 1, region)
+
+    tinylib.brush_paint(brush, len(px), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, 1, region)
 
     tinylib.brush_end_paint(brush, region)
 
@@ -1927,8 +2038,8 @@ class Layout:
         self.is_pressed = False
         self.is_playing = False
         self.playing_index = 0
-        self.tool = PenTool()
         self.full_tool = TOOLS['pencil']
+        self.tool = self.full_tool.tool
         self.focus_elem = None
         self.restore_tool_on_mouse_up = False
         self.mode = ANIMATION_LAYOUT
@@ -3965,6 +4076,7 @@ TOOLS = {
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
     'eraser-big': Tool(PenTool(eraser=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
+    'line-shift': Tool(PenLineShiftSmoothTool(), pencil_cursor, 'mM'),
     'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'fF'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
@@ -4301,7 +4413,7 @@ class History:
         layout.drawing_area().clear_fading_mask() # new operations invalidate old skeletons
 
     def undo_item(self, drawing_changes_only):
-        trace.event('undo-redo')
+        trace.event('undo')
         if self.suggestions:
             s = self.suggestions
             self.suggestions = None
@@ -4327,7 +4439,7 @@ class History:
         layout.drawing_area().clear_fading_mask() # changing canvas state invalidates old skeletons
 
     def redo_item(self):
-        trace.event('undo-redo')
+        trace.event('redo')
         if self.redo:
             last_op = self.redo[-1]
             if last_op.make_undone_changes_visible():

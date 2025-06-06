@@ -699,13 +699,15 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double press
     return &brush;
 }
 
-extern "C" void brush_paint(Brush* brush, double* x, double* y, double time, double pressure, double zoom, int* region)
+extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, double zoom, int* region)
 {
-    SamplePoint s{{*x,*y},time,pressure};
     brush->_painter->resetROI();
-    brush->paint(s, zoom);
-    *x = s.pos.x;
-    *y = s.pos.y;
+    for(int i=0; i<npoints; ++i) {
+        SamplePoint s{{x[i],y[i]},time ? time[i] : (i+1)*7, pressure ? pressure[i] : 1};
+        brush->paint(s, zoom);
+        x[i] = s.pos.x;
+        y[i] = s.pos.y;
+    }
     brush->_painter->getROI(region);
 }
 
