@@ -610,6 +610,7 @@ import pygame.gfxdraw
 import math
 import io
 import shutil
+import weakref
 
 pg = pygame
 pg.init()
@@ -872,11 +873,19 @@ def bounding_rectangle_of_a_boolean_mask(mask):
 
     return minx, maxx, miny, maxy
 
+class EditablePenLine:
+    def __init__(self, points, line_drawing_history_item):
+        self.points = points
+        self.line_drawing_history_item = line_drawing_history_item
+    def undo_line_drawing(self):
+        self.line_drawing_history_item().undo()
+
 class HistoryItemBase:
     def __init__(self, restore_pos_before_undo=True):
         self.restore_pos_before_undo = restore_pos_before_undo
         self.pos_before_undo = movie.pos
         self.layer_pos_before_undo = movie.layer_pos
+        self.editable_pen_line = None
     def is_drawing_change(self): return False
     def from_curr_pos(self): return self.pos_before_undo == movie.pos and self.layer_pos_before_undo == movie.layer_pos
     def byte_size(history_item): return 128
@@ -940,6 +949,7 @@ class HistoryItem(HistoryItemBase):
         movie.seek_frame_and_layer(self.pos_before_undo, self.layer_pos_before_undo) # we should already be here, but just in case (undoing in the wrong frame is a very unfortunate bug...)
 
         redo = HistoryItem(self.surface_id)
+        redo.editable_pen_line = self.editable_pen_line
 
         frame = self.curr_surface()
         if self.optimized:
@@ -974,6 +984,8 @@ class HistoryItem(HistoryItemBase):
 
     def byte_size(self):
         return self.saved_surface.get_width() * self.saved_surface.get_height() * 4 if not self.nop() else 0
+
+    def __call__(self): return self # to make it work like a weakref which is used in EditablePenLine
 
 class HistoryItemSet(HistoryItemBase):
     def __init__(self, items):
@@ -1252,13 +1264,14 @@ class PenTool(Button):
 
         self.lines_array = None
 
-        if not self.soft and not self.eraser: # pen rather than pencil or eraser
-            layout.last_pen_line = self.points
-
     def save_history_item(self):
         if self.bbox[-1] >= 0:
             history_item = HistoryItemSet([self.lines_history_item, self.color_history_item]) if self.eraser else self.lines_history_item
             history_item.optimize(self.bbox)
+
+            if not self.soft and not self.eraser: # pen rather than pencil or eraser
+                history_item.editable_pen_line = EditablePenLine(self.points, weakref.ref(history_item)) # can be edited with PenLineShiftSmoothTool
+
             history.append_item(history_item)
 
     def on_history_timer(self):
@@ -1372,36 +1385,56 @@ def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0
     
     return new_points
 
+def points_bbox(xys, margin):
+    xs = [xy[0] for xy in xys]
+    ys = [xy[1] for xy in xys]
+    return min(xs)-margin, min(ys)-margin, max(xs)+margin, max(ys)+margin
+
 class PenLineShiftSmoothTool(Button):
+    def __init__(self):
+        self.editable_pen_line = None
+
     def on_mouse_down(self, x, y):
+        last_item = history.last_item()
+        if last_item:
+            self.editable_pen_line = last_item.editable_pen_line
+        if self.editable_pen_line is None:
+            return
+
         pen = TOOLS['pen'].tool
         pen.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
 
+        self.history_item = HistoryItem('lines')
+
     def on_mouse_up(self, x, y):
+        if self.editable_pen_line is None:
+            return
+        
+        self.history_item.optimize()
+        self.history_item.editable_pen_line = self.editable_pen_line
+        history.append_item(self.history_item)
+
         pen = TOOLS['pen'].tool
         pen.lines_array = None
+        self.editable_pen_line = None
+        self.history_item = None
 
     def on_mouse_move(self, x, y):
-        last_pen_line = getattr(layout, 'last_pen_line', None)
-        if not last_pen_line:
+        if self.editable_pen_line is None:
             return
+
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
         pen = TOOLS['pen'].tool
 
-        # FIXME: clean this up
-        history.undo_item(drawing_changes_only=True)
+        self.editable_pen_line.undo_line_drawing()
 
-        pen.new_history_item()
+        new_points = smooth_polyline(self.editable_pen_line.points, (cx,cy), pull_strength=layout.pressure)
+        self.editable_pen_line = EditablePenLine(new_points, HistoryItem('lines', points_bbox(new_points, WIDTH*2)))
 
-        pen.draw_line(smooth_polyline(last_pen_line, (cx,cy), pull_strength=layout.pressure))
+        pen.draw_line(new_points)
 
-        pen.save_history_item()
-
-        layout.drawing_area().draw_region(pen.bbox)
-        layout.last_pen_line = pen.points
-
-
+        layout.drawing_area().draw_region(pen.bbox) # FIXME: need to redraw the parts where the old line was removed from, too
 
 MIN_ZOOM, MAX_ZOOM = 1, 5
 
@@ -1932,6 +1965,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     maxx = min(res.IWIDTH-1, math.ceil(max(px)) + margin)
     maxy = min(res.IHEIGHT-1, math.ceil(max(py)) + margin)
     history_item = HistoryItem('lines', bbox=(minx, miny, maxx, maxy))
+    history_item.editable_pen_line = EditablePenLine(list(zip(px,py)), weakref.ref(history_item))
     history.append_item(history_item)
 
     ptr, ystride, width, height = greyscale_c_params(lines)
@@ -4437,6 +4471,9 @@ class History:
             self.undo.pop()
 
         layout.drawing_area().clear_fading_mask() # changing canvas state invalidates old skeletons
+
+    def last_item(self):
+        return self.undo[-1] if self.undo else None
 
     def redo_item(self):
         trace.event('redo')
