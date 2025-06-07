@@ -954,7 +954,7 @@ class HistoryItem(HistoryItemBase):
             print(f'WARNING: HistoryItem at the wrong position! should be {self.pos_before_undo} [layer {self.layer_pos_before_undo}], but is {movie.pos} [layer {movie.layer_pos}]')
         movie.seek_frame_and_layer(self.pos_before_undo, self.layer_pos_before_undo) # we should already be here, but just in case (undoing in the wrong frame is a very unfortunate bug...)
 
-        redo = HistoryItem(self.surface_id)
+        redo = HistoryItem(self.surface_id, (self.minx, self.miny, self.maxx, self.maxy) if self.optimized else None)
         redo.editable_pen_line = self.editable_pen_line
 
         frame = self.curr_surface()
@@ -962,8 +962,6 @@ class HistoryItem(HistoryItemBase):
             frame = frame.subsurface(self._subsurface_bbox())
         
         rgba_array(frame)[0][:] = rgba_array(self.saved_surface)[0]
-
-        redo.optimize((self.minx, self.miny, self.maxx, self.maxy) if self.optimized else None)
         return redo
     def optimize(self, bbox=None):
         if self.optimized:
@@ -1223,12 +1221,12 @@ class PenTool(Button):
             return # if we can't smooth the line (eg not enough points), NP, we'll just keep the raw input
 
         self.lines_history_item.undo()
+        self.new_history_item()
 
         self.draw_line(list(zip(px,py)))
 
     def draw_line(self, xys):
         assert not self.eraser
-        self.new_history_item()
         x0, y0 = xys[0]
         self.init_brush(x0, y0)
 

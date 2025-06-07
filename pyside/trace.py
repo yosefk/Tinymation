@@ -38,7 +38,6 @@ class Trace:
             def __exit__(s, *args): self.stop()
         if self.tracer is not None:
             self.tracer_stack.append(self._suspend())
-        self.start_time = time.time()
         self._event = event
         if not self.tracer_pool:
             if len(self.event2data) >= MAX_TRACER_OBJECTS:
@@ -47,6 +46,7 @@ class Trace:
             self.tracer = viztracer.VizTracer(ignore_frozen=True)
         else:
             self.tracer = self.tracer_pool.pop()
+        self.start_time = time.time()
         self.tracer.start()
         return TraceStopper()
 
