@@ -8,3 +8,5 @@ pygame/dist/*
 pygame/build/*
 pygame/combined-backup/*
 pyside/dist/*
+*/event-trace/*
+.*.swp

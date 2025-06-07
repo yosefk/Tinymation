@@ -7,6 +7,8 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pygame version
 on_windows = os.name == 'nt'
 on_linux = sys.platform == 'linux'
 
+ASSETS = 'assets'
+
 # a hack for pyinstaller - when we spawn a subprocess in python, we pass sys.executable
 # and sys.argv[0] as the command line and python then hides its own executable from the sys.argv
 # of the subprocess, but this doesn't happen with a pyinstaller produced executables
@@ -67,6 +69,10 @@ def new_frame():
     return frame
 
 def load_image(fname):
+    if not os.path.dirname(fname) and not os.path.exists(fname):
+        asset = os.path.join(ASSETS, fname)
+        if os.path.exists(asset):
+            fname=asset
     s = pg.image.load(fname)
     # surfaces loaded from file have a different RGB/BGR layout - normalize it
     # FIXME: why do we need try/except?..
