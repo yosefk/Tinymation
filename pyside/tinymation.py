@@ -616,7 +616,6 @@ import pygame.gfxdraw
 import math
 import io
 import shutil
-import weakref
 
 pg = pygame
 pg.init()
@@ -881,11 +880,9 @@ def bounding_rectangle_of_a_boolean_mask(mask):
     return minx, maxx, miny, maxy
 
 class EditablePenLine:
-    def __init__(self, points, line_drawing_history_item):
+    def __init__(self, points):
         self.points = points
-        self.line_drawing_history_item = line_drawing_history_item
-    def undo_line_drawing(self):
-        self.line_drawing_history_item().undo()
+        self.frame_without_line = None
 
 class HistoryItemBase:
     def __init__(self, restore_pos_before_undo=True):
@@ -993,8 +990,6 @@ class HistoryItem(HistoryItemBase):
 
     def byte_size(self):
         return self.saved_surface.get_width() * self.saved_surface.get_height() * 4 if not self.nop() else 0
-
-    def __call__(self): return self # to make it work like a weakref which is used in EditablePenLine
 
 class HistoryItemSet(HistoryItemBase):
     def __init__(self, items):
@@ -1294,7 +1289,7 @@ class PenTool(Button):
             history_item.optimize(self.bbox)
 
             if not self.soft and not self.eraser: # pen rather than pencil or eraser
-                history_item.editable_pen_line = EditablePenLine(simplify_polyline(self.polyline, 1), weakref.ref(history_item)) # can be edited with PenLineShiftSmoothTool
+                history_item.editable_pen_line = EditablePenLine(simplify_polyline(self.polyline, 1)) # can be edited with PenLineShiftSmoothTool
                 #history_item.editable_pen_line = EditablePenLine(self.points, weakref.ref(history_item)) # can be edited with PenLineShiftSmoothTool
                 #self.draw_line(history_item.editable_pen_line.points, layout.drawing_area().xscale, smoothDist=0)
 
@@ -1489,11 +1484,13 @@ class PenLineShiftSmoothTool(Button):
         if self.editable_pen_line is None:
             return
 
-        # this is nice but only works the first time, subsequent edits get the wrong copy; we need to produce
-        # frame_without_lines the first time and keep it or something...
         self.lines = movie.edit_curr_frame().surf_by_id('lines')
-        self.frame_without_line = self.lines.copy()
-        last_item.copy_saved_subsurface_into(self.frame_without_line)
+        self.frame_without_line = getattr(self.editable_pen_line, 'frame_without_line', None)
+        if self.frame_without_line is None: # the first time we edit a line, we create
+            # a surface without the line. we do it here rather than at PenTool.on_mouse_up
+            # to avoid slowing down repeated pen use without editing
+            self.frame_without_line = self.lines.copy()
+            last_item.copy_saved_subsurface_into(self.frame_without_line)
 
         pen = TOOLS['pen'].tool
         pen.lines_array = pg.surfarray.pixels_alpha(self.lines)
@@ -1523,7 +1520,7 @@ class PenLineShiftSmoothTool(Button):
         cx, cy = drawing_area.xy2frame(x, y)
         pen = TOOLS['pen'].tool
 
-        self.editable_pen_line.undo_line_drawing()
+#self.editable_pen_line.undo_line_drawing()
 
         old_points = self.editable_pen_line.points
 
@@ -1545,24 +1542,29 @@ class PenLineShiftSmoothTool(Button):
             return
 
  
-        first_diff, last_diff = find_diff_indices(old_points, new_points)
-        new_points = new_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + new_points[last_diff:]
+        if 1:
+            first_diff, last_diff = find_diff_indices(old_points, new_points)
+            # TODO: this is important to copy into the new code!!!!!
+            new_points = new_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + new_points[last_diff:]
 
 
-        affected_bbox = points_bbox(new_points + old_points, WIDTH*2)
-        history_item = HistoryItem('lines', affected_bbox) # FIXME: this is not exactly the affected bbox, take smoothing into account
-        pen.draw_line(new_points, drawing_area.xscale, smoothDist=0) # TODO: what's the right zoom?....
-        self.editable_pen_line = EditablePenLine(pen.polyline, history_item)
-        layout.drawing_area().draw_region(pen.bbox) # FIXME: need to redraw the parts where the old line was removed from, too
-        return
+            affected_bbox = points_bbox(new_points + old_points, WIDTH*2)
 
+            minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
+            rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
 
+            pen.draw_line(new_points, drawing_area.xscale, smoothDist=0) # TODO: what's the right zoom?....
+            self.editable_pen_line = EditablePenLine(pen.polyline)
+            self.editable_pen_line.frame_without_line = self.frame_without_line
+            layout.drawing_area().draw_region(pen.bbox) # FIXME: need to redraw the parts where the old line was removed from, too
+            return
 
 
         #self.editable_pen_line.undo_line_drawing()
 
-        old_points = self.editable_pen_line.points
-        new_points = smooth_polyline(old_points, (cx,cy), pull_strength=layout.pressure)
+#        old_points = self.editable_pen_line.points
+#        new_points = smooth_polyline(old_points, (cx,cy), pull_strength=layout.pressure)
+
         first_diff, last_diff = find_diff_indices(old_points, new_points)
         first_diff = max(first_diff-5, 0) # +-5 is here to "step far enough into unchanged coordinates" for the smoothing to work
         # same as it would if we were drawing the entire line and not just the part that changed
@@ -1599,11 +1601,19 @@ class PenLineShiftSmoothTool(Button):
             paint_at_index = np.ones(end-start, np.uint8)
             paint_at_index[0:win_sz] = 0
 #            paint_at_index[-win_sz:-1] = 0
-            pen.draw_line(new_points[start:end], paint_at_index, no_end=True)
-        #self.editable_pen_line = EditablePenLine(simplify_polyline(pen.polyline, 1), history_item)
-        self.editable_pen_line = EditablePenLine(new_points, None)#history_item)
+            pen.draw_line(new_points[start:end], 1, paint_at_index=paint_at_index, no_end=True, smoothDist=0)
+
+
+        self.editable_pen_line = EditablePenLine(simplify_polyline(pen.polyline, 1), None)
+        self.editable_pen_line.frame_without_line = self.frame_without_line
+
+        # this cannot work because some edits will cause the points to be far apart and then Bezier smoothing
+        # will paint outside what we think is the bbox
+        #self.editable_pen_line = EditablePenLine(new_points, None)#history_item)
 
         layout.drawing_area().draw_region(affected_bbox)
+
+        print('# points', len(self.editable_pen_line.points))
 
 MIN_ZOOM, MAX_ZOOM = 1, 5
 
@@ -2134,7 +2144,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     maxx = min(res.IWIDTH-1, math.ceil(max(px)) + margin)
     maxy = min(res.IHEIGHT-1, math.ceil(max(py)) + margin)
     history_item = HistoryItem('lines', bbox=(minx, miny, maxx, maxy))
-    history_item.editable_pen_line = EditablePenLine(list(zip(px,py)), weakref.ref(history_item))
+    history_item.editable_pen_line = EditablePenLine(list(zip(px,py)))
     history.append_item(history_item)
 
     ptr, ystride, width, height = greyscale_c_params(lines)
