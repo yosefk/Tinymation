@@ -11,6 +11,8 @@ struct Point2D
 {
     double x = 0;
     double y = 0;
+    bool operator==(const Point2D& p) const { return x==p.x && y==p.y; }
+    bool operator!=(const Point2D& p) const { return !(*this == p); }
 };
 
 Point2D sum(const Point2D& p1, const Point2D& p2) { return Point2D{p1.x+p2.x, p1.y+p2.y}; }
@@ -91,6 +93,10 @@ struct SamplePoint
     Point2D pos;
     double time = 0;
     double pressure = 0;
+    bool operator==(const SamplePoint& p) const {
+        return pos == p.pos && time == p.time && pressure == p.pressure;
+    }
+    bool operator!=(const SamplePoint& p) const { return !(*this == p); }
 };
 
 class Noise2D
@@ -416,6 +422,8 @@ class Brush
     void paintLine(const SamplePoint& p1, const SamplePoint& p2);
     void paintBezierSegment(const SamplePoint& p1, const SamplePoint& p2, const Point2D& tangent1, const Point2D& tangent2);
     void paintBezierCurve(const SamplePoint& p1, const SamplePoint& p2, const Point2D& control1, const Point2D& control2);
+
+    const std::vector<SamplePoint>& polyline() const { return _polyline; }
   private:
     //painting state
     SamplePoint _prevP; //previous value of p passed to paint (or initPaint the first time paint is called)
@@ -425,6 +433,7 @@ class Brush
     bool _paintedAtLeastOnce = false;
     bool _haveTangent = false;
     Point2D _prevTangent{0, 0};
+    std::vector<SamplePoint> _polyline; //these are the coordinates of the polyline that was painted - after Bezier smoothing etc.
 };
 
 void Brush::initPaint(const SamplePoint& p)
@@ -652,6 +661,19 @@ void Brush::paintBezierCurve(const SamplePoint& p1, const SamplePoint& p2, const
 
 void Brush::paintLine(const SamplePoint& p1, const SamplePoint& p2)
 {
+    bool repeatedLine = _polyline.size() == 2 && _polyline[0] == p1 && _polyline[1] == p2;
+    if(!repeatedLine) {
+        if(_polyline.empty()) {
+            _polyline.push_back(p1);
+            _polyline.push_back(p2);
+        }
+        else {
+            if(_polyline.back() != p1) {
+                printf("Brush::paintLine - WARNING: paintLine called with p1 different from the previous paintLine's p2!\n");
+            }
+            _polyline.push_back(p2);
+        }
+    }
     _paintedAtLeastOnce = true;
     if(_painter) {
         if(_softLines) {
@@ -660,10 +682,6 @@ void Brush::paintLine(const SamplePoint& p1, const SamplePoint& p2)
         else {
           _painter->drawLine(p1.pos, p2.pos, _lineWidth);
         }
-    }
-    else {
-        printf("{%f,%f},\n", p1.pos.x, p1.pos.y);
-        printf("{%f,%f},\n", p2.pos.x, p2.pos.y);
     }
 }
 
@@ -699,25 +717,59 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double press
     return &brush;
 }
 
-extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, double zoom, int* region)
+extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, unsigned char* paint_at_index, double zoom, int* region)
 {
     brush->_painter->resetROI();
+    auto painter = brush->_painter;
     for(int i=0; i<npoints; ++i) {
         SamplePoint s{{x[i],y[i]},time ? time[i] : (i+1)*7, pressure ? pressure[i] : 1};
+        brush->_painter = (!paint_at_index || paint_at_index[i]) ? painter : nullptr;
         brush->paint(s, zoom);
         x[i] = s.pos.x;
         y[i] = s.pos.y;
     }
+    brush->_painter = painter;
     brush->_painter->getROI(region);
 }
 
-extern "C" void brush_end_paint(Brush* brush, int* region)
+extern "C" void brush_end_paint(Brush* brush, int* region, int* polyline_length)
 {
     brush->_painter->resetROI();
     brush->endPaint();
     brush->_painter->getROI(region);
+    if(polyline_length) {
+        *polyline_length = brush->polyline().size();
+    }
+    else {
+        delete brush->_painter;
+        delete brush;
+    }
+}
+
+extern "C" void brush_get_polyline_and_free(Brush* brush, int polyline_length, double* polyline_x, double* polyline_y, double* polyline_time, double* polyline_pressure)
+{
+    const auto& polyline = brush->polyline();
+    if(polyline_length != (int)polyline.size()) {
+        printf("brush_get_polyline_and_free() - WARNING: wrong polyline length\n");
+        return;
+    }
+    for(int i=0; i<polyline_length; ++i) {
+        if(polyline_x) {
+            polyline_x[i] = polyline[i].pos.x; 
+        }
+        if(polyline_y) {
+            polyline_y[i] = polyline[i].pos.y; 
+        }
+        if(polyline_time) {
+            polyline_time[i] = polyline[i].time; 
+        }
+        if(polyline_pressure) {
+            polyline_pressure[i] = polyline[i].pressure; 
+        }
+    }
     delete brush->_painter;
     delete brush;
+
 }
 
 //flood-filling color as the lines are erased

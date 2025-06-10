@@ -722,8 +722,9 @@ tinylib = npct.load_library('tinylib','.')
 
 tinylib.brush_init_paint.argtypes = [ctypes.c_double]*6 + [ctypes.c_int]*2 + [ctypes.c_void_p] + [ctypes.c_int]*4
 tinylib.brush_init_paint.restype = ctypes.c_void_p
-tinylib.brush_paint.argtypes = [ctypes.c_void_p, ctypes.c_int] + [ctypes.c_void_p]*4 + [ctypes.c_double] + [ctypes.c_void_p]
-tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]*2
+tinylib.brush_paint.argtypes = [ctypes.c_void_p, ctypes.c_int] + [ctypes.c_void_p]*5 + [ctypes.c_double] + [ctypes.c_void_p]
+tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]*3
+tinylib.brush_get_polyline_and_free.argtypes = [ctypes.c_void_p, ctypes.c_int] + [ctypes.c_void_p]*4
 tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_int]*5
 tinylib.fitpack_parcur.argtypes = [ctypes.c_void_p]*2 + [ctypes.c_int]*3 + [ctypes.c_double] + [ctypes.c_void_p]*3
 
@@ -958,11 +959,15 @@ class HistoryItem(HistoryItemBase):
         redo.editable_pen_line = self.editable_pen_line
 
         frame = self.curr_surface()
+        self.copy_saved_subsurface_into(frame)
+        return redo
+
+    def copy_saved_subsurface_into(self, frame):
         if self.optimized:
             frame = frame.subsurface(self._subsurface_bbox())
         
         rgba_array(frame)[0][:] = rgba_array(self.saved_surface)[0]
-        return redo
+
     def optimize(self, bbox=None):
         if self.optimized:
             return
@@ -1113,7 +1118,9 @@ class PenTool(Button):
         self.width = width
         self.zoom_changes_pixel_width = zoom_changes_pixel_width
         self.circle_width = (width//2)*2
+        self.smooth_dist = 20
         self.points = []
+        self.polyline = []
         self.lines_array = None
         self.rect = np.zeros(4, dtype=np.int32)
         self.region = arr_base_ptr(self.rect)
@@ -1156,11 +1163,12 @@ class PenTool(Button):
             self.bucket_color = movie.curr_frame().surf_by_id('color').get_at((nx+l,ny+b))
             break
 
-    def init_brush(self, x, y, smoothDist=0):
+    def init_brush(self, x, y, smoothDist=None):
+        if smoothDist is None:
+            smoothDist = self.smooth_dist
         ptr, ystride, width, height = greyscale_c_params(self.lines_array)
         lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
-        # FIXME use event timestamps
-        self.brush = tinylib.brush_init_paint(x, y, time.time_ns()*1000000, layout.pressure, lineWidth, smoothDist, 1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride)
+        self.brush = tinylib.brush_init_paint(x, y, layout.event_time, layout.pressure, lineWidth, smoothDist, 1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride)
 
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
@@ -1170,11 +1178,12 @@ class PenTool(Button):
             FlashlightTool().on_mouse_down(x,y)
             return
         self.points = []
+        self.polyline = []
         self.bucket_color = None
         self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
 
         cx, cy = layout.drawing_area().xy2frame(x, y)
-        self.init_brush(cx, cy, smoothDist=20)
+        self.init_brush(cx, cy)
         if self.eraser:
             self.pen_mask = self.lines_array == 255
             self.find_bucket_color(cx, cy)
@@ -1223,21 +1232,33 @@ class PenTool(Button):
         self.lines_history_item.undo()
         self.new_history_item()
 
-        self.draw_line(list(zip(px,py)))
+        self.draw_line(list(zip(px,py)), smoothDist=0) # don't smooth, bspline_interp already did
 
-    def draw_line(self, xys):
+    def end_paint(self):
+        polyline_length = np.zeros(1, dtype=np.int32)
+        tinylib.brush_end_paint(self.brush, self.region, arr_base_ptr(polyline_length))
+        self.update_bbox()
+
+        polyline_x = np.zeros(polyline_length[0])
+        polyline_y = np.zeros(polyline_length[0])
+    
+        tinylib.brush_get_polyline_and_free(self.brush, polyline_length[0], arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, 0)
+        self.polyline = list(zip(polyline_x, polyline_y))
+        self.brush = 0
+
+    def draw_line(self, xys, zoom, smoothDist=None, paint_at_index=None, no_end=False):
         assert not self.eraser
         x0, y0 = xys[0]
-        self.init_brush(x0, y0)
+        self.init_brush(x0, y0, smoothDist=smoothDist)
 
         xarr = np.array([xy[0] for xy in xys])
         yarr = np.array([xy[1] for xy in xys])
 
-        tinylib.brush_paint(self.brush, len(xys), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, 1, self.region)
+        tinylib.brush_paint(self.brush, len(xys), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, arr_base_ptr(paint_at_index) if paint_at_index is not None else 0, zoom, self.region)
         self.update_bbox()
 
-        tinylib.brush_end_paint(self.brush, self.region)
-        self.update_bbox()
+        if not no_end: # FIXME, this is ugly as fuck and leaks
+            self.end_paint()
 
         self.points = xys
 
@@ -1249,8 +1270,8 @@ class PenTool(Button):
             self.timer.stop()
 
         movie.edit_curr_frame()
-        tinylib.brush_end_paint(self.brush, self.region)
-        self.update_bbox()
+    
+        self.end_paint()
 
         # it doesn't sound good to smooth "mice erasers"
         # because while nominally pens and erasers are basically the same, you draw with a pen to get nice lines,
@@ -1261,7 +1282,6 @@ class PenTool(Button):
         if not layout.subpixel and not self.eraser:
             self.smooth_line()
 
-        self.brush = 0
         self.prev_drawn = None
 
         self.save_history_item()
@@ -1274,7 +1294,9 @@ class PenTool(Button):
             history_item.optimize(self.bbox)
 
             if not self.soft and not self.eraser: # pen rather than pencil or eraser
-                history_item.editable_pen_line = EditablePenLine(self.points, weakref.ref(history_item)) # can be edited with PenLineShiftSmoothTool
+                history_item.editable_pen_line = EditablePenLine(simplify_polyline(self.polyline, 1), weakref.ref(history_item)) # can be edited with PenLineShiftSmoothTool
+                #history_item.editable_pen_line = EditablePenLine(self.points, weakref.ref(history_item)) # can be edited with PenLineShiftSmoothTool
+                #self.draw_line(history_item.editable_pen_line.points, layout.drawing_area().xscale, smoothDist=0)
 
             history.append_item(history_item)
 
@@ -1302,9 +1324,9 @@ class PenTool(Button):
             self.short_term_bbox = (1000000, 1000000, -1, -1)
             xarr = np.array([cx])
             yarr = np.array([cy])
-            tarr = np.array([time.time_ns()*1000000]) #TODO: save the time for the shift tool?..
+            tarr = np.array([layout.event_time])
             parr = np.array([layout.pressure])
-            tinylib.brush_paint(self.brush, 1, *[arr_base_ptr(arr) for arr in [xarr, yarr, tarr, parr]], drawing_area.xscale, self.region)
+            tinylib.brush_paint(self.brush, 1, *[arr_base_ptr(arr) for arr in [xarr, yarr, tarr, parr]], 0, drawing_area.xscale, self.region)
             self.update_bbox()
 
             if self.short_term_bbox[-1] >= 0:
@@ -1394,6 +1416,68 @@ def points_bbox(xys, margin):
     ys = [xy[1] for xy in xys]
     return min(xs)-margin, min(ys)-margin, max(xs)+margin, max(ys)+margin
 
+
+def simplify_polyline(points, threshold):
+    if len(points) < 100:
+        return points
+        
+    result = [points[0]]
+    
+    for i in range(1, len(points)-1):
+        prev = points[i-1]
+        curr = points[i]
+        next = points[i+1]
+        
+        dist_prev = ((curr[0] - result[-1][0])**2 + (curr[1] - result[-1][1])**2)**0.5
+        dist_next = ((curr[0] - next[0])**2 + (curr[1] - next[1])**2)**0.5
+        
+        if dist_prev >= threshold or dist_next >= threshold:
+            result.append(curr)
+            
+    result.append(points[-1])
+    return result
+
+def find_subsequence_indices(sequence, predicate, win_sz):
+    result = []
+    start = None
+    seq_len = len(sequence)
+    
+    for i, value in enumerate(sequence):
+        if predicate(value):
+            if start is None:
+                start = i
+        else:
+            if start is not None:
+                # Calculate windowed indices, trimmed to sequence bounds
+                start_idx = max(0, start - win_sz)
+                end_idx = min(seq_len, i + win_sz)
+                result.append((start_idx, end_idx))
+                start = None
+    
+    # Handle case where sequence ends with a valid subsequence
+    if start is not None:
+        start_idx = max(0, start - win_sz)
+        end_idx = min(seq_len, seq_len + win_sz)
+        result.append((start_idx, end_idx))
+    
+    return result
+
+def find_diff_indices(list1, list2):
+    if len(list1) != len(list2):
+        raise ValueError("Lists must have equal length")
+        
+    first_diff = -1
+    last_diff = -1
+    
+    for i in range(len(list1)):
+        if list1[i] != list2[i]:
+            if first_diff == -1:
+                first_diff = i
+            last_diff = i
+            
+    return (first_diff, last_diff)
+
+
 class PenLineShiftSmoothTool(Button):
     def __init__(self):
         self.editable_pen_line = None
@@ -1405,8 +1489,14 @@ class PenLineShiftSmoothTool(Button):
         if self.editable_pen_line is None:
             return
 
+        # this is nice but only works the first time, subsequent edits get the wrong copy; we need to produce
+        # frame_without_lines the first time and keep it or something...
+        self.lines = movie.edit_curr_frame().surf_by_id('lines')
+        self.frame_without_line = self.lines.copy()
+        last_item.copy_saved_subsurface_into(self.frame_without_line)
+
         pen = TOOLS['pen'].tool
-        pen.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
+        pen.lines_array = pg.surfarray.pixels_alpha(self.lines)
 
         self.history_item = HistoryItem('lines')
 
@@ -1414,11 +1504,13 @@ class PenLineShiftSmoothTool(Button):
         if self.editable_pen_line is None:
             return
         
+        movie.edit_curr_frame()
         self.history_item.optimize()
         self.history_item.editable_pen_line = self.editable_pen_line
         history.append_item(self.history_item)
 
         pen = TOOLS['pen'].tool
+        self.lines = None
         pen.lines_array = None
         self.editable_pen_line = None
         self.history_item = None
@@ -1433,12 +1525,85 @@ class PenLineShiftSmoothTool(Button):
 
         self.editable_pen_line.undo_line_drawing()
 
-        new_points = smooth_polyline(self.editable_pen_line.points, (cx,cy), pull_strength=layout.pressure)
-        self.editable_pen_line = EditablePenLine(new_points, HistoryItem('lines', points_bbox(new_points, WIDTH*2)))
+        old_points = self.editable_pen_line.points
 
-        pen.draw_line(new_points)
+        p = layout.pressure
+        sq = (1+p)**3 #1-(1-p)**2
 
+        new_points = smooth_polyline(self.editable_pen_line.points, (cx,cy), threshold=3*(15*sq)/drawing_area.zoom, pull_strength=layout.pressure)
+#new_points = smooth_polyline(self.editable_pen_line.points, (cx,cy), pull_strength=layout.pressure)
+        first_diff, last_diff = find_diff_indices(old_points, new_points)
+
+
+        # use points:
+        if 0:
+            self.editable_pen_line = EditablePenLine(new_points, HistoryItem('lines', points_bbox(new_points, WIDTH*2)))
+
+            pen.draw_line(new_points, drawing_area.xscale)
+
+            layout.drawing_area().draw_region(pen.bbox) # FIXME: need to redraw the parts where the old line was removed from, too
+            return
+
+ 
+        first_diff, last_diff = find_diff_indices(old_points, new_points)
+        new_points = new_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + new_points[last_diff:]
+
+
+        affected_bbox = points_bbox(new_points + old_points, WIDTH*2)
+        history_item = HistoryItem('lines', affected_bbox) # FIXME: this is not exactly the affected bbox, take smoothing into account
+        pen.draw_line(new_points, drawing_area.xscale, smoothDist=0) # TODO: what's the right zoom?....
+        self.editable_pen_line = EditablePenLine(pen.polyline, history_item)
         layout.drawing_area().draw_region(pen.bbox) # FIXME: need to redraw the parts where the old line was removed from, too
+        return
+
+
+
+
+        #self.editable_pen_line.undo_line_drawing()
+
+        old_points = self.editable_pen_line.points
+        new_points = smooth_polyline(old_points, (cx,cy), pull_strength=layout.pressure)
+        first_diff, last_diff = find_diff_indices(old_points, new_points)
+        first_diff = max(first_diff-5, 0) # +-5 is here to "step far enough into unchanged coordinates" for the smoothing to work
+        # same as it would if we were drawing the entire line and not just the part that changed
+        last_diff = min(last_diff+5, len(new_points))
+
+        # the WIDTH*2 margin here is to take into account the line width - if the line had zero width the bounding box of the point coordinates
+        # would be good enough. FIXME: actually what you really want is to draw the line and find the bbox of the polyline, because Bezier smoothing can push the line
+        # outside this bbox regardless of the line width
+        affected_bbox = points_bbox(new_points[first_diff:last_diff] + old_points[first_diff:last_diff], WIDTH*2)
+
+        minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
+        rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
+
+        #history_item = HistoryItem('lines', affected_bbox) # FIXME: this is not exactly the affected bbox, take smoothing into account
+        # FIXME: the proper way is to go thru the polyline and draw every sub-line crossing the affected_bbox 
+        
+        # the margin here is to take into account the line width - in the invalidated region we need to redraw stuff
+        # even if the coordinates are outside the bbox but close enough given the line width. FIXME: doesn't Bezier smoothing
+        # mean we can't actually do this?.. this would only work if we kept the last polyline, and drew the unchanged parts without
+        # Bezier smoothing.  then we could know what falls inside the bbox.
+
+        # another problem with working without a polyline is that you can have far-away points and a line between them and you don't
+        # see that it crosses the bbox; Bezier smoothing isn't necessary for this bug to happen. you need a polyline with dense enough points.
+        margin = WIDTH*2
+        def in_bbox(p):
+            x,y = p
+            return x>=minx-margin and x<=maxx+margin and y>=miny-margin and y<=maxy+margin
+        win_sz = 5
+        subranges = find_subsequence_indices(new_points, in_bbox, win_sz)
+
+        # FIXME: this cannot actually work unless we use polylines because even with win_sz you can still start painting at a place where the line
+        # will come out wrong.
+        for start, end in subranges:
+            paint_at_index = np.ones(end-start, np.uint8)
+            paint_at_index[0:win_sz] = 0
+#            paint_at_index[-win_sz:-1] = 0
+            pen.draw_line(new_points[start:end], paint_at_index, no_end=True)
+        #self.editable_pen_line = EditablePenLine(simplify_polyline(pen.polyline, 1), history_item)
+        self.editable_pen_line = EditablePenLine(new_points, None)#history_item)
+
+        layout.drawing_area().draw_region(affected_bbox)
 
 MIN_ZOOM, MAX_ZOOM = 1, 5
 
@@ -1980,9 +2145,9 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     rect = np.zeros(4, dtype=np.int32)
     region = arr_base_ptr(rect)
 
-    tinylib.brush_paint(brush, len(px), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, 1, region)
+    tinylib.brush_paint(brush, len(px), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, 0, 1, region)
 
-    tinylib.brush_end_paint(brush, region)
+    tinylib.brush_end_paint(brush, region, 0)
 
     return True
 
@@ -2082,6 +2247,7 @@ class Layout:
         self.restore_tool_on_mouse_up = False
         self.mode = ANIMATION_LAYOUT
         self.pressure = 1
+        self.event_time = 0
 
     def aspect_ratio(self): return self.width/self.height
 
@@ -2150,6 +2316,7 @@ class Layout:
             return
 
         self.pressure = getattr(event, 'pressure', 1)
+        self.event_time = getattr(event, 'time', 1)
 
         if event.type in [pg.MOUSEMOTION, pg.MOUSEBUTTONUP] and not self.is_pressed:
             return # this guards against processing mouse-up with a button pressed which isn't button 0,
@@ -2471,6 +2638,11 @@ class DrawingArea(LayoutElemBase):
             self.restore_zoom_pan_params(zoom_params)
 
     def draw_region(self, frame_region):
+        trace.stop()
+        with trace.start('draw_region'):
+            self._draw_region(frame_region)
+
+    def _draw_region(self, frame_region):
         xmin, ymin, xmax, ymax = frame_region
         xmax += 1
         ymax += 1
@@ -4833,6 +5005,7 @@ class TinymationWidget(QWidget):
             e.pos = (pos.x()-.5, pos.y()-.5)
             e.subpixel = True
             e.pressure = event.pressure()
+            e.time = event.timestamp()
             layout.on_event(e)
             self.redrawLayoutIfNeeded(event)
             self.redrawScreen()

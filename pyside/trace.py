@@ -52,6 +52,8 @@ class Trace:
 
     def stop(self):
         '''better use with trace.start(event): rather than call stop directly'''
+        if self.tracer is None:
+            return
         self.tracer.stop()
         total = time.time() - self.start_time
         if total > self.event2data.setdefault(self._event, EventData()).total:
