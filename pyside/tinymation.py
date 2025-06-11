@@ -628,13 +628,13 @@ app = QApplication(sys.argv)
 
 def pgsurf2qtimage(src, dst):
     iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
-    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iheight * istride * 4))).contents
+    ibuffer = ct.cast(iptr, ct.POINTER(ct.c_uint8 * (iheight * istride * 4))).contents
     iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
 
     mem_view = dst.bits()
-    optr = ctypes.addressof(ctypes.c_byte.from_buffer(mem_view))
+    optr = ct.addressof(ct.c_byte.from_buffer(mem_view))
     owidth, oheight, ostride = iwidth, iheight, istride # FIXME
-    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (oheight * ostride * 4))).contents
+    obuffer = ct.cast(optr, ct.POINTER(ct.c_uint8 * (oheight * ostride * 4))).contents
 
     oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer, strides=(ostride, 4, 1))
     oattached[:] = iattached[:]
@@ -683,7 +683,7 @@ from trace import trace
 
 # interface with tinylib
 
-def arr_base_ptr(arr): return arr.ctypes.data_as(ctypes.c_void_p)
+def arr_base_ptr(arr): return arr.ctypes.data_as(ct.c_void_p)
 
 def color_c_params(rgb):
     width, height, depth = rgb.shape
@@ -698,7 +698,7 @@ def color_c_params(rgb):
         zstride = 1
         bgr = 1
     assert xstride == 4 and zstride == 1, f'xstride={xstride}, ystride={ystride}, zstride={zstride}'
-    ptr = ctypes.c_void_p(arr_base_ptr(rgb).value + oft)
+    ptr = ct.c_void_p(arr_base_ptr(rgb).value + oft)
     return ptr, ystride, width, height, bgr
 
 def greyscale_c_params(grey, is_alpha=True, expected_xstride=1):
@@ -716,20 +716,39 @@ def make_color_int(rgba, is_bgr):
         return r | (g<<8) | (b<<16) | (a<<24)
 
 import numpy.ctypeslib as npct
-import ctypes
+import ctypes as ct
 tinylib = npct.load_library('tinylib','.')
 
-tinylib.brush_init_paint.argtypes = [ctypes.c_double]*6 + [ctypes.c_int]*2 + [ctypes.c_void_p] + [ctypes.c_int]*4
-tinylib.brush_init_paint.restype = ctypes.c_void_p
-tinylib.brush_paint.argtypes = [ctypes.c_void_p, ctypes.c_int] + [ctypes.c_void_p]*5 + [ctypes.c_double] + [ctypes.c_void_p]
-tinylib.brush_end_paint.argtypes = [ctypes.c_void_p]*3
-tinylib.brush_get_polyline_and_free.argtypes = [ctypes.c_void_p, ctypes.c_int] + [ctypes.c_void_p]*4
-tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ctypes.c_void_p]*3 + [ctypes.c_int]*5
-tinylib.fitpack_parcur.argtypes = [ctypes.c_void_p]*2 + [ctypes.c_int]*3 + [ctypes.c_double] + [ctypes.c_void_p]*3
+#Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double smoothDist, int dry, int erase, int softLines,
+#                        unsigned char* image, int width, int height, int xstride, int ystride, const int* paintWithinRegion)
+tinylib.brush_init_paint.argtypes = [ct.c_double]*6 + [ct.c_int]*3 + [ct.c_void_p] + [ct.c_int]*4 + [ct.c_void_p]
+tinylib.brush_init_paint.restype = ct.c_void_p
+
+#void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, double zoom, int* region)
+tinylib.brush_paint.argtypes = [ct.c_void_p, ct.c_int] + [ct.c_void_p]*4 + [ct.c_double] + [ct.c_void_p]
+
+#void brush_end_paint(Brush* brush, int* region)
+tinylib.brush_end_paint.argtypes = [ct.c_void_p]*2
+
+#int brush_get_polyline_length(Brush* brush)
+tinylib.brush_get_polyline_length.argtypes = [ct.c_void_p]
+tinylib.brush_get_polyline_length.restype = ct.c_int
+
+#void brush_get_polyline(Brush* brush, int polyline_length, double* polyline_x, double* polyline_y, double* polyline_time, double* polyline_pressure)
+tinylib.brush_get_polyline.argtypes = [ct.c_void_p, ct.c_int] + [ct.c_void_p]*4
+
+#void brush_free(Brush* brush)
+tinylib.brush_free.argtypes = [ct.c_void_p]
+
+#void brush_flood_fill_color_based_on_mask(Brush* brush, int* color, unsigned char* mask, int color_stride, int mask_stride,
+#                                          int _8_connectivity, int mask_new_val, int new_color_value)
+tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ct.c_void_p]*3 + [ct.c_int]*5
+
+tinylib.fitpack_parcur.argtypes = [ct.c_void_p]*2 + [ct.c_int]*3 + [ct.c_double] + [ct.c_void_p]*3
 
 def rgba_array(surface):
     ptr, ystride, width, height, bgr = color_c_params(pg.surfarray.pixels3d(surface))
-    buffer = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * (height * ystride * 4))).contents
+    buffer = ct.cast(ptr, ct.POINTER(ct.c_uint8 * (height * ystride * 4))).contents
     return np.ndarray((width,height,4), dtype=np.uint8, buffer=buffer, strides=(4, ystride, 1)), bgr
 
 # these are simple functions to test the assumptions regarding Surface numpy array layout
@@ -742,13 +761,13 @@ def cv2_resize_surface(src, dst, inv_scale=None):
     optr, ostride, owidth, oheight, obgr = color_c_params(pg.surfarray.pixels3d(dst))
     assert ibgr == obgr
 
-    ibuffer = ctypes.cast(iptr, ctypes.POINTER(ctypes.c_uint8 * (iheight * istride * 4))).contents
+    ibuffer = ct.cast(iptr, ct.POINTER(ct.c_uint8 * (iheight * istride * 4))).contents
 
     # reinterpret the array as RGBA height x width (this "transposes" the image and flips R and B channels,
     # in order to fit the data into the layout cv2 expects)
     iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
 
-    obuffer = ctypes.cast(optr, ctypes.POINTER(ctypes.c_uint8 * (oheight * ostride * 4))).contents
+    obuffer = ct.cast(optr, ct.POINTER(ct.c_uint8 * (oheight * ostride * 4))).contents
 
     oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer, strides=(ostride, 4, 1))
 
@@ -1158,12 +1177,13 @@ class PenTool(Button):
             self.bucket_color = movie.curr_frame().surf_by_id('color').get_at((nx+l,ny+b))
             break
 
-    def init_brush(self, x, y, smoothDist=None):
+    def init_brush(self, x, y, smoothDist=None, dry=False, paintWithin=None):
         if smoothDist is None:
             smoothDist = self.smooth_dist
         ptr, ystride, width, height = greyscale_c_params(self.lines_array)
         lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
-        self.brush = tinylib.brush_init_paint(x, y, layout.event_time, layout.pressure, lineWidth, smoothDist, 1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride)
+        self.brush = tinylib.brush_init_paint(x, y, layout.event_time, layout.pressure, lineWidth, smoothDist, dry,
+                1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
 
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
@@ -1218,7 +1238,7 @@ class PenTool(Button):
         self.short_term_bbox = (min(xmin, rxmin), min(ymin, rymin), max(xmax, rxmax), max(ymax, rymax))
 
     def smooth_line(self):
-        assert not self.eraser
+        assert not self.eraser and not self.soft
         try:
             px, py = bspline_interp(self.points, smoothing=len(self.points)/(layout.drawing_area().zoom*2))
         except:
@@ -1230,30 +1250,35 @@ class PenTool(Button):
         self.draw_line(list(zip(px,py)), smoothDist=0) # don't smooth, bspline_interp already did
 
     def end_paint(self):
-        polyline_length = np.zeros(1, dtype=np.int32)
-        tinylib.brush_end_paint(self.brush, self.region, arr_base_ptr(polyline_length))
+        tinylib.brush_end_paint(self.brush, self.region)
         self.update_bbox()
 
-        polyline_x = np.zeros(polyline_length[0])
-        polyline_y = np.zeros(polyline_length[0])
-    
-        tinylib.brush_get_polyline_and_free(self.brush, polyline_length[0], arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, 0)
+        polyline_length = tinylib.brush_get_polyline_length(self.brush)
+        polyline_x = np.zeros(polyline_length)
+        polyline_y = np.zeros(polyline_length)
+        tinylib.brush_get_polyline(self.brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, 0)
+
         self.polyline = list(zip(polyline_x, polyline_y))
+
+        tinylib.brush_free(self.brush)
         self.brush = 0
 
-    def draw_line(self, xys, zoom, smoothDist=None, paint_at_index=None, no_end=False):
+    def draw_line(self, xys, zoom=1, smoothDist=None, dry=False, paintWithin=None):
         assert not self.eraser
+        if len(xys) < 2:
+            return
+
         x0, y0 = xys[0]
-        self.init_brush(x0, y0, smoothDist=smoothDist)
+        self.init_brush(x0, y0, smoothDist=smoothDist, dry=dry, paintWithin=paintWithin)
 
-        xarr = np.array([xy[0] for xy in xys])
-        yarr = np.array([xy[1] for xy in xys])
+        arr = np.array(xys, order='F')
+        xarr = arr[1:, 0]
+        yarr = arr[1:, 1]
 
-        tinylib.brush_paint(self.brush, len(xys), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, arr_base_ptr(paint_at_index) if paint_at_index is not None else 0, zoom, self.region)
+        tinylib.brush_paint(self.brush, len(xys)-1, arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, zoom, self.region)
         self.update_bbox()
 
-        if not no_end: # FIXME, this is ugly as fuck and leaks
-            self.end_paint()
+        self.end_paint()
 
         self.points = xys
 
@@ -1274,7 +1299,7 @@ class PenTool(Button):
         # rid of what you're erasing, so you don't want to aim the eraser paintakingly at something and then
         # suddenly have slightly different things erased because of smoothing when you lift the pen (not to mention
         # the "ripple effect" on color the way our erasers work)
-        if not layout.subpixel and not self.eraser:
+        if not layout.subpixel and not self.eraser and not self.soft:
             self.smooth_line()
 
         self.prev_drawn = None
@@ -1289,7 +1314,7 @@ class PenTool(Button):
             history_item.optimize(self.bbox)
 
             if not self.soft and not self.eraser: # pen rather than pencil or eraser
-                history_item.editable_pen_line = EditablePenLine(simplify_polyline(self.polyline, 1)) # can be edited with PenLineShiftSmoothTool
+                history_item.editable_pen_line = EditablePenLine(self.polyline) # can be edited with PenLineShiftSmoothTool
                 #history_item.editable_pen_line = EditablePenLine(self.points, weakref.ref(history_item)) # can be edited with PenLineShiftSmoothTool
                 #self.draw_line(history_item.editable_pen_line.points, layout.drawing_area().xscale, smoothDist=0)
 
@@ -1320,8 +1345,8 @@ class PenTool(Button):
             xarr = np.array([cx])
             yarr = np.array([cy])
             tarr = np.array([layout.event_time])
-            parr = np.array([layout.pressure])
-            tinylib.brush_paint(self.brush, 1, *[arr_base_ptr(arr) for arr in [xarr, yarr, tarr, parr]], 0, drawing_area.xscale, self.region)
+            parr = np.array([layout.pressure if layout.subpixel else 0.35])
+            tinylib.brush_paint(self.brush, 1, *[arr_base_ptr(arr) for arr in [xarr, yarr, tarr, parr]], drawing_area.xscale, self.region)
             self.update_bbox()
 
             if self.short_term_bbox[-1] >= 0:
@@ -1458,6 +1483,8 @@ def find_subsequence_indices(sequence, predicate, win_sz):
     return result
 
 def find_diff_indices(list1, list2):
+    # start, end = find_diff_indices(list1, list2)
+    # then list1[:start] == list2[:start] and list1[end:] == list2[end:]
     if len(list1) != len(list2):
         raise ValueError("Lists must have equal length")
         
@@ -1470,7 +1497,7 @@ def find_diff_indices(list1, list2):
                 first_diff = i
             last_diff = i
             
-    return (first_diff, last_diff)
+    return (first_diff, last_diff+1)
 
 
 class PenLineShiftSmoothTool(Button):
@@ -1527,7 +1554,7 @@ class PenLineShiftSmoothTool(Button):
         p = layout.pressure
         sq = (1+p)**3 #1-(1-p)**2
 
-        new_points = smooth_polyline(self.editable_pen_line.points, (cx,cy), threshold=3*(15*sq)/drawing_area.zoom, pull_strength=layout.pressure)
+        new_points = smooth_polyline(old_points, (cx,cy), threshold=3*(15*sq)/drawing_area.zoom, pull_strength=layout.pressure)
 #new_points = smooth_polyline(self.editable_pen_line.points, (cx,cy), pull_strength=layout.pressure)
         first_diff, last_diff = find_diff_indices(old_points, new_points)
 
@@ -1542,10 +1569,10 @@ class PenLineShiftSmoothTool(Button):
             return
 
  
-        if 1: # this code which repaints the line every time seems to work
+        if 0: # this code which repaints the line every time seems to work
             first_diff, last_diff = find_diff_indices(old_points, new_points)
             # TODO: this is important to copy into the new code!!!!!
-            new_points = new_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + new_points[last_diff:]
+            new_points = old_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + old_points[last_diff:]
             affected_bbox = points_bbox(new_points + old_points, WIDTH*2)
 
             minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
@@ -1553,13 +1580,12 @@ class PenLineShiftSmoothTool(Button):
             maxx, maxy = res.clip(maxx, maxy)
             rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
 
-            pen.draw_line(new_points, 1, smoothDist=0)
+            pen.draw_line(new_points, smoothDist=0)
             self.editable_pen_line = EditablePenLine(pen.polyline)
             self.editable_pen_line.frame_without_line = self.frame_without_line
             layout.drawing_area().draw_region(affected_bbox)
             return
 
-        first_diff, last_diff = find_diff_indices(old_points, new_points)
         # this "simplification" is what throws out points; without it, the number of points grows
         # when we make the line longer, and never shrinks when  we make it shorter
         # TODO: an annoying limit we need to set not just at line creation time but during line editing is
@@ -1568,6 +1594,7 @@ class PenLineShiftSmoothTool(Button):
         # using some sort of spatial subdivision to avoid having to iterate over the entire line linearly as we do here,
         # but this feels like too much work for basically no gain in terms of useful lines that we would let people edit)
         simplified_changed_points = simplify_polyline(new_points[first_diff:last_diff],1) 
+
         #new_points = new_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + new_points[last_diff:]
         # we don't want to repaint the entire line. instead we do the following:
         #
@@ -1581,6 +1608,91 @@ class PenLineShiftSmoothTool(Button):
         #   having been a polyline.)
         # - construct the updated polyline from the unchanged parts old together with the changed part just made into a polyline.
         #   TODO: avoid seams when glueing these together... should be doable
+
+        if 0: # our first attempt is to redraw everything, but to do it in parts, to see that breaking it into these parts works.
+            # it turns out that it doesn't work (it fails at the seams.)
+            affected_bbox = points_bbox(new_points + old_points, WIDTH*2)
+
+            minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
+            minx, miny = res.clip(minx, miny)
+            maxx, maxy = res.clip(maxx, maxy)
+            rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
+
+            overlap = 5
+            pen.draw_line(old_points[:first_diff]+simplified_changed_points[:overlap], smoothDist=0)
+            pen.draw_line(simplified_changed_points[-overlap:] + old_points[last_diff:], smoothDist=0)
+            pen.draw_line(simplified_changed_points, smoothDist=0)
+
+            self.editable_pen_line = EditablePenLine(old_points[:first_diff] + pen.polyline + old_points[last_diff:])
+            self.editable_pen_line.frame_without_line = self.frame_without_line
+
+            # this cannot work because some edits will cause the points to be far apart and then Bezier smoothing
+            # will paint outside what we think is the bbox
+            #self.editable_pen_line = EditablePenLine(new_points, None)#history_item)
+
+            layout.drawing_area().draw_region(affected_bbox)
+            return
+
+        if 1: # our second attempt is to draw the whole line but to only invalidate the area with the changes.
+            # if this works, we can then tell the line to not touch pixels outside the ROI; we still iterate
+            # over the entire line but we would have anyway absent a spatial subdivision so this should give most of the speedup
+            # TODO: this is important to copy into the new code!!!!!
+            simplified_new_points = simplify_polyline(new_points[first_diff:last_diff],1)
+            changed_old_points = old_points[first_diff:last_diff]
+
+            new_points = old_points[:first_diff] + simplified_new_points + old_points[last_diff:]
+
+            affected_bbox = points_bbox(simplified_new_points + changed_old_points + old_points[first_diff-1:first_diff] + old_points[last_diff:last_diff+1], WIDTH*4)
+
+            minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
+            minx, miny = res.clip(minx, miny)
+            maxx, maxy = res.clip(maxx, maxy)
+            rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
+
+            paintWithin = np.array([minx, miny, maxx, maxy],dtype=np.int32)
+
+            pen.draw_line(new_points, smoothDist=0, paintWithin=paintWithin)
+
+            self.editable_pen_line = EditablePenLine(pen.polyline)
+            self.editable_pen_line.frame_without_line = self.frame_without_line
+
+            layout.drawing_area().draw_region(affected_bbox)
+            return
+            
+
+
+
+        pen.draw_line(simplified_changed_points, dry=True)
+
+        polyline_of_changed_points = pen.polyline
+
+        affected_bbox = points_bbox(polyline_of_changed_points + old_points[first_diff:last_diff], WIDTH*2)
+        minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
+        rgba_array(self.lines)[0][minx:maxx,miny:maxy] = 64 #rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
+
+        #pen.draw_line(polyline_of_changed_points, smoothDist=0) # FIXME: disable smoothing altogether
+        pen.draw_line(simplified_changed_points, dry=False, smoothDist=20)
+        arr = rgba_array(self.lines)[0]
+        if 0:
+          for x,y in simplified_changed_points:
+            x=round(x)
+            y=round(y)
+            arr[x-3:x+3,y-3:y+3] = 196
+            
+
+        new_points = old_points[:first_diff] + polyline_of_changed_points + old_points[last_diff:]
+
+        self.editable_pen_line = EditablePenLine(new_points)
+        self.editable_pen_line.frame_without_line = self.frame_without_line
+
+        # this cannot work because some edits will cause the points to be far apart and then Bezier smoothing
+        # will paint outside what we think is the bbox
+        #self.editable_pen_line = EditablePenLine(new_points, None)#history_item)
+
+        layout.drawing_area().draw_region(affected_bbox)
+
+        return
+
 
         #self.editable_pen_line.undo_line_drawing()
 
@@ -1623,7 +1735,7 @@ class PenLineShiftSmoothTool(Button):
             paint_at_index = np.ones(end-start, np.uint8)
             paint_at_index[0:win_sz] = 0
 #            paint_at_index[-win_sz:-1] = 0
-            pen.draw_line(new_points[start:end], 1, smoothDist=0)
+            pen.draw_line(new_points[start:end], smoothDist=0)
 
 
         self.editable_pen_line = EditablePenLine(simplify_polyline(pen.polyline, 1))
@@ -2170,16 +2282,16 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     history.append_item(history_item)
 
     ptr, ystride, width, height = greyscale_c_params(lines)
-    brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, 2.5, 0, 0, 0, ptr, width, height, 4, ystride)
+    brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, 2.5, 0, 0, 0, 0, ptr, width, height, 4, ystride, 0)
 
     xarr = np.array(px)
     yarr = np.array(py)
     rect = np.zeros(4, dtype=np.int32)
     region = arr_base_ptr(rect)
 
-    tinylib.brush_paint(brush, len(px), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, 0, 1, region)
-
-    tinylib.brush_end_paint(brush, region, 0)
+    tinylib.brush_paint(brush, len(px), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, 1, region)
+    tinylib.brush_end_paint(brush, region)
+    tinylib.brush_free(brush)
 
     return True
 
@@ -4955,7 +5067,7 @@ class TinymationWidget(QWidget):
         #self.setAttribute(Qt.WidgetAttribute.WA_TabletTracking)
 
         mem_view = self.image.bits()
-        self.address = ctypes.c_void_p(ctypes.addressof(ctypes.c_byte.from_buffer(mem_view))).value + 1
+        self.address = ct.c_void_p(ct.addressof(ct.c_byte.from_buffer(mem_view))).value + 1
 
         self.rect = np.zeros(4, dtype=np.int32)
         self.region = arr_base_ptr(self.rect)

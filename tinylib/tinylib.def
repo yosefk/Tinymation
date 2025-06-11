@@ -9,8 +9,10 @@ EXPORTS
 	brush_init_paint @7
 	brush_paint @8
 	brush_end_paint @9
-    brush_get_polyline_and_free @10
-	brush_flood_fill_color_based_on_mask @11
-    fitpack_splev @12
-    fitpack_parcur @13
+    brush_get_polyline_length @10
+    brush_get_polyline @11
+    brush_free @12
+	brush_flood_fill_color_based_on_mask @13
+    fitpack_splev @14
+    fitpack_parcur @15
 

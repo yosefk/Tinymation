@@ -150,6 +150,7 @@ class ImagePainter
 
     void resetROI();
     void getROI(int* region);
+    void paintWithin(const int* region);
     //this is a "pen" line - solid with sharp antialised edges
     void drawLine(const Point2D& start, const Point2D& end, double width);
 
@@ -167,16 +168,19 @@ class ImagePainter
     bool _isFirstSegment=true;      // True for the first segment of a polyline
 
     Noise2D _noise2D;
+
+    Point2D _minPainted;
+    Point2D _maxPainted;
 };
 
 void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange)
 {
     // Extend the bounding box slightly to capture anti-aliased edges
     double aa_margin = 1.0; // Extra pixels for smooth edges
-    int startx = floor(std::max(center.x - radius - aa_margin, 0.0));
-    int starty = floor(std::max(center.y - radius - aa_margin, 0.0));
-    int endx = floor(std::min(center.x + radius + aa_margin, double(_width)));
-    int endy = floor(std::min(center.y + radius + aa_margin, double(_height)));
+    int startx = floor(std::max(center.x - radius - aa_margin, _minPainted.x));
+    int starty = floor(std::max(center.y - radius - aa_margin, _minPainted.y));
+    int endx = ceil(std::min(center.x + radius + aa_margin, _maxPainted.x));
+    int endy = ceil(std::min(center.y + radius + aa_margin, _maxPainted.y));
 
     int immutableVal = _erase ? 0 : 255;
     for(int y = starty; y < endy; y++) {
@@ -293,6 +297,18 @@ void ImagePainter::getROI(int* region)
     region[3] = _ymax;
 }
 
+void ImagePainter::paintWithin(const int* region)
+{
+    const int entireImage[] = {0, 0, _width, _height};
+    if(!region) {
+        region = entireImage;
+    }
+    _minPainted.x = region[0];
+    _minPainted.y = region[1];
+    _maxPainted.x = region[2];
+    _maxPainted.y = region[3];
+}
+
 //TODO: LUT
 double sigmoid(double x) { return 1 / (1 + exp(-x)); }
 
@@ -318,10 +334,10 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
         //return the distance from the projection point
         return distance(p, proj);
     };
-    int startx = floor(std::min(start.x,end.x) - width);
-    int starty = floor(std::min(start.y,end.y) - width);
-    int endx = ceil(std::max(start.x,end.x) + width);
-    int endy = ceil(std::max(start.y,end.y) + width);
+    int startx = std::max(floor(std::min(start.x,end.x) - width), _minPainted.x);
+    int starty = std::max(floor(std::min(start.y,end.y) - width), _minPainted.y);
+    int endx = std::min(ceil(std::max(start.x,end.x) + width), _maxPainted.x);
+    int endy = std::min(ceil(std::max(start.y,end.y) + width), _maxPainted.y);
     double halfWidth = width * 0.5;
 
     double w = 2; //empirically, things get grainy below w=2 (say at 1.5), and at w=2,
@@ -332,13 +348,7 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
     int immutableVal = _erase ? 0 : 255;
 
     for(int y = starty; y < endy; y++) {
-        if(y < 0 || y >= _height) {
-            continue;
-        }
         for(int x = startx; x < endx; x++) {
-            if(x < 0 || x >= _width) {
-                continue;
-            }
             int ind = y*_ystride + x*_xstride;
             int oldVal = _image[ind];
             if(oldVal == immutableVal) {
@@ -694,7 +704,8 @@ void Brush::paintAt(const SamplePoint& p)
 
 //extern "C" API
 
-extern "C" Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double smoothDist, int erase, int softLines, unsigned char* image, int width, int height, int xstride, int ystride)
+extern "C" Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double smoothDist, int dry, int erase, int softLines,
+                                   unsigned char* image, int width, int height, int xstride, int ystride, const int* paintWithinRegion)
 {
     Brush& brush = *new Brush;
     brush._smoothing = Smoothing::WEIGHTED;
@@ -703,50 +714,59 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double press
     brush._tailAggressiveness = 0; //since we don't have pressure values, this parameter has no effect anyway
     brush._softLines = softLines;
     
-    ImagePainter& painter = *new ImagePainter;
-    painter._image = image;
-    painter._width = width;
-    painter._height = height;
-    painter._xstride = xstride;
-    painter._ystride = ystride;
-    painter._erase = erase;
-    brush._painter = &painter;
+    if(!dry) {
+        ImagePainter& painter = *new ImagePainter;
+        painter._image = image;
+        painter._width = width;
+        painter._height = height;
+        painter._xstride = xstride;
+        painter._ystride = ystride;
+        painter._erase = erase;
+        painter.paintWithin(paintWithinRegion);
+        brush._painter = &painter;
+    }
+    else {
+        brush._painter = nullptr;
+    }
 
     brush.initPaint({{x,y},time,pressure});
 
     return &brush;
 }
 
-extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, unsigned char* paint_at_index, double zoom, int* region)
+extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, double zoom, int* region)
 {
-    brush->_painter->resetROI();
-    auto painter = brush->_painter;
+    if(brush->_painter) {
+        brush->_painter->resetROI();
+    }
     for(int i=0; i<npoints; ++i) {
         SamplePoint s{{x[i],y[i]},time ? time[i] : (i+1)*7, pressure ? pressure[i] : 1};
-        brush->_painter = (!paint_at_index || paint_at_index[i]) ? painter : nullptr;
         brush->paint(s, zoom);
         x[i] = s.pos.x;
         y[i] = s.pos.y;
     }
-    brush->_painter = painter;
-    brush->_painter->getROI(region);
+    if(brush->_painter) {
+        brush->_painter->getROI(region);
+    }
 }
 
-extern "C" void brush_end_paint(Brush* brush, int* region, int* polyline_length)
+extern "C" void brush_end_paint(Brush* brush, int* region)
 {
-    brush->_painter->resetROI();
-    brush->endPaint();
-    brush->_painter->getROI(region);
-    if(polyline_length) {
-        *polyline_length = brush->polyline().size();
+    if(brush->_painter) {
+        brush->_painter->resetROI();
     }
-    else {
-        delete brush->_painter;
-        delete brush;
+    brush->endPaint();
+    if(brush->_painter) {
+        brush->_painter->getROI(region);
     }
 }
 
-extern "C" void brush_get_polyline_and_free(Brush* brush, int polyline_length, double* polyline_x, double* polyline_y, double* polyline_time, double* polyline_pressure)
+extern "C" int brush_get_polyline_length(Brush* brush)
+{
+    return brush->polyline().size();
+}
+
+extern "C" void brush_get_polyline(Brush* brush, int polyline_length, double* polyline_x, double* polyline_y, double* polyline_time, double* polyline_pressure)
 {
     const auto& polyline = brush->polyline();
     if(polyline_length != (int)polyline.size()) {
@@ -767,9 +787,12 @@ extern "C" void brush_get_polyline_and_free(Brush* brush, int polyline_length, d
             polyline_pressure[i] = polyline[i].pressure; 
         }
     }
+}
+
+extern "C" void brush_free(Brush* brush)
+{
     delete brush->_painter;
     delete brush;
-
 }
 
 //flood-filling color as the lines are erased
@@ -841,6 +864,10 @@ extern "C" void brush_flood_fill_color_based_on_mask(Brush* brush, int* color, u
     painter->_8_connectivity = _8_connectivity;
     painter->_mask_new_val = mask_new_val;
     painter->_new_color_value = new_color_value;
+
+    //we could have copied the region from the original painter but paintWithin(nonNullRegion)
+    //doesn't make a lot of sense with flood filling
+    painter->paintWithin(nullptr);
 
     delete brush->_painter;
     brush->_painter = painter;
