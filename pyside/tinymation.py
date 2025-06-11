@@ -899,9 +899,10 @@ def bounding_rectangle_of_a_boolean_mask(mask):
     return minx, maxx, miny, maxy
 
 class EditablePenLine:
-    def __init__(self, points):
+    def __init__(self, points, start_time =None):
         self.points = points
         self.frame_without_line = None
+        self.start_time = start_time
 
 class HistoryItemBase:
     def __init__(self, restore_pos_before_undo=True):
@@ -1268,10 +1269,15 @@ class PenTool(Button):
         if len(xys) < 2:
             return
 
-        x0, y0 = xys[0]
+        # Convert xys to numpy array if it's a list of tuples
+        if isinstance(xys, list):
+            arr = np.array(xys, order='F', dtype=float)
+        else:
+            arr = xys
+
+        x0, y0 = arr[0]
         self.init_brush(x0, y0, smoothDist=smoothDist, dry=dry, paintWithin=paintWithin)
 
-        arr = np.array(xys, order='F')
         xarr = arr[1:, 0]
         yarr = arr[1:, 1]
 
@@ -1355,114 +1361,31 @@ class PenTool(Button):
             
         self.prev_drawn = (x,y) 
 
+#void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x, const double* y,
+#                    double focus_x, double focus_y, int* first_diff, int* last_diff,
+#                    double threshold = 30.0, double smoothness = 0.6,
+#                    double pull_strength = 0.5, int num_neighbors = 1,
+#                    double max_endpoint_dist = 30.0, double zero_endpoint_dist_start = 5.0)
+tinylib.smooth_polyline.argtypes = [ct.c_int]+[ct.c_void_p]*4+[ct.c_double]*2+[ct.c_void_p]*2+[ct.c_double]*3+[ct.c_int]+[ct.c_double]*2
+
 def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5):
-    if len(points) < 2:
-        return points
+    # FIXME: keep points as an array instead of converting here
+    arr = np.array(points, order='F', dtype=float)
+    xarr = arr[:, 0]
+    yarr = arr[:, 1]
+    
+    new_arr = np.zeros(arr.shape, order='F', dtype=float)
+    newx = new_arr[:, 0]
+    newy = new_arr[:, 1]
 
-    def euclidean_distance(p1, p2):
-        return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+    first_diff = np.zeros(1, dtype=np.int32)
+    last_diff = np.zeros(1, dtype=np.int32)
 
-    def segment_length(p1, p2):
-        return euclidean_distance(p1, p2)
+    tinylib.smooth_polyline(len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
+            arr_base_ptr(first_diff), arr_base_ptr(last_diff),
+            threshold, smoothness, pull_strength, num_neighbors, max_endpoint_dist, zero_endpoint_dist_start)
 
-    # Find the closest point to focus
-    closest_idx = min(range(len(points)), key=lambda i: euclidean_distance(points[i], focus))
-    closest_point = points[closest_idx]
-
-    # Compute polyline distances from closest point (for effect_weight)
-    polyline_dists = [0] * len(points)
-    # Forward from closest point
-    for i in range(closest_idx + 1, len(points)):
-        polyline_dists[i] = polyline_dists[i-1] + segment_length(points[i-1], points[i])
-    # Backward from closest point
-    for i in range(closest_idx - 1, -1, -1):
-        polyline_dists[i] = polyline_dists[i+1] + segment_length(points[i], points[i+1])
-
-    # Compute polyline distances from endpoints (for endpoint_effect_scale)
-    dist_to_start = [0] * len(points)
-    dist_to_end = [0] * len(points)
-    # From start endpoint (index 0)
-    for i in range(1, len(points)):
-        dist_to_start[i] = dist_to_start[i-1] + segment_length(points[i-1], points[i])
-    # From end endpoint (index len(points)-1)
-    dist_to_end[-1] = 0
-    for i in range(len(points)-2, -1, -1):
-        dist_to_end[i] = dist_to_end[i+1] + segment_length(points[i], points[i+1])
-
-    def effect_weight(poly_dist):
-        if poly_dist >= threshold:
-            return 0
-        # Cosine falloff: 1 at poly_dist=0, 0 at poly_dist=threshold
-        t = poly_dist / threshold
-        return 0.5 * (1 + math.cos(math.pi * t))
-
-    def endpoint_effect_scale(dist_to_endpoint, endpoint_dist):
-        if dist_to_endpoint >= endpoint_dist:
-            return 1.0  # No reduction
-        # Quadratic falloff: near-zero at endpoint, 1 at endpoint_dist
-        t = dist_to_endpoint / endpoint_dist
-        return t ** 2  # Scales from 0 (at endpoint) to 1 (at endpoint_dist)
-
-    # Compute pull direction (vector from closest point to focus)
-    pull_dir = (focus[0] - closest_point[0], focus[1] - closest_point[1])
-    pull_magnitude = euclidean_distance(closest_point, focus)
-    if pull_magnitude > 0:
-        pull_dir = (pull_dir[0] / pull_magnitude, pull_dir[1] / pull_magnitude)
-    else:
-        pull_dir = (0, 0)  # No pull if focus is at closest point
-
-    start_endpoint_dist = min(max_endpoint_dist, euclidean_distance(focus, points[0])-zero_endpoint_dist_start)
-    end_endpoint_dist = min(max_endpoint_dist, euclidean_distance(focus, points[-1])-zero_endpoint_dist_start)
-
-    new_points = []
-    for i in range(len(points)):
-        x, y = points[i]
-        poly_dist = polyline_dists[i]
-
-        # Compute effect scale based on distance to endpoints
-        endpoint_scale = 1.0
-        if dist_to_start[i] < start_endpoint_dist:
-            endpoint_scale = min(endpoint_scale, endpoint_effect_scale(dist_to_start[i], start_endpoint_dist))
-        if dist_to_end[i] < end_endpoint_dist:
-            endpoint_scale = min(endpoint_scale, endpoint_effect_scale(dist_to_end[i], end_endpoint_dist))
-
-        # Smoothing component
-        smooth_weight = min(effect_weight(poly_dist) * smoothness * endpoint_scale, 0.5)
-        if smooth_weight == 0:
-            smoothed_x, smoothed_y = x, y
-        else:
-            # Get up to num_neighbors on each side
-            neighbors = []
-            for j in range(1, num_neighbors + 1):
-                if i - j >= 0:
-                    neighbors.append(points[i - j])
-                else:
-                    break
-            for j in range(1, num_neighbors + 1):
-                if i + j < len(points):
-                    neighbors.append(points[i + j])
-                else:
-                    break
-
-            if neighbors:
-                avg_x = sum(p[0] for p in neighbors) / len(neighbors)
-                avg_y = sum(p[1] for p in neighbors) / len(neighbors)
-                smoothed_x = x * (1 - smooth_weight) + avg_x * smooth_weight
-                smoothed_y = y * (1 - smooth_weight) + avg_y * smooth_weight
-            else:
-                smoothed_x, smoothed_y = x, y
-
-        # Pull component
-        pull = effect_weight(poly_dist) * pull_strength * endpoint_scale
-        if pull > 0 and pull_magnitude > 0:
-            final_x = smoothed_x + pull * pull_magnitude * pull_dir[0]
-            final_y = smoothed_y + pull * pull_magnitude * pull_dir[1]
-        else:
-            final_x, final_y = smoothed_x, smoothed_y
-
-        new_points.append((final_x, final_y))
-
-    return new_points
+    return list(zip([float(x) for x in newx], [float(y) for y in newy])), first_diff[0], last_diff[0]+1
 
 def points_bbox(xys, margin):
     xs = [xy[0] for xy in xys]
@@ -1488,24 +1411,6 @@ def simplify_polyline(points, threshold):
             
     result.append(points[-1])
     return result
-
-def find_diff_indices(list1, list2):
-    # start, end = find_diff_indices(list1, list2)
-    # then list1[:start] == list2[:start] and list1[end:] == list2[end:]
-    if len(list1) != len(list2):
-        raise ValueError("Lists must have equal length")
-        
-    first_diff = -1
-    last_diff = -1
-    
-    for i in range(len(list1)):
-        if list1[i] != list2[i]:
-            if first_diff == -1:
-                first_diff = i
-            last_diff = i
-            
-    return (first_diff, last_diff+1)
-
 
 class PenLineShiftSmoothTool(Button):
     def __init__(self):
@@ -1556,6 +1461,17 @@ class PenLineShiftSmoothTool(Button):
         if self.editable_pen_line is None:
             return
 
+        start_time = time.time_ns() / 1000000
+        if self.editable_pen_line.start_time is not None:
+            # we're measuring age using the timestamps when
+            age = start_time - self.editable_pen_line.start_time
+            if age > 10:
+                self.editable_pen_line.start_time = start_time
+                return # for very long lines we can't avoid a slowdown,
+            # and it's not trivial to know when (it's not just a question of line length
+            # but of how much the line intersects the region where a change happened and so how
+            # much repainting it takes) - so we ignore old events
+
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
         pen = TOOLS['pen'].tool
@@ -1570,9 +1486,7 @@ class PenLineShiftSmoothTool(Button):
 
         endpoint_dist = 15
 
-        new_points = smooth_polyline(old_points, (cx,cy), threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist)
-
-        first_diff, last_diff = find_diff_indices(old_points, new_points)
+        new_points, first_diff, last_diff = smooth_polyline(old_points, (cx,cy), threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist)
 
         simplified_new_points = simplify_polyline(new_points[first_diff:last_diff],1)
         changed_old_points = old_points[first_diff:last_diff]
@@ -1590,7 +1504,7 @@ class PenLineShiftSmoothTool(Button):
 
         pen.draw_line(new_points, smoothDist=0, paintWithin=paintWithin)
 
-        self.editable_pen_line = EditablePenLine(pen.polyline)
+        self.editable_pen_line = EditablePenLine(pen.polyline, start_time)
         self.editable_pen_line.frame_without_line = self.frame_without_line
 
         layout.drawing_area().draw_region(affected_bbox)
