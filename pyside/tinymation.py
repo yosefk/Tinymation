@@ -1431,6 +1431,300 @@ def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0
     
     return new_points
 
+
+
+def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1):
+    if len(points) < 2:
+        return points
+
+    def euclidean_distance(p1, p2):
+        return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+    def segment_length(p1, p2):
+        return euclidean_distance(p1, p2)
+
+    # Find the closest point to focus
+    closest_idx = min(range(len(points)), key=lambda i: euclidean_distance(points[i], focus))
+    closest_point = points[closest_idx]
+
+    # Compute polyline distances from closest point
+    polyline_dists = [0] * len(points)
+    # Forward from closest point
+    for i in range(closest_idx + 1, len(points)):
+        polyline_dists[i] = polyline_dists[i-1] + segment_length(points[i-1], points[i])
+    # Backward from closest point
+    for i in range(closest_idx - 1, -1, -1):
+        polyline_dists[i] = polyline_dists[i+1] + segment_length(points[i], points[i+1])
+
+    def effect_weight(poly_dist):
+        if poly_dist >= threshold:
+            return 0
+        # Cosine falloff: 1 at poly_dist=0, 0 at poly_dist=threshold
+        t = poly_dist / threshold
+        return 0.5 * (1 + math.cos(math.pi * t))
+
+    # Compute pull direction (vector from closest point to focus)
+    pull_dir = (focus[0] - closest_point[0], focus[1] - closest_point[1])
+    pull_magnitude = euclidean_distance(closest_point, focus)
+    if pull_magnitude > 0:
+        pull_dir = (pull_dir[0] / pull_magnitude, pull_dir[1] / pull_magnitude)
+    else:
+        pull_dir = (0, 0)  # No pull if focus is at closest point
+
+    new_points = []
+    for i in range(len(points)):
+        x, y = points[i]
+        poly_dist = polyline_dists[i]
+
+        # Smoothing component
+        smooth_weight = min(effect_weight(poly_dist) * smoothness, 0.5)
+        if smooth_weight == 0:
+            smoothed_x, smoothed_y = x, y
+        else:
+            # Get up to num_neighbors on each side
+            neighbors = []
+            # Backward neighbors
+            for j in range(1, num_neighbors + 1):
+                if i - j >= 0:
+                    neighbors.append(points[i - j])
+                else:
+                    break
+            # Forward neighbors
+            for j in range(1, num_neighbors + 1):
+                if i + j < len(points):
+                    neighbors.append(points[i + j])
+                else:
+                    break
+
+            if neighbors:
+                avg_x = sum(p[0] for p in neighbors) / len(neighbors)
+                avg_y = sum(p[1] for p in neighbors) / len(neighbors)
+                smoothed_x = x * (1 - smooth_weight) + avg_x * smooth_weight
+                smoothed_y = y * (1 - smooth_weight) + avg_y * smooth_weight
+            else:
+                smoothed_x, smoothed_y = x, y
+
+        # Pull component
+        pull = effect_weight(poly_dist) * pull_strength
+        if pull > 0 and pull_magnitude > 0:
+            # Move along pull direction, scaled by pull strength and distance
+            final_x = smoothed_x + pull * pull_magnitude * pull_dir[0]
+            final_y = smoothed_y + pull * pull_magnitude * pull_dir[1]
+        else:
+            final_x, final_y = smoothed_x, smoothed_y
+
+        new_points.append((final_x, final_y))
+
+    return new_points
+
+
+def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, endpoint_dist=30):
+    if len(points) < 2:
+        return points
+
+    def euclidean_distance(p1, p2):
+        return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+    def segment_length(p1, p2):
+        return euclidean_distance(p1, p2)
+
+    # Find the closest point to focus
+    closest_idx = min(range(len(points)), key=lambda i: euclidean_distance(points[i], focus))
+    closest_point = points[closest_idx]
+
+    # Compute polyline distances from closest point
+    polyline_dists = [0] * len(points)
+    # Forward from closest point
+    for i in range(closest_idx + 1, len(points)):
+        polyline_dists[i] = polyline_dists[i-1] + segment_length(points[i-1], points[i])
+    # Backward from closest point
+    for i in range(closest_idx - 1, -1, -1):
+        polyline_dists[i] = polyline_dists[i+1] + segment_length(points[i], points[i+1])
+
+    def effect_weight(poly_dist):
+        if poly_dist >= threshold:
+            return 0
+        # Cosine falloff: 1 at poly_dist=0, 0 at poly_dist=threshold
+        t = poly_dist / threshold
+        return 0.5 * (1 + math.cos(math.pi * t))
+
+    def endpoint_effect_scale(dist_to_endpoint):
+        if dist_to_endpoint >= endpoint_dist:
+            return 1.0  # No reduction
+        # Quadratic falloff: near-zero at endpoint, 1 at endpoint_dist
+        t = dist_to_endpoint / endpoint_dist
+        return t ** 2  # Scales from 0 (at endpoint) to 1 (at endpoint_dist)
+
+    # Compute pull direction (vector from closest point to focus)
+    pull_dir = (focus[0] - closest_point[0], focus[1] - closest_point[1])
+    pull_magnitude = euclidean_distance(closest_point, focus)
+    if pull_magnitude > 0:
+        pull_dir = (pull_dir[0] / pull_magnitude, pull_dir[1] / pull_magnitude)
+    else:
+        pull_dir = (0, 0)  # No pull if focus is at closest point
+
+    new_points = []
+    for i in range(len(points)):
+        x, y = points[i]
+        poly_dist = polyline_dists[i]
+
+        # Compute effect scale based on distance to endpoints
+        dist_to_start = polyline_dists[i]
+        dist_to_end = abs(polyline_dists[i] - polyline_dists[-1])
+        endpoint_scale = 1.0
+        if dist_to_start < endpoint_dist:
+            endpoint_scale = min(endpoint_scale, endpoint_effect_scale(dist_to_start))
+        if dist_to_end < endpoint_dist and False:
+            endpoint_scale = min(endpoint_scale, endpoint_effect_scale(dist_to_end))
+
+        # Smoothing component
+        smooth_weight = min(effect_weight(poly_dist) * smoothness * endpoint_scale, 0.5)
+        if smooth_weight == 0:
+            smoothed_x, smoothed_y = x, y
+        else:
+            # Get up to num_neighbors on each side
+            neighbors = []
+            for j in range(1, num_neighbors + 1):
+                if i - j >= 0:
+                    neighbors.append(points[i - j])
+                else:
+                    break
+            for j in range(1, num_neighbors + 1):
+                if i + j < len(points):
+                    neighbors.append(points[i + j])
+                else:
+                    break
+
+            if neighbors:
+                avg_x = sum(p[0] for p in neighbors) / len(neighbors)
+                avg_y = sum(p[1] for p in neighbors) / len(neighbors)
+                smoothed_x = x * (1 - smooth_weight) + avg_x * smooth_weight
+                smoothed_y = y * (1 - smooth_weight) + avg_y * smooth_weight
+            else:
+                smoothed_x, smoothed_y = x, y
+
+        # Pull component
+        pull = effect_weight(poly_dist) * pull_strength * endpoint_scale
+        if pull > 0 and pull_magnitude > 0:
+            final_x = smoothed_x + pull * pull_magnitude * pull_dir[0]
+            final_y = smoothed_y + pull * pull_magnitude * pull_dir[1]
+        else:
+            final_x, final_y = smoothed_x, smoothed_y
+
+        new_points.append((final_x, final_y))
+
+    return new_points
+
+
+def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30):
+    if len(points) < 2:
+        return points
+
+    def euclidean_distance(p1, p2):
+        return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+    def segment_length(p1, p2):
+        return euclidean_distance(p1, p2)
+
+    # Find the closest point to focus
+    closest_idx = min(range(len(points)), key=lambda i: euclidean_distance(points[i], focus))
+    closest_point = points[closest_idx]
+
+    # Compute polyline distances from closest point (for effect_weight)
+    polyline_dists = [0] * len(points)
+    # Forward from closest point
+    for i in range(closest_idx + 1, len(points)):
+        polyline_dists[i] = polyline_dists[i-1] + segment_length(points[i-1], points[i])
+    # Backward from closest point
+    for i in range(closest_idx - 1, -1, -1):
+        polyline_dists[i] = polyline_dists[i+1] + segment_length(points[i], points[i+1])
+
+    # Compute polyline distances from endpoints (for endpoint_effect_scale)
+    dist_to_start = [0] * len(points)
+    dist_to_end = [0] * len(points)
+    # From start endpoint (index 0)
+    for i in range(1, len(points)):
+        dist_to_start[i] = dist_to_start[i-1] + segment_length(points[i-1], points[i])
+    # From end endpoint (index len(points)-1)
+    dist_to_end[-1] = 0
+    for i in range(len(points)-2, -1, -1):
+        dist_to_end[i] = dist_to_end[i+1] + segment_length(points[i], points[i+1])
+
+    def effect_weight(poly_dist):
+        if poly_dist >= threshold:
+            return 0
+        # Cosine falloff: 1 at poly_dist=0, 0 at poly_dist=threshold
+        t = poly_dist / threshold
+        return 0.5 * (1 + math.cos(math.pi * t))
+
+    def endpoint_effect_scale(dist_to_endpoint, endpoint_dist):
+        if dist_to_endpoint >= endpoint_dist:
+            return 1.0  # No reduction
+        # Quadratic falloff: near-zero at endpoint, 1 at endpoint_dist
+        t = dist_to_endpoint / endpoint_dist
+        return t ** 2  # Scales from 0 (at endpoint) to 1 (at endpoint_dist)
+
+    # Compute pull direction (vector from closest point to focus)
+    pull_dir = (focus[0] - closest_point[0], focus[1] - closest_point[1])
+    pull_magnitude = euclidean_distance(closest_point, focus)
+    if pull_magnitude > 0:
+        pull_dir = (pull_dir[0] / pull_magnitude, pull_dir[1] / pull_magnitude)
+    else:
+        pull_dir = (0, 0)  # No pull if focus is at closest point
+
+    start_endpoint_dist = min(max_endpoint_dist, euclidean_distance(focus, points[0])-5)
+    end_endpoint_dist = min(max_endpoint_dist, euclidean_distance(focus, points[-1])-5)
+
+    new_points = []
+    for i in range(len(points)):
+        x, y = points[i]
+        poly_dist = polyline_dists[i]
+
+        # Compute effect scale based on distance to endpoints
+        endpoint_scale = 1.0
+        if dist_to_start[i] < start_endpoint_dist:
+            endpoint_scale = min(endpoint_scale, endpoint_effect_scale(dist_to_start[i], start_endpoint_dist))
+        if dist_to_end[i] < end_endpoint_dist:
+            endpoint_scale = min(endpoint_scale, endpoint_effect_scale(dist_to_end[i], end_endpoint_dist))
+
+        # Smoothing component
+        smooth_weight = min(effect_weight(poly_dist) * smoothness * endpoint_scale, 0.5)
+        if smooth_weight == 0:
+            smoothed_x, smoothed_y = x, y
+        else:
+            # Get up to num_neighbors on each side
+            neighbors = []
+            for j in range(1, num_neighbors + 1):
+                if i - j >= 0:
+                    neighbors.append(points[i - j])
+                else:
+                    break
+            for j in range(1, num_neighbors + 1):
+                if i + j < len(points):
+                    neighbors.append(points[i + j])
+                else:
+                    break
+
+            if neighbors:
+                avg_x = sum(p[0] for p in neighbors) / len(neighbors)
+                avg_y = sum(p[1] for p in neighbors) / len(neighbors)
+                smoothed_x = x * (1 - smooth_weight) + avg_x * smooth_weight
+                smoothed_y = y * (1 - smooth_weight) + avg_y * smooth_weight
+            else:
+                smoothed_x, smoothed_y = x, y
+
+        # Pull component
+        pull = effect_weight(poly_dist) * pull_strength * endpoint_scale
+        if pull > 0 and pull_magnitude > 0:
+            final_x = smoothed_x + pull * pull_magnitude * pull_dir[0]
+            final_y = smoothed_y + pull * pull_magnitude * pull_dir[1]
+        else:
+            final_x, final_y = smoothed_x, smoothed_y
+
+        new_points.append((final_x, final_y))
+
+    return new_points
+
 def points_bbox(xys, margin):
     xs = [xy[0] for xy in xys]
     ys = [xy[1] for xy in xys]
@@ -1530,9 +1824,16 @@ class PenLineShiftSmoothTool(Button):
         old_points = self.editable_pen_line.points
 
         p = layout.pressure
-        sq = (1+p)**3 #1-(1-p)**2
+        sq = (1+p)**5
 
-        new_points = smooth_polyline(old_points, (cx,cy), threshold=3*(15*sq)/drawing_area.zoom, pull_strength=layout.pressure)
+        dist_thresh=(15*sq)/drawing_area.zoom
+        neighbors=1 + math.floor(p*10)#(1-(1-p)**2)*10)
+
+        endpoint_dist = max(-1, (0.6 - p)*30)
+
+        print('dist_thresh',dist_thresh,'nn',neighbors,'endpoint_dist',endpoint_dist)
+
+        new_points = smooth_polyline(old_points, (cx,cy), threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist)
 
         first_diff, last_diff = find_diff_indices(old_points, new_points)
 
