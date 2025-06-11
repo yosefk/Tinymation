@@ -1542,23 +1542,45 @@ class PenLineShiftSmoothTool(Button):
             return
 
  
-        if 1:
+        if 1: # this code which repaints the line every time seems to work
             first_diff, last_diff = find_diff_indices(old_points, new_points)
             # TODO: this is important to copy into the new code!!!!!
             new_points = new_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + new_points[last_diff:]
-
-
             affected_bbox = points_bbox(new_points + old_points, WIDTH*2)
 
             minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
+            minx, miny = res.clip(minx, miny)
+            maxx, maxy = res.clip(maxx, maxy)
             rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
 
-            pen.draw_line(new_points, drawing_area.xscale, smoothDist=0) # TODO: what's the right zoom?....
+            pen.draw_line(new_points, 1, smoothDist=0)
             self.editable_pen_line = EditablePenLine(pen.polyline)
             self.editable_pen_line.frame_without_line = self.frame_without_line
-            layout.drawing_area().draw_region(pen.bbox) # FIXME: need to redraw the parts where the old line was removed from, too
+            layout.drawing_area().draw_region(affected_bbox)
             return
 
+        first_diff, last_diff = find_diff_indices(old_points, new_points)
+        # this "simplification" is what throws out points; without it, the number of points grows
+        # when we make the line longer, and never shrinks when  we make it shorter
+        # TODO: an annoying limit we need to set not just at line creation time but during line editing is
+        # a "too many points limit" - if you can grow the line indefinitely, our algorithms will become increasingly
+        # slower (and while in theory this is unavoidable, we could have probably scaled the limit up by a lot
+        # using some sort of spatial subdivision to avoid having to iterate over the entire line linearly as we do here,
+        # but this feels like too much work for basically no gain in terms of useful lines that we would let people edit)
+        simplified_changed_points = simplify_polyline(new_points[first_diff:last_diff],1) 
+        #new_points = new_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + new_points[last_diff:]
+        # we don't want to repaint the entire line. instead we do the following:
+        #
+        # - "dry paint" simplified_changed_points to get the smoothed polyline
+        # - find the bbox of this polyline together with the old points that were modified to produce the smoothed polyline.
+        #   note that the old points came from a brush polyline so we needn't worry about what smoothing was doing to them.
+        # - clear the bbox using frame_without_line.
+        # - "actually paint" the polyline with the brush without any smoothing (the smoothing was done with the changed points were
+        #   made into a polyline.)
+        # - iterate over the unchanged points, and paint the ones which are inside the bbox (again this counts on the old points
+        #   having been a polyline.)
+        # - construct the updated polyline from the unchanged parts old together with the changed part just made into a polyline.
+        #   TODO: avoid seams when glueing these together... should be doable
 
         #self.editable_pen_line.undo_line_drawing()
 
@@ -1576,7 +1598,7 @@ class PenLineShiftSmoothTool(Button):
         affected_bbox = points_bbox(new_points[first_diff:last_diff] + old_points[first_diff:last_diff], WIDTH*2)
 
         minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
-        rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
+        rgba_array(self.lines)[0][minx:maxx,miny:maxy] = 64 #rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
 
         #history_item = HistoryItem('lines', affected_bbox) # FIXME: this is not exactly the affected bbox, take smoothing into account
         # FIXME: the proper way is to go thru the polyline and draw every sub-line crossing the affected_bbox 
@@ -1601,10 +1623,10 @@ class PenLineShiftSmoothTool(Button):
             paint_at_index = np.ones(end-start, np.uint8)
             paint_at_index[0:win_sz] = 0
 #            paint_at_index[-win_sz:-1] = 0
-            pen.draw_line(new_points[start:end], 1, paint_at_index=paint_at_index, no_end=True, smoothDist=0)
+            pen.draw_line(new_points[start:end], 1, smoothDist=0)
 
 
-        self.editable_pen_line = EditablePenLine(simplify_polyline(pen.polyline, 1), None)
+        self.editable_pen_line = EditablePenLine(simplify_polyline(pen.polyline, 1))
         self.editable_pen_line.frame_without_line = self.frame_without_line
 
         # this cannot work because some edits will cause the points to be far apart and then Bezier smoothing
