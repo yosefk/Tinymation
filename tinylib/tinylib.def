@@ -15,4 +15,5 @@ EXPORTS
 	brush_flood_fill_color_based_on_mask @13
     fitpack_splev @14
     fitpack_parcur @15
+    smooth_polyline @16
 

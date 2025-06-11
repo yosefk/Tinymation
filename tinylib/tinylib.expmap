@@ -15,5 +15,6 @@
     brush_flood_fill_color_based_on_mask;
     fitpack_splev;
     fitpack_parcur;
+    smooth_polyline;
   local: *;
 };
