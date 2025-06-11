@@ -1436,7 +1436,6 @@ def points_bbox(xys, margin):
     ys = [xy[1] for xy in xys]
     return min(xs)-margin, min(ys)-margin, max(xs)+margin, max(ys)+margin
 
-
 def simplify_polyline(points, threshold):
     if len(points) < 100:
         return points
@@ -1455,31 +1454,6 @@ def simplify_polyline(points, threshold):
             result.append(curr)
             
     result.append(points[-1])
-    return result
-
-def find_subsequence_indices(sequence, predicate, win_sz):
-    result = []
-    start = None
-    seq_len = len(sequence)
-    
-    for i, value in enumerate(sequence):
-        if predicate(value):
-            if start is None:
-                start = i
-        else:
-            if start is not None:
-                # Calculate windowed indices, trimmed to sequence bounds
-                start_idx = max(0, start - win_sz)
-                end_idx = min(seq_len, i + win_sz)
-                result.append((start_idx, end_idx))
-                start = None
-    
-    # Handle case where sequence ends with a valid subsequence
-    if start is not None:
-        start_idx = max(0, start - win_sz)
-        end_idx = min(seq_len, seq_len + win_sz)
-        result.append((start_idx, end_idx))
-    
     return result
 
 def find_diff_indices(list1, list2):
@@ -1524,6 +1498,9 @@ class PenLineShiftSmoothTool(Button):
 
         self.history_item = HistoryItem('lines')
 
+        self.rgba_lines = rgba_array(self.lines)[0]
+        self.rgba_frame_without_line = rgba_array(self.frame_without_line)[0]
+
     def on_mouse_up(self, x, y):
         if self.editable_pen_line is None:
             return
@@ -1539,6 +1516,9 @@ class PenLineShiftSmoothTool(Button):
         self.editable_pen_line = None
         self.history_item = None
 
+        self.rgba_lines = None
+        self.rgba_frame_without_line = None
+
     def on_mouse_move(self, x, y):
         if self.editable_pen_line is None:
             return
@@ -1547,207 +1527,35 @@ class PenLineShiftSmoothTool(Button):
         cx, cy = drawing_area.xy2frame(x, y)
         pen = TOOLS['pen'].tool
 
-#self.editable_pen_line.undo_line_drawing()
-
         old_points = self.editable_pen_line.points
 
         p = layout.pressure
         sq = (1+p)**3 #1-(1-p)**2
 
         new_points = smooth_polyline(old_points, (cx,cy), threshold=3*(15*sq)/drawing_area.zoom, pull_strength=layout.pressure)
-#new_points = smooth_polyline(self.editable_pen_line.points, (cx,cy), pull_strength=layout.pressure)
-        first_diff, last_diff = find_diff_indices(old_points, new_points)
-
-
-        # use points:
-        if 0:
-            self.editable_pen_line = EditablePenLine(new_points, HistoryItem('lines', points_bbox(new_points, WIDTH*2)))
-
-            pen.draw_line(new_points, drawing_area.xscale)
-
-            layout.drawing_area().draw_region(pen.bbox) # FIXME: need to redraw the parts where the old line was removed from, too
-            return
-
- 
-        if 0: # this code which repaints the line every time seems to work
-            first_diff, last_diff = find_diff_indices(old_points, new_points)
-            # TODO: this is important to copy into the new code!!!!!
-            new_points = old_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + old_points[last_diff:]
-            affected_bbox = points_bbox(new_points + old_points, WIDTH*2)
-
-            minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
-            minx, miny = res.clip(minx, miny)
-            maxx, maxy = res.clip(maxx, maxy)
-            rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
-
-            pen.draw_line(new_points, smoothDist=0)
-            self.editable_pen_line = EditablePenLine(pen.polyline)
-            self.editable_pen_line.frame_without_line = self.frame_without_line
-            layout.drawing_area().draw_region(affected_bbox)
-            return
-
-        # this "simplification" is what throws out points; without it, the number of points grows
-        # when we make the line longer, and never shrinks when  we make it shorter
-        # TODO: an annoying limit we need to set not just at line creation time but during line editing is
-        # a "too many points limit" - if you can grow the line indefinitely, our algorithms will become increasingly
-        # slower (and while in theory this is unavoidable, we could have probably scaled the limit up by a lot
-        # using some sort of spatial subdivision to avoid having to iterate over the entire line linearly as we do here,
-        # but this feels like too much work for basically no gain in terms of useful lines that we would let people edit)
-        simplified_changed_points = simplify_polyline(new_points[first_diff:last_diff],1) 
-
-        #new_points = new_points[:first_diff] + simplify_polyline(new_points[first_diff:last_diff],1) + new_points[last_diff:]
-        # we don't want to repaint the entire line. instead we do the following:
-        #
-        # - "dry paint" simplified_changed_points to get the smoothed polyline
-        # - find the bbox of this polyline together with the old points that were modified to produce the smoothed polyline.
-        #   note that the old points came from a brush polyline so we needn't worry about what smoothing was doing to them.
-        # - clear the bbox using frame_without_line.
-        # - "actually paint" the polyline with the brush without any smoothing (the smoothing was done with the changed points were
-        #   made into a polyline.)
-        # - iterate over the unchanged points, and paint the ones which are inside the bbox (again this counts on the old points
-        #   having been a polyline.)
-        # - construct the updated polyline from the unchanged parts old together with the changed part just made into a polyline.
-        #   TODO: avoid seams when glueing these together... should be doable
-
-        if 0: # our first attempt is to redraw everything, but to do it in parts, to see that breaking it into these parts works.
-            # it turns out that it doesn't work (it fails at the seams.)
-            affected_bbox = points_bbox(new_points + old_points, WIDTH*2)
-
-            minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
-            minx, miny = res.clip(minx, miny)
-            maxx, maxy = res.clip(maxx, maxy)
-            rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
-
-            overlap = 5
-            pen.draw_line(old_points[:first_diff]+simplified_changed_points[:overlap], smoothDist=0)
-            pen.draw_line(simplified_changed_points[-overlap:] + old_points[last_diff:], smoothDist=0)
-            pen.draw_line(simplified_changed_points, smoothDist=0)
-
-            self.editable_pen_line = EditablePenLine(old_points[:first_diff] + pen.polyline + old_points[last_diff:])
-            self.editable_pen_line.frame_without_line = self.frame_without_line
-
-            # this cannot work because some edits will cause the points to be far apart and then Bezier smoothing
-            # will paint outside what we think is the bbox
-            #self.editable_pen_line = EditablePenLine(new_points, None)#history_item)
-
-            layout.drawing_area().draw_region(affected_bbox)
-            return
-
-        if 1: # our second attempt is to draw the whole line but to only invalidate the area with the changes.
-            # if this works, we can then tell the line to not touch pixels outside the ROI; we still iterate
-            # over the entire line but we would have anyway absent a spatial subdivision so this should give most of the speedup
-            # TODO: this is important to copy into the new code!!!!!
-            simplified_new_points = simplify_polyline(new_points[first_diff:last_diff],1)
-            changed_old_points = old_points[first_diff:last_diff]
-
-            new_points = old_points[:first_diff] + simplified_new_points + old_points[last_diff:]
-
-            affected_bbox = points_bbox(simplified_new_points + changed_old_points + old_points[first_diff-1:first_diff] + old_points[last_diff:last_diff+1], WIDTH*4)
-
-            minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
-            minx, miny = res.clip(minx, miny)
-            maxx, maxy = res.clip(maxx, maxy)
-            rgba_array(self.lines)[0][minx:maxx,miny:maxy] = rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
-
-            paintWithin = np.array([minx, miny, maxx, maxy],dtype=np.int32)
-
-            pen.draw_line(new_points, smoothDist=0, paintWithin=paintWithin)
-
-            self.editable_pen_line = EditablePenLine(pen.polyline)
-            self.editable_pen_line.frame_without_line = self.frame_without_line
-
-            layout.drawing_area().draw_region(affected_bbox)
-            return
-            
-
-
-
-        pen.draw_line(simplified_changed_points, dry=True)
-
-        polyline_of_changed_points = pen.polyline
-
-        affected_bbox = points_bbox(polyline_of_changed_points + old_points[first_diff:last_diff], WIDTH*2)
-        minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
-        rgba_array(self.lines)[0][minx:maxx,miny:maxy] = 64 #rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
-
-        #pen.draw_line(polyline_of_changed_points, smoothDist=0) # FIXME: disable smoothing altogether
-        pen.draw_line(simplified_changed_points, dry=False, smoothDist=20)
-        arr = rgba_array(self.lines)[0]
-        if 0:
-          for x,y in simplified_changed_points:
-            x=round(x)
-            y=round(y)
-            arr[x-3:x+3,y-3:y+3] = 196
-            
-
-        new_points = old_points[:first_diff] + polyline_of_changed_points + old_points[last_diff:]
-
-        self.editable_pen_line = EditablePenLine(new_points)
-        self.editable_pen_line.frame_without_line = self.frame_without_line
-
-        # this cannot work because some edits will cause the points to be far apart and then Bezier smoothing
-        # will paint outside what we think is the bbox
-        #self.editable_pen_line = EditablePenLine(new_points, None)#history_item)
-
-        layout.drawing_area().draw_region(affected_bbox)
-
-        return
-
-
-        #self.editable_pen_line.undo_line_drawing()
-
-#        old_points = self.editable_pen_line.points
-#        new_points = smooth_polyline(old_points, (cx,cy), pull_strength=layout.pressure)
 
         first_diff, last_diff = find_diff_indices(old_points, new_points)
-        first_diff = max(first_diff-5, 0) # +-5 is here to "step far enough into unchanged coordinates" for the smoothing to work
-        # same as it would if we were drawing the entire line and not just the part that changed
-        last_diff = min(last_diff+5, len(new_points))
 
-        # the WIDTH*2 margin here is to take into account the line width - if the line had zero width the bounding box of the point coordinates
-        # would be good enough. FIXME: actually what you really want is to draw the line and find the bbox of the polyline, because Bezier smoothing can push the line
-        # outside this bbox regardless of the line width
-        affected_bbox = points_bbox(new_points[first_diff:last_diff] + old_points[first_diff:last_diff], WIDTH*2)
+        simplified_new_points = simplify_polyline(new_points[first_diff:last_diff],1)
+        changed_old_points = old_points[first_diff:last_diff]
+
+        new_points = old_points[:first_diff] + simplified_new_points + old_points[last_diff:]
+
+        affected_bbox = points_bbox(simplified_new_points + changed_old_points + old_points[first_diff-1:first_diff] + old_points[last_diff:last_diff+1], WIDTH*4)
 
         minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
-        rgba_array(self.lines)[0][minx:maxx,miny:maxy] = 64 #rgba_array(self.frame_without_line)[0][minx:maxx,miny:maxy]
+        minx, miny = res.clip(minx, miny)
+        maxx, maxy = res.clip(maxx, maxy)
+        self.rgba_lines[minx:maxx,miny:maxy] = self.rgba_frame_without_line[minx:maxx,miny:maxy]
 
-        #history_item = HistoryItem('lines', affected_bbox) # FIXME: this is not exactly the affected bbox, take smoothing into account
-        # FIXME: the proper way is to go thru the polyline and draw every sub-line crossing the affected_bbox 
-        
-        # the margin here is to take into account the line width - in the invalidated region we need to redraw stuff
-        # even if the coordinates are outside the bbox but close enough given the line width. FIXME: doesn't Bezier smoothing
-        # mean we can't actually do this?.. this would only work if we kept the last polyline, and drew the unchanged parts without
-        # Bezier smoothing.  then we could know what falls inside the bbox.
+        paintWithin = np.array([minx, miny, maxx, maxy],dtype=np.int32)
 
-        # another problem with working without a polyline is that you can have far-away points and a line between them and you don't
-        # see that it crosses the bbox; Bezier smoothing isn't necessary for this bug to happen. you need a polyline with dense enough points.
-        margin = WIDTH*2
-        def in_bbox(p):
-            x,y = p
-            return x>=minx-margin and x<=maxx+margin and y>=miny-margin and y<=maxy+margin
-        win_sz = 5
-        subranges = find_subsequence_indices(new_points, in_bbox, win_sz)
+        pen.draw_line(new_points, smoothDist=0, paintWithin=paintWithin)
 
-        # FIXME: this cannot actually work unless we use polylines because even with win_sz you can still start painting at a place where the line
-        # will come out wrong.
-        for start, end in subranges:
-            paint_at_index = np.ones(end-start, np.uint8)
-            paint_at_index[0:win_sz] = 0
-#            paint_at_index[-win_sz:-1] = 0
-            pen.draw_line(new_points[start:end], smoothDist=0)
-
-
-        self.editable_pen_line = EditablePenLine(simplify_polyline(pen.polyline, 1))
+        self.editable_pen_line = EditablePenLine(pen.polyline)
         self.editable_pen_line.frame_without_line = self.frame_without_line
 
-        # this cannot work because some edits will cause the points to be far apart and then Bezier smoothing
-        # will paint outside what we think is the bbox
-        #self.editable_pen_line = EditablePenLine(new_points, None)#history_item)
-
         layout.drawing_area().draw_region(affected_bbox)
-
-        print('# points', len(self.editable_pen_line.points))
 
 MIN_ZOOM, MAX_ZOOM = 1, 5
 
