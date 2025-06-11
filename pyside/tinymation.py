@@ -1255,11 +1255,10 @@ class PenTool(Button):
         self.update_bbox()
 
         polyline_length = tinylib.brush_get_polyline_length(self.brush)
-        polyline_x = np.zeros(polyline_length)
-        polyline_y = np.zeros(polyline_length)
+        self.polyline = np.zeros((polyline_length, 2), dtype=float, order='F')
+        polyline_x = self.polyline[:, 0]
+        polyline_y = self.polyline[:, 1]
         tinylib.brush_get_polyline(self.brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, 0)
-
-        self.polyline = list(zip(polyline_x, polyline_y))
 
         tinylib.brush_free(self.brush)
         self.brush = 0
@@ -1321,8 +1320,6 @@ class PenTool(Button):
 
             if not self.soft and not self.eraser: # pen rather than pencil or eraser
                 history_item.editable_pen_line = EditablePenLine(self.polyline) # can be edited with PenLineShiftSmoothTool
-                #history_item.editable_pen_line = EditablePenLine(self.points, weakref.ref(history_item)) # can be edited with PenLineShiftSmoothTool
-                #self.draw_line(history_item.editable_pen_line.points, layout.drawing_area().xscale, smoothDist=0)
 
             history.append_item(history_item)
 
@@ -1369,12 +1366,10 @@ class PenTool(Button):
 tinylib.smooth_polyline.argtypes = [ct.c_int]+[ct.c_void_p]*4+[ct.c_double]*2+[ct.c_void_p]*2+[ct.c_double]*3+[ct.c_int]+[ct.c_double]*2
 
 def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5):
-    # FIXME: keep points as an array instead of converting here
-    arr = np.array(points, order='F', dtype=float)
-    xarr = arr[:, 0]
-    yarr = arr[:, 1]
+    xarr = points[:, 0]
+    yarr = points[:, 1]
     
-    new_arr = np.zeros(arr.shape, order='F', dtype=float)
+    new_arr = np.zeros(points.shape, order='F', dtype=float)
     newx = new_arr[:, 0]
     newy = new_arr[:, 1]
 
@@ -1385,7 +1380,7 @@ def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0
             arr_base_ptr(first_diff), arr_base_ptr(last_diff),
             threshold, smoothness, pull_strength, num_neighbors, max_endpoint_dist, zero_endpoint_dist_start)
 
-    return list(zip([float(x) for x in newx], [float(y) for y in newy])), first_diff[0], last_diff[0]+1
+    return new_arr, first_diff[0], last_diff[0]+1
 
 def points_bbox(xys, margin):
     xs = [xy[0] for xy in xys]
@@ -1488,12 +1483,14 @@ class PenLineShiftSmoothTool(Button):
 
         new_points, first_diff, last_diff = smooth_polyline(old_points, (cx,cy), threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist)
 
-        simplified_new_points = simplify_polyline(new_points[first_diff:last_diff],1)
-        changed_old_points = old_points[first_diff:last_diff]
+        # we allow ourselves the use of list (and Python code not calling into C) for the modified points, of which there are few;
+        # the bulk of the points, of which there can be many, we manage as numpy arrays and process in C
+        simplified_new_points = simplify_polyline(list(new_points[first_diff:last_diff]),1)
+        changed_old_points = list(old_points[first_diff:last_diff])
 
-        new_points = old_points[:first_diff] + simplified_new_points + old_points[last_diff:]
+        new_points = np.asfortranarray(np.concat((old_points[:first_diff], np.array(simplified_new_points), old_points[last_diff:])))
 
-        affected_bbox = points_bbox(simplified_new_points + changed_old_points + old_points[first_diff-1:first_diff] + old_points[last_diff:last_diff+1], WIDTH*4)
+        affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), WIDTH*4)
 
         minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
         minx, miny = res.clip(minx, miny)
