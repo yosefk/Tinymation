@@ -4800,6 +4800,57 @@ def process_keydown_event(event):
 #layout.draw()
 #pygame.display.flip()
 
+UNDER_TEST = os.getenv('TINYTEST') is not None
+
+if UNDER_TEST:
+    import tinytest
+    from PySide6.QtCore import QThread, Signal, QObject, Slot
+
+    # Worker object to read socket in a thread
+    class SocketReader(QObject):
+        # Signal to send arbitrary Python object
+        data_received = Signal(object)
+    
+        def __init__(self, conn):
+            super().__init__()
+            self.conn = conn
+    
+        def run(self):
+            """Run in worker thread to read socket."""
+            while True:
+                try:
+                    # Read from socket (any picklable object)
+                    message = self.conn.recv()
+                    if message == 'shutdown':
+                        break
+                    # Emit signal with the object
+                    self.data_received.emit(message)
+                except (BrokenPipeError, EOFError):
+                    break
+                except Exception as e:
+                    break
+
+    class TestEvent:
+        def accept(self):
+            self.conn.send(('done', self.command))
+
+    class TestTabletEvent(TestEvent):
+        def __init__(self, command):
+            event, x, y, self.p, self.time = command
+            self.t = {'tablet-press':QEvent.TabletPress, 'tablet-move':QEvent.TabletMove, 'tablet-release': QEvent.TabletRelease}[event]
+            self.xy = QPoint(x,y)
+        def pressure(self): return self.p
+        def type(self): return self.t
+        def position(self): return self.xy
+        def timestamp(self): return self.time
+
+    def handle_test_event(widget, command):
+        event = TestTabletEvent(command)
+        event.command = command
+        event.conn = widget.test_conn
+
+        widget.tabletEvent(event)
+
 class TinymationWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -4843,6 +4894,21 @@ class TinymationWidget(QWidget):
         history = History()
         layout.draw()
         self.redrawScreen()
+
+        if UNDER_TEST:
+            self.start_test_slave_thread()
+
+    def start_test_slave_thread(self):
+        # Setup socket reader thread
+        self.test_conn = tinytest.start_testing()
+        self.test_thread = QThread()
+        self.test_reader = SocketReader(self.test_conn)
+        self.test_reader.moveToThread(self.test_thread)
+        # Connect signals
+        self.test_reader.data_received.connect(self.test_command)
+        self.test_thread.started.connect(self.test_reader.run)
+        # Start thread
+        self.test_thread.start()
 
     def on_timer(self, event):
         if layout is None:
@@ -4939,11 +5005,20 @@ class TinymationWidget(QWidget):
             process_keyup_event(event)
 
     def shutdown(self, export_on_exit=True):
+        if UNDER_TEST:
+            self.test_thread.quit()
+            self.test_thread.wait()
+            self.test_conn.close()
+
         movie.save_before_closing(export_on_exit)
         if export_on_exit:
             movie_list.wait_for_all_exporting_to_finish()
         else:
             print('Shift-Escape pressed - skipping export to GIF and MP4!')
+
+    @Slot(object)
+    def test_command(self, command):
+        handle_test_event(self, command)
 
 widget = TinymationWidget()
 try_set_cursor(pencil_cursor[0])
