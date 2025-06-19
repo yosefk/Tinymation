@@ -179,8 +179,7 @@ class Frame:
             if inv_scale is not None:
                 width = round(roi[2] * inv_scale)
                 height = round(roi[3] * inv_scale)
-            # FIXME make 2 such surfaces to save space
-            return large_empty_surface.subsurface(0, 0, width, height)
+            return large_empty_surface(width, height)
 
         return scale_image(self.surface(roi), width, height, inv_scale)
         # note that for a small ROI it's faster to blit lines onto color first, and then scale;
@@ -236,8 +235,13 @@ def empty_frame():
     _empty_frame._create_surfaces_if_needed()
     return _empty_frame
 
-# FIXME this is too big
-large_empty_surface = pygame.Surface((10000, 10000), pg.SRCALPHA)
+_large_empty_surface = None
+def large_empty_surface(width, height):
+    global _large_empty_surface
+    if _large_empty_surface is None or _large_empty_surface.get_width() < width or _large_empty_surface.get_height() < height:
+        _large_empty_surface = pygame.Surface((width*2, height*2), pg.SRCALPHA)
+
+    return _large_empty_surface.subsurface(0, 0, width, height)
 
 class Layer:
     def __init__(self, frames, dir, layer_id=None):
@@ -2166,6 +2170,7 @@ class Layout:
 
     def freeze(self):
         assert self.elems[0] is self.drawing_area()
+        # this is important for vertical_movie_on_horizontal_screen.
         self.elems_event_order = self.elems[1:] + [self.drawing_area()]
 
     def draw_locked(self):
