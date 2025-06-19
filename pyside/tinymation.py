@@ -42,6 +42,9 @@ import json
 
 import res
 
+import pygame
+pg = pygame
+
 FRAME_RATE = 12
 CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
 # makes the png the image inside the directory icon displayed in Explorer... which is nice
@@ -173,11 +176,11 @@ class Frame:
 
     def thumbnail(self, width=None, height=None, roi=None, inv_scale=None):
         if self.empty():
-            empty = empty_frame().color
             if inv_scale is not None:
                 width = round(roi[2] * inv_scale)
                 height = round(roi[3] * inv_scale)
-            return empty.subsurface(0, 0, width, height)
+            # FIXME make 2 such surfaces to save space
+            return large_empty_surface.subsurface(0, 0, width, height)
 
         return scale_image(self.surface(roi), width, height, inv_scale)
         # note that for a small ROI it's faster to blit lines onto color first, and then scale;
@@ -232,6 +235,9 @@ def empty_frame():
         _empty_frame = Frame('')
     _empty_frame._create_surfaces_if_needed()
     return _empty_frame
+
+# FIXME this is too big
+large_empty_surface = pygame.Surface((10000, 10000), pg.SRCALPHA)
 
 class Layer:
     def __init__(self, frames, dir, layer_id=None):
@@ -526,8 +532,6 @@ if len(sys.argv)>1 and sys.argv[1] == 'export':
     signal.signal(signal.SIGBREAK if on_windows else signal.SIGINT, signal_handler)
 
     try:
-        import pygame
-        pg = pygame
         _empty_frame = Frame('')
         check_if_interrupted()
 
@@ -1546,7 +1550,7 @@ class ZoomTool(Button):
         centerx = (da.iwidth/2)*ratio + px*(1-ratio)
         centery = (da.iheight/2)*ratio + py*(1-ratio)
         framex, framey = self.frame_start
-        xoffset = framex/da.xscale - centerx + da.xmargin
+        xoffset = framex/da.xscale - centerx + da.lmargin
         yoffset = framey/da.yscale - centery + da.ymargin
         da.set_xyoffset(xoffset, yoffset)
 
@@ -2160,6 +2164,10 @@ class Layout:
         elem.init()
         self.elems.append(elem)
 
+    def freeze(self):
+        assert self.elems[0] is self.drawing_area()
+        self.elems_event_order = self.elems[1:] + [self.drawing_area()]
+
     def draw_locked(self):
         screen.fill(PEN)
         screen.blit(locked_image, ((screen.get_width()-locked_image.get_width())//2, (screen.get_height()-locked_image.get_height())//2))
@@ -2189,6 +2197,28 @@ class Layout:
                 if elem.draw_border:
                     pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
 
+    def draw_upon_zoom(self):
+        cache.lock() # the chance to need to redraw with the same intermediate zoom/pan is low
+        self.drawing_area().draw()
+        cache.unlock()
+
+        if self.drawing_area().vertical_movie_on_horizontal_screen:
+            # since the drawing area is partially covered by the movie list and the timeline, redraw them
+            self.movie_list_area().redraw_last()
+            self.timeline_area().redraw_last()
+
+    def restore_roi(self, roi):
+        if self.drawing_area().vertical_movie_on_horizontal_screen:
+            # we might have painted on top of the timeline or the movie area
+            x,y,w,h = roi
+            movie_list = self.movie_list_area()
+            timeline = self.timeline_area()
+            if x+w > timeline.rect[0]:
+                if y < timeline.rect[3]:
+                    timeline.redraw_last()
+                if y+h >= movie_list.rect[1]:
+                    movie_list.redraw_last()
+
     # note that pygame seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
     def on_event(self,event):
@@ -2199,10 +2229,7 @@ class Layout:
             # which can create a "backlog" where we keep redrawing after the mouse stops moving because we
             # lag after mouse motion.] TODO: do we want to use a similar approach elsewhere?..
             elif self.is_pressed and self.zoom_pan_tool() and self.focus_elem is self.drawing_area():
-                cache.lock() # the chance to need to redraw with the same intermediate zoom/pan is low
-                self.drawing_area().draw()
-                cache.unlock()
-                #pg.display.flip()
+                self.draw_upon_zoom()
 
         if event.type == FADING_TIMER_EVENT:
             self.drawing_area().update_fading_mask()
@@ -2227,7 +2254,7 @@ class Layout:
         x, y = event.pos
 
         dispatched = False
-        for elem in self.elems:
+        for elem in self.elems_event_order:
             left, bottom, width, height = elem.rect
             if x>=left and x<left+width and y>=bottom and y<bottom+height:
                 if not self.is_playing or isinstance(elem, TogglePlaybackButton):
@@ -2275,6 +2302,10 @@ class Layout:
         assert isinstance(self.elems[1], TimelineArea)
         return self.elems[1]
 
+    def movie_list_area(self):
+        assert isinstance(self.elems[2], MovieListArea)
+        return self.elems[2]
+
     def new_delete_tool(self): return isinstance(self.tool, NewDeleteTool) 
     def zoom_pan_tool(self): return isinstance(self.tool, ZoomTool)
 
@@ -2294,13 +2325,16 @@ def scale_and_fully_preserve_aspect_ratio(w, h, width, height):
     return round(scaled_width), round(scaled_height)
 
 class DrawingArea(LayoutElemBase):
+    def __init__(self, vertical_movie_on_horizontal_screen):
+        LayoutElemBase.__init__(self)
+        self.vertical_movie_on_horizontal_screen = vertical_movie_on_horizontal_screen
     def init(self):
         self.fading_mask = None
         self.fading_func = None
         self.fade_per_frame = 0
         self.last_update_time = 0
         self.ymargin = WIDTH * 3
-        self.xmargin = WIDTH * 3
+        xmargin = WIDTH * 3
         self.render_surface = None
         self.iwidth = 0
         self.iheight = 0
@@ -2312,13 +2346,20 @@ class DrawingArea(LayoutElemBase):
         self.restore_tool_on_mouse_up = False
 
         left, bottom, width, height = self.rect
-        self.iwidth, self.iheight = scale_and_fully_preserve_aspect_ratio(res.IWIDTH, res.IHEIGHT, width - self.xmargin*2, height - self.ymargin*2)
+        self.iwidth, self.iheight = scale_and_fully_preserve_aspect_ratio(res.IWIDTH, res.IHEIGHT, width - xmargin*2, height - self.ymargin*2)
         assert (self.iwidth / res.IWIDTH) - (self.iheight / res.IHEIGHT) < 1e-9
-        self.xmargin = round((width - self.iwidth)/2)
+        xmargin = round((width - self.iwidth)/2)
         self.ymargin = round((height - self.iheight)/2)
         self.set_zoom(self.zoom)
 
-        w, h = ((self.iwidth+self.xmargin*2 + self.iheight+self.ymargin*2)//2,)*2
+        if self.vertical_movie_on_horizontal_screen:
+            self.lmargin = WIDTH*3
+            self.rmargin = xmargin*2 - self.lmargin
+        else:
+            self.lmargin = xmargin
+            self.rmargin = xmargin
+
+        w, h = ((self.iwidth+self.lmargin+self.rmargin + self.iheight+self.ymargin*2)//2,)*2
         self.zoom_surface = pg.Surface((w,h ), pg.SRCALPHA)
         self.zoom_surface.fill(([(a+b)//2 for a,b in zip(MARGIN[:3], BACKGROUND[:3])]))
         rgb = pg.surfarray.pixels3d(self.zoom_surface)
@@ -2387,7 +2428,7 @@ class DrawingArea(LayoutElemBase):
         self.set_zoom(res.IWIDTH / self.iwidth)
 
         # set xyoffset s.t. the center stays at the same screen location (=we zoom around the center)
-        xoffset = framex + self.xmargin - cx
+        xoffset = framex + self.lmargin - cx
         yoffset = framey + self.ymargin - cy
         self.set_xyoffset(xoffset, yoffset)
 
@@ -2409,7 +2450,7 @@ class DrawingArea(LayoutElemBase):
         get the pixels to put into the drawing area (meaning, it strips the extra pixels added due to alignment
         and gives you just the pixels in xoffset, yoffset, iwidth, iheight - again, ignoring margins.)
 
-        drawing_area_starting_point is xmargin, ymargin - again, ignoring our drawing at the margins at high zoom;
+        drawing_area_starting_point is lmargin, ymargin - again, ignoring our drawing at the margins at high zoom;
         this is where scaled_roi_subset should be drawn into da.subsurface.
         '''
         frame_roi = (self.xoffset * self.xscale, self.yoffset * self.yscale, self.iwidth * self.xscale, self.iheight * self.yscale)
@@ -2418,14 +2459,14 @@ class DrawingArea(LayoutElemBase):
         def align_down(n): return int((math.floor(n) // step) * step)
         def align_up(n): return int(((math.ceil(n) + step - 1) // step) * step)
 
-        # we fill up the entire drawing area of 2*xmargin + iwidth, 2*ymargin + iheight pixels,
+        # we fill up the entire drawing area of {l+r}margin + iwidth, 2*ymargin + iheight pixels,
         # unless we want to keep the margins or a part of them empty of pixels - that's when the
         # edges of the image are visible in the shown ROI (which happens when the zoom is small
         # enough or when x/yoffset have the values causing this to be the case)
 
-        frame_roi_left = align_down(max(0, self.xoffset - self.xmargin) * self.xscale)
+        frame_roi_left = align_down(max(0, self.xoffset - self.lmargin) * self.xscale)
         frame_roi_bottom = align_down(max(0, self.yoffset - self.ymargin) * self.yscale)
-        frame_roi_right = min(res.IWIDTH, align_up((self.xoffset + self.iwidth + self.xmargin*2) * self.xscale))
+        frame_roi_right = min(res.IWIDTH, align_up((self.xoffset + self.iwidth + self.lmargin + self.rmargin) * self.xscale))
         frame_roi_top = min(res.IHEIGHT, align_up((self.yoffset + self.iheight + self.ymargin*2) * self.yscale))
 
         def rnd_chk(x):
@@ -2441,20 +2482,20 @@ class DrawingArea(LayoutElemBase):
         scale_target_width = round(step_aligned_frame_roi[2] * (1/self.xscale))
         scale_target_height = round(step_aligned_frame_roi[3] * (1/self.xscale))
         
-        scaled_left = max(0, self.xoffset - self.xmargin) - rnd_chk(frame_roi_left/self.xscale)
+        scaled_left = max(0, self.xoffset - self.lmargin) - rnd_chk(frame_roi_left/self.xscale)
         scaled_right = max(0, self.yoffset - self.ymargin) - rnd_chk(frame_roi_bottom/self.yscale)
-        scaled_width = min(self.iwidth + self.xmargin*2, scale_target_width - scaled_left)
+        scaled_width = min(self.iwidth + self.lmargin + self.rmargin, scale_target_width - scaled_left)
         scaled_height = min(self.iheight + self.ymargin*2, scale_target_height - scaled_right)
         scaled_roi_subset = scaled_left, scaled_right, scaled_width, scaled_height 
         
-        drawing_area_starting_point = max(0, self.xmargin - self.xoffset), max(0, self.ymargin - self.yoffset)
+        drawing_area_starting_point = max(0, self.lmargin - self.xoffset), max(0, self.ymargin - self.yoffset)
 
         return step_aligned_frame_roi, scaled_roi_subset, drawing_area_starting_point
         
     def xy2frame(self, x, y):
-        return (x - self.xmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
+        return (x - self.lmargin + self.xoffset)*self.xscale, (y - self.ymargin + self.yoffset)*self.yscale
     def frame2xy(self, framex, framey):
-        return framex/self.xscale + self.xmargin - self.xoffset, framey/self.yscale + self.ymargin - self.yoffset
+        return framex/self.xscale + self.lmargin - self.xoffset, framey/self.yscale + self.ymargin - self.yoffset
     def roi(self, surface):
         if self.zoom == 1:
             return surface
@@ -2499,9 +2540,9 @@ class DrawingArea(LayoutElemBase):
 
         def draw_margin(margin_color):
             pygame.gfxdraw.box(self.subsurface, (0, 0, width, self.ymargin), margin_color)
-            pygame.gfxdraw.box(self.subsurface, (0, self.ymargin, self.xmargin, height-self.ymargin), margin_color)
-            pygame.gfxdraw.box(self.subsurface, (width-self.xmargin, self.ymargin, self.xmargin, height-self.ymargin), margin_color)
-            pygame.gfxdraw.box(self.subsurface, (self.xmargin, height-self.ymargin, width-self.xmargin*2, self.ymargin), margin_color)
+            pygame.gfxdraw.box(self.subsurface, (0, self.ymargin, self.lmargin, height-self.ymargin), margin_color)
+            pygame.gfxdraw.box(self.subsurface, (width-self.rmargin, self.ymargin, self.rmargin, height-self.ymargin), margin_color)
+            pygame.gfxdraw.box(self.subsurface, (self.lmargin, height-self.ymargin, width-self.lmargin-self.rmargin, self.ymargin), margin_color)
 
         if not layout.is_playing:
             draw_margin(BACKGROUND)
@@ -2541,7 +2582,8 @@ class DrawingArea(LayoutElemBase):
     def draw_region(self, frame_region):
         trace.stop()
         with trace.start('draw_region'):
-            self._draw_region(frame_region)
+            roi = self._draw_region(frame_region)
+            layout.restore_roi(roi)
 
     def _draw_region(self, frame_region):
         xmin, ymin, xmax, ymax = frame_region
@@ -2624,6 +2666,8 @@ class DrawingArea(LayoutElemBase):
             sub.blit(mask.subsurface(other_layers_roi), (0,0))
         if self.should_draw_zoom_surface():
             self.draw_zoom_surface(trimmed_roi)
+
+        return trimmed_roi
 
     def should_draw_zoom_surface(self): return self.zoom > 1.015
     def draw_zoom_surface(self, region=None):
@@ -3065,6 +3109,10 @@ class TimelineArea(LayoutElemBase):
 
         self.subsurface.blit(surface, (0,0))
 
+    def redraw_last(self):
+        surface = self.scroll_indicator.surface
+        self.subsurface.blit(surface, (0,0))
+
     def draw_hold(self):
         left, bottom, width, height = self.rect
         # sort by position for nicer looking occlusion between adjacent icons
@@ -3477,6 +3525,10 @@ class MovieListArea(LayoutElemBase):
 
         self.subsurface.blit(surface, (0, 0))
 
+    def redraw_last(self):
+        surface = self.scroll_indicator.surface
+        self.subsurface.blit(surface, (0, 0))
+
     def x2frame(self, x):
         if not movie_list.images or x is None:
             return None
@@ -3851,7 +3903,7 @@ class Movie(MovieData):
 
                 layers.set_alpha(128)
                 da = layout.drawing_area()
-                w, h = da.iwidth+da.xmargin*2+128, da.iheight+da.ymargin*2+128
+                w, h = da.iwidth+da.lmargin+da.rmargin+128, da.iheight+da.ymargin*2+128
                 class BelowImage:
                     def compute_key(_): return tuple(), ('below-image', w, h)
                     def compute_value(_):
@@ -3890,7 +3942,7 @@ class Movie(MovieData):
                 s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
                 s.fill(BACKGROUND)
                 da = layout.drawing_area()
-                w, h = da.iwidth+da.xmargin*2 + 128, da.iheight+da.ymargin*2 + 128 #TODO: what should this really be? 128 is 2x max alignment step but in what space?..
+                w, h = da.iwidth+da.lmargin+da.rmargin + 128, da.iheight+da.ymargin*2 + 128 #TODO: what should this really be? 128 is 2x max alignment step but in what space?..
                 class AboveImage:
                     def compute_key(_): return tuple(), ('above-image', w, h)
                     def compute_value(_):
@@ -4325,9 +4377,6 @@ MAX_LAYERS = 8
 
 layout = None
 
-class EmptyElem(LayoutElemBase):
-    def draw(self): pg.draw.rect(screen, UNUSED, self.rect)
-
 def init_layout():
     global layout
     global MOVIES_Y_SHARE
@@ -4343,14 +4392,19 @@ def init_layout():
     MOVIES_Y_SHARE = TOOLBAR_X_SHARE + LAYERS_X_SHARE - TIMELINE_Y_SHARE
 
     if vertical_movie_on_horizontal_screen:
+        # the code's a bit ugly, reflecting a history when the drawing area had the 9:16 shape
+        # and then was expanded at the expense of being partially covered by the timeline and movie list areas
         DRAWING_AREA_Y_SHARE = 1
         DRAWING_AREA_X_SHARE = (screen.get_height() * (res.IWIDTH/res.IHEIGHT)) / screen.get_width()
         DRAWING_AREA_X_START = 0
         DRAWING_AREA_Y_START = 0
         timeline_rect = (DRAWING_AREA_X_SHARE, 0, 1-DRAWING_AREA_X_SHARE, TIMELINE_Y_SHARE)
-        MOVIES_X_START = TOOLBAR_X_SHARE + DRAWING_AREA_X_SHARE
+
+        MOVIES_X_START = DRAWING_AREA_X_SHARE
         MOVIES_X_SHARE = 1-TOOLBAR_X_SHARE-DRAWING_AREA_X_SHARE-LAYERS_X_SHARE
-        TOOLBAR_X_START = DRAWING_AREA_X_SHARE
+        TOOLBAR_X_START = DRAWING_AREA_X_SHARE + MOVIES_X_SHARE
+
+        DRAWING_AREA_X_SHARE = 1 - TOOLBAR_X_SHARE - LAYERS_X_SHARE
     else:
         DRAWING_AREA_X_SHARE = 1 - TOOLBAR_X_SHARE - LAYERS_X_SHARE
         DRAWING_AREA_Y_SHARE = DRAWING_AREA_X_SHARE # preserve screen aspect ratio
@@ -4370,14 +4424,11 @@ def init_layout():
     last_tool = layout.full_tool if layout else None
 
     layout = Layout()
-    layout.add((DRAWING_AREA_X_START, DRAWING_AREA_Y_START, DRAWING_AREA_X_SHARE, DRAWING_AREA_Y_SHARE), DrawingArea())
+    layout.add((DRAWING_AREA_X_START, DRAWING_AREA_Y_START, DRAWING_AREA_X_SHARE, DRAWING_AREA_Y_SHARE), DrawingArea(vertical_movie_on_horizontal_screen))
 
     layout.add(timeline_rect, TimelineArea())
     layout.add((MOVIES_X_START, MOVIES_Y_START, MOVIES_X_SHARE, MOVIES_Y_SHARE), MovieListArea())
     layout.add((LAYERS_X_START, LAYERS_Y_START, LAYERS_X_SHARE, LAYERS_Y_SHARE), LayersArea())
-
-    if vertical_movie_on_horizontal_screen:
-        layout.add((MOVIES_X_START, TIMELINE_Y_SHARE, 1-LAYERS_X_SHARE-DRAWING_AREA_X_SHARE-TOOLBAR_X_SHARE, 1-TIMELINE_Y_SHARE-MOVIES_Y_SHARE), EmptyElem())
 
     tools_width_height = [
         ('pencil', 0.33, 1),
@@ -4425,6 +4476,8 @@ def init_layout():
             button = ToolSelectionButton(TOOLS[func])
         layout.add((TOOLBAR_X_START+offset*0.15,0.15,width*0.15, 0.1), button)
         offset += width
+
+    layout.freeze()
 
     set_tool(last_tool if last_tool else TOOLS['pencil'])
 
@@ -5016,9 +5069,10 @@ class TinymationWidget(QWidget):
         else:
             print('Shift-Escape pressed - skipping export to GIF and MP4!')
 
-    @Slot(object)
-    def test_command(self, command):
-        handle_test_event(self, command)
+    if UNDER_TEST:
+        @Slot(object)
+        def test_command(self, command):
+            handle_test_event(self, command)
 
 widget = TinymationWidget()
 try_set_cursor(pencil_cursor[0])
