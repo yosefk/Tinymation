@@ -1561,8 +1561,9 @@ class ZoomTool(Button):
         da.set_zoom_center(da.frame2xy(*self.frame_start))
 
 class NewDeleteTool(PenTool):
-    def __init__(self, frame_func, clip_func, layer_func):
+    def __init__(self, is_new, frame_func, clip_func, layer_func):
         PenTool.__init__(self)
+        self.is_new = is_new
         self.frame_func = frame_func
         self.clip_func = clip_func
         self.layer_func = layer_func
@@ -2311,6 +2312,7 @@ class Layout:
         assert isinstance(self.elems[2], MovieListArea)
         return self.elems[2]
 
+    def new_tool(self): return self.new_delete_tool() and self.tool.is_new
     def new_delete_tool(self): return isinstance(self.tool, NewDeleteTool) 
     def zoom_pan_tool(self): return isinstance(self.tool, ZoomTool)
 
@@ -3509,6 +3511,7 @@ class MovieListArea(LayoutElemBase):
         self.play = scale_image(load_image('play.png'), play_icon_size)
         self.buttons = []
         self.changed_cursor = False
+        self.selected_xrange = (-1,-1)
 
     def thumbnail_widths(self): 
         widths = [im.get_width() for im in movie_list.images]
@@ -3561,6 +3564,8 @@ class MovieListArea(LayoutElemBase):
                 button_start = (startx + image.get_width()-self.play.get_width(), image.get_height()-self.play.get_height())
                 surface.blit(self.play, button_start)
                 self.buttons.append((pos,button_start))
+            else:
+                self.selected_xrange = (startx, startx + image.get_width())
             border = 1 + selected*2
             pygame.draw.rect(surface, PEN, (startx, 0, image.get_width(), image.get_height()), border)
             leftmost += image.get_width()
@@ -3586,6 +3591,10 @@ class MovieListArea(LayoutElemBase):
                 movie_list.open_clip(pos)
                 movie_list.opening = False
                 return True
+    def in_selected_xrange(self,x):
+        x -= self.rect[0]
+        startx, endx = self.selected_xrange
+        return x>=startx and x<endx
     def on_mouse_down(self,x,y):
         self.prevx = None
         if movie_list.opening:
@@ -3594,14 +3603,13 @@ class MovieListArea(LayoutElemBase):
         if self.button_pressed(x,y):
             return
         if layout.new_delete_tool():
-            # TODO: for new we shouldn't require to hit a specific area.
-            # for delete - definitely. for new we should rewind to make it visible, for delete - to make
-            # the freshly selected clip visible, this is related to layout changes when a new clip is selected.
-            # (the only case when we _needn't_ change the scroll pos when the seletion changes is when
-            # we select a new clip with the same aspect ratio is the current one; we could maybe say
-            # it differently - if we change the selection, make sure it's visible?..)
-            layout.tool.clip_func()
-            return
+            # New works anywhere on the movie list area; Delete - only if you hit the selected clip
+            if layout.new_tool() or self.in_selected_xrange(x):
+                movie_list.opening = True
+                layout.tool.clip_func()
+                movie_list.opening = False
+                self.pos_pix_share = 0
+                return
         self.prevx = x
         try_set_cursor(finger_cursor[0])
         self.changed_cursor = True
@@ -4306,8 +4314,8 @@ TOOLS = {
     # (a changing cursor is more obviously "I clicked a wrong button, I should click
     # a different one" than inserting/removing a frame where you need to undo but to
     # do that, you need to understand what just happened)
-    'insert-frame': Tool(NewDeleteTool(insert_frame, insert_clip, insert_layer), blank_page_cursor, ''),
-    'remove-frame': Tool(NewDeleteTool(remove_frame, remove_clip, remove_layer), garbage_bin_cursor, ''),
+    'insert-frame': Tool(NewDeleteTool(True, insert_frame, insert_clip, insert_layer), blank_page_cursor, ''),
+    'remove-frame': Tool(NewDeleteTool(False, remove_frame, remove_clip, remove_layer), garbage_bin_cursor, ''),
 }
 
 FUNCTIONS = {
