@@ -3506,12 +3506,14 @@ class MovieListArea(LayoutElemBase):
         self.prevx = None
         self.scroll_indicator = ScrollIndicator(self.subsurface.get_width(), self.subsurface.get_height())
         self.pos_pix_share = 0 # between 0 and 1; our leftmost pixel position is sum(thumbnail width)*pos_pix_share
+        self.drawn_once = False
 
         play_icon_size = int(screen.get_width() * 0.15*0.14) * 0.8
         self.play = scale_image(load_image('play.png'), play_icon_size)
         self.buttons = []
         self.changed_cursor = False
         self.selected_xrange = (-1,-1)
+        self.redraw = False
 
     def thumbnail_widths(self): 
         widths = [im.get_width() for im in movie_list.images]
@@ -3540,6 +3542,11 @@ class MovieListArea(LayoutElemBase):
         first = True
 
         widths, total_width, accw = self.thumbnail_widths()
+
+        if not self.drawn_once:
+            self.pos_pix_share = max(0, min(self.max_pos_pix_share(total_width), accw[movie_list.clip_pos] / total_width))
+            self.drawn_once = True
+
         leftmost = round(self.pos_pix_share * total_width)
 
         # TODO: test this code with "not enough movies to fill the area"
@@ -3613,10 +3620,11 @@ class MovieListArea(LayoutElemBase):
         self.prevx = x
         try_set_cursor(finger_cursor[0])
         self.changed_cursor = True
+    def max_pos_pix_share(self,total_width):
+        return 1 - self.rect[2]/total_width
     def on_mouse_move(self,x,y):
         if movie_list.opening:
             return
-        self.redraw = False
         if self.prevx is None:
             self.prevx = x # this happens eg when a new_delete_tool is used upon mouse down
             # and then the original tool is restored
@@ -3626,8 +3634,7 @@ class MovieListArea(LayoutElemBase):
         widths, total_width, accw = self.thumbnail_widths()
         leftmost = (self.pos_pix_share * total_width)
 
-        max_pos_pix_share = 1 - self.rect[2]/total_width
-        self.pos_pix_share = max(0, min(max_pos_pix_share, (leftmost - (x - self.prevx)) / total_width))
+        self.pos_pix_share = max(0, min(self.max_pos_pix_share(total_width), (leftmost - (x - self.prevx)) / total_width))
 
         self.draw()
         self.scroll_indicator.draw(self.subsurface, self.prevx-self.rect[0], x-self.rect[0], y-self.rect[1])
