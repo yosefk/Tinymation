@@ -28,6 +28,20 @@ class Trace:
         self.start_time = 0
         self.tracer_stack = []
 
+    def clear(self):
+        if self.tracer is not None:
+            self.tracer.stop()
+        self.nesting_level = 0
+        self.tracer = None
+        self._event = None
+        self.start_time = 0
+        self.tracer_stack = []
+        for data in self.event2data.values():
+            if data.tracer is not None:
+                data.tracer.clear()
+                self.tracer_pool.append(data.tracer)
+        self.event2data = collections.OrderedDict()
+
     def start(self, event):
         '''with trace.start('event-name'):
             code()

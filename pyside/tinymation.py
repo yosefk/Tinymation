@@ -3419,6 +3419,7 @@ class MovieList:
         self.reload()
         self.histories = {}
         self.exporting_processes = {}
+        self.opening = False
     def delete_current_history(self):
         del self.histories[self.clips[self.clip_pos]]
     def reload(self):
@@ -3500,34 +3501,71 @@ class MovieList:
 # 2. 
 class MovieListArea(LayoutElemBase):
     def init(self):
-        self.show_pos = None
         self.prevx = None
         self.scroll_indicator = ScrollIndicator(self.subsurface.get_width(), self.subsurface.get_height())
+        self.pos_pix_share = 0 # between 0 and 1; our leftmost pixel position is sum(thumbnail width)*pos_pix_share
+
+        play_icon_size = int(screen.get_width() * 0.15*0.14) * 0.8
+        self.play = scale_image(load_image('play.png'), play_icon_size)
+        self.buttons = []
+        self.changed_cursor = False
+
+    def thumbnail_widths(self): 
+        widths = [im.get_width() for im in movie_list.images]
+        accw = []
+        sumw = 0
+        for w in widths:
+            accw.append(sumw)
+            sumw += w
+        total_width = sum(widths)
+        return widths, total_width, accw
+
     def draw(self):
         surface = self.scroll_indicator.surface
         surface.fill(UNDRAWABLE)
 
+        if not movie_list.opening:
+            height = self.rect[-1]
+            width = int(res.IWIDTH * height / res.IHEIGHT)
+            image = movie.get_thumbnail(movie.pos, width, height, highlight=False) 
+            movie_list.images[movie_list.clip_pos] = image # this keeps the image correct when scrolled out of clip_pos
+            # (we don't self.reload() upon scrolling so movie_list.images can go stale when the current
+            # clip is modified)
+
         _, _, width, _ = self.rect
         left = 0
         first = True
-        pos = self.show_pos if self.show_pos is not None else movie_list.clip_pos
-        for image in movie_list.images[pos:]:
-            border = 1 + first*2
-            if first and pos == movie_list.clip_pos:
-                try:
-                    image = movie.get_thumbnail(movie.pos, image.get_width(), image.get_height(), highlight=False) 
-                    self.images[pos] = image # this keeps the image correct when scrolled out of clip_pos
-                    # (we don't self.reload() upon scrolling so self.images can go stale when the current
-                    # clip is modified)
-                except:
-                    pass
-            first = False
-            surface.blit(image, (left, 0), image.get_rect()) 
-            pygame.draw.rect(surface, PEN, (left, 0, image.get_width(), image.get_height()), border)
-            left += image.get_width()
-            if left >= width:
+
+        widths, total_width, accw = self.thumbnail_widths()
+        leftmost = round(self.pos_pix_share * total_width)
+
+        # TODO: test this code with "not enough movies to fill the area"
+        # find the position of the leftmost image we need to draw
+        sumw = 0
+        for i,w in enumerate(widths):
+            sumw += w
+            if sumw / total_width >= self.pos_pix_share:
                 break
 
+        pos = i
+        covered = 0
+        self.buttons = []
+        for image in movie_list.images[i:]:
+            widths_up_to_here = accw[pos]
+            startx = covered - (leftmost - widths_up_to_here)
+            if startx >= width:
+                break
+            surface.blit(image, (startx, 0))
+            selected = pos == movie_list.clip_pos
+            if not selected:
+                button_start = (startx + image.get_width()-self.play.get_width(), image.get_height()-self.play.get_height())
+                surface.blit(self.play, button_start)
+                self.buttons.append((pos,button_start))
+            border = 1 + selected*2
+            pygame.draw.rect(surface, PEN, (startx, 0, image.get_width(), image.get_height()), border)
+            leftmost += image.get_width()
+            covered += image.get_width()
+            pos += 1
         self.subsurface.blit(surface, (0, 0))
 
     def redraw_last(self):
@@ -3539,46 +3577,60 @@ class MovieListArea(LayoutElemBase):
             return None
         left, _, _, _ = self.rect
         return int(round(x-left)) // movie_list.images[0].get_width()
+    def button_pressed(self,x,y):
+        x -= self.rect[0]
+        y -= self.rect[1]
+        for pos,(startx,starty) in self.buttons:
+            if x>startx and y>starty and x<startx+self.play.get_height():
+                movie_list.opening = True
+                movie_list.open_clip(pos)
+                movie_list.opening = False
+                return True
     def on_mouse_down(self,x,y):
         self.prevx = None
+        if movie_list.opening:
+            return # for some reason the event is delivered again when we run the event loop in ProgressBar;
+            # accept()ing the event before calling layout.on_event() doesn't seem to help
+        if self.button_pressed(x,y):
+            return
         if layout.new_delete_tool():
-            if self.x2frame(x) == 0:
-                layout.tool.clip_func()
+            # TODO: for new we shouldn't require to hit a specific area.
+            # for delete - definitely. for new we should rewind to make it visible, for delete - to make
+            # the freshly selected clip visible, this is related to layout changes when a new clip is selected.
+            # (the only case when we _needn't_ change the scroll pos when the seletion changes is when
+            # we select a new clip with the same aspect ratio is the current one; we could maybe say
+            # it differently - if we change the selection, make sure it's visible?..)
+            layout.tool.clip_func()
             return
         self.prevx = x
-        self.show_pos = movie_list.clip_pos
         try_set_cursor(finger_cursor[0])
+        self.changed_cursor = True
     def on_mouse_move(self,x,y):
+        if movie_list.opening:
+            return
         self.redraw = False
         if self.prevx is None:
             self.prevx = x # this happens eg when a new_delete_tool is used upon mouse down
             # and then the original tool is restored
-            self.show_pos = movie_list.clip_pos
         if layout.new_delete_tool():
             return
+
+        widths, total_width, accw = self.thumbnail_widths()
+        leftmost = (self.pos_pix_share * total_width)
+
+        max_pos_pix_share = 1 - self.rect[2]/total_width
+        self.pos_pix_share = max(0, min(max_pos_pix_share, (leftmost - (x - self.prevx)) / total_width))
+
+        self.draw()
         self.scroll_indicator.draw(self.subsurface, self.prevx-self.rect[0], x-self.rect[0], y-self.rect[1])
-        prev_pos = self.x2frame(self.prevx)
-        curr_pos = self.x2frame(x)
-        if prev_pos is None and curr_pos is None:
-            self.prevx = x
-            return
-        if curr_pos is not None and prev_pos is not None:
-            pos_dist = prev_pos - curr_pos
-        else:
-            pos_dist = -1 if x > self.prevx else 1
-        self.redraw = pos_dist != 0
-        self.prevx = x
-        self.show_pos = min(max(0, self.show_pos + pos_dist), len(movie_list.clips)-1) 
+
+        self.prevx=x
     def on_mouse_up(self,x,y):
-        self.on_mouse_move(x,y)
-        self.subsurface.blit(self.scroll_indicator.surface, (0, 0))
-        # opening a movie is a slow operation so we don't want it to be "too interactive"
-        # (like timeline scrolling) - we wait for the mouse-up event to actually open the clip
-        movie_list.open_clip(self.show_pos)
-        if self.prevx is not None:
+        if self.changed_cursor:
             restore_cursor()
+            self.changed_cursor = False
         self.prevx = None
-        self.show_pos = None
+        return
 
 class ToolSelectionButton(LayoutElemBase):
     def __init__(self, tool):
@@ -4767,6 +4819,11 @@ def process_keyup_event(event):
         try_set_cursor(layout.full_tool.cursor[0])
         needle_cursor_selected = False
 
+def dump_and_clear_profiling_data():
+    print('saving trace data to event-trace/')
+    trace.save('event-trace')
+    trace.clear()
+
 # TODO: proper test for modifiers; less use of Ctrl
 def process_keydown_event(event):
     ctrl = event.modifiers() & Qt.ControlModifier
@@ -4823,6 +4880,10 @@ def process_keydown_event(event):
     if ctrl and event.key() == Qt.Key_R:
         swap_width_height()
         return
+
+    # Ctrl-P: dump profiling data
+    if ctrl and event.key() == Qt.Key_P:
+        dump_and_clear_profiling_data()
 
     # Ctrl-1/2: set layout to drawing/animation
     if ctrl and event.key() == Qt.Key_1:
@@ -4980,11 +5041,12 @@ class TinymationWidget(QWidget):
             self.redrawScreen()
 
     def redrawScreen(self):
+        # TODO: optimize this away (we should work with a Qt image directly)
         pgsurf2qtimage(screen, self.image)
         self.update()
 
     def redrawLayoutIfNeeded(self, event=None):
-        if event is None or (layout.is_playing and event.type == PLAYBACK_TIMER_EVENT) or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events:
+        if event is None or (layout.is_playing and event.type == PLAYBACK_TIMER_EVENT) or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events and not movie_list.opening:
             layout.draw()
             if not layout.is_playing:
                cache.collect_garbage()
@@ -5091,7 +5153,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 QTimer.singleShot(0, widget.start_loading)
 status = app.exec()
-trace.save('event-trace')
+dump_and_clear_profiling_data()
 pygame.quit()
 sys.exit(status)
 
