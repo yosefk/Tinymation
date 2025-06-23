@@ -1356,7 +1356,7 @@ class PenTool(Button):
             xarr = np.array([cx])
             yarr = np.array([cy])
             tarr = np.array([layout.event_time])
-            parr = np.array([layout.pressure if layout.subpixel else 0.35])
+            parr = np.array([min(layout.pressure,0.7) if layout.subpixel else 0.35])
             tinylib.brush_paint(self.brush, 1, *[arr_base_ptr(arr) for arr in [xarr, yarr, tarr, parr]], drawing_area.xscale, self.region)
             self.update_bbox()
 
@@ -4310,7 +4310,7 @@ TOOLS = {
     'pencil': Tool(PenTool(soft=True, width=4, zoom_changes_pixel_width=False), pencil_cursor, 'sS'),
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
-    'eraser-big': Tool(PenTool(eraser=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
+    'eraser-big': Tool(PenTool(eraser=True, soft=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
     'line-shift': Tool(PenLineShiftSmoothTool(), pencil_cursor, 'mM'),
     'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'fF'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."

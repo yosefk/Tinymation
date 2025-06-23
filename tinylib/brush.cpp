@@ -173,6 +173,8 @@ class ImagePainter
     Point2D _maxPainted;
 };
 
+double GPRESS = 0;
+
 void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange)
 {
     // Extend the bounding box slightly to capture anti-aliased edges
@@ -212,7 +214,13 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
 
             // Apply pixel value change
             int pixValChange = round(double(greatestPixValChange) * intensity);
-            int newVal = std::max(0, std::min(oldVal + pixValChange, 255));
+            int newVal;
+            if(pixValChange > 0) {
+                newVal = std::max(0, std::min(oldVal + pixValChange, 255));
+            }
+            else {
+                newVal = std::max(0, std::min(int(oldVal * (1-GPRESS) * intensity + oldVal * (1-intensity)), 255));
+            }
             if(newVal != oldVal) {
                 _image[ind] = newVal;
                 _xmin = std::min(_xmin, x);
@@ -233,7 +241,8 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double radius = width / 2;
     double interval = radius * 0.3;
     double pressure = (starts.pressure + ends.pressure)/2; //TODO: move this into the loop instead of being loop invariant
-    int greatestPixValChange =  -64*std::min(1., std::max(0., pressure*pressure + pressure*0.35));// 128 * pressure * (_erase ? -1 : 1);
+    GPRESS = pressure;
+    int greatestPixValChange =  -64*std::min(1., std::max(0., pressure*pressure + pressure*0.1));// 128 * pressure * (_erase ? -1 : 1);
 
     double maxCenterNoise = radius * 0.25;
     if(!_erase) {
