@@ -160,7 +160,13 @@ class ImagePainter
     void drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& start, const SamplePoint& end, double width);
 
   private:
-    void drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange);
+    //currently this function can do two kinds of changes to the image pixels:
+    //- if greatestPixValChange is positive, it does an additive change (it computes an intensity
+    //  per pixel to make the circle edges soft, and then adds greatestPixValChange * intensity, clamping to 255)
+    //- otherwise it does a multiplicative change using the pressure parameter, more accurately it interpolates
+    //  between the old value and a new one computed by multiplying by 1-pressure, with intensity defining the weights
+    //  (high intensity / middle of the circle -> more change.)
+    void drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure);
 
     //these are used by drawLineUsingWideSoftCiclesWithNoisyCenters
     Point2D _lastCircleCenter; // Center of the last drawn circle
@@ -173,9 +179,7 @@ class ImagePainter
     Point2D _maxPainted;
 };
 
-double GPRESS = 0;
-
-void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange)
+void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure)
 {
     // Extend the bounding box slightly to capture anti-aliased edges
     double aa_margin = 1.0; // Extra pixels for smooth edges
@@ -194,32 +198,45 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
             }
             double d = distance(center, Point2D{double(x+0.5),double(y+0.5)});
             // Anti-aliasing: Smooth transition near the edge
-            double aa_width = 1.0; // Width of the anti-aliasing band
+            const double aa_width = 1.0; // Width of the anti-aliasing band
+            const double feather_width = 3;
             double intensity = 0.0;
 
-            if (d <= radius - aa_width) {
-                // Fully inside the circle: use linear falloff
-                intensity = 1.0 - d / radius;
-            } else if (d < radius + aa_width) {
-                // In the anti-aliasing region: blend linear falloff with smooth edge
-                double t = (d - radius) / aa_width; // t in [-1, 1]
-                double s = 0.5 - 0.5 * t; // Linearly maps t from [-1,1] to [0,1]
-                double aa_factor = s * s * (3.0 - 2.0 * s); // Smoothstep for edge
-                // Linearly interpolate intensity from (1 - d/radius) at inner edge
-                intensity = (1.0 - d / radius) * aa_factor;
-            } else {
-                // Outside the circle
-                continue;
+            if(radius < feather_width) {
+                if (d <= radius - aa_width) {
+                    // Fully inside the circle: use linear falloff
+                    intensity = 1.0 - d / radius;
+                } else if (d < radius + aa_width) {
+                    // In the anti-aliasing region: blend linear falloff with smooth edge
+                    double t = (d - radius) / aa_width; // t in [-1, 1]
+                    double s = 0.5 - 0.5 * t; // Linearly maps t from [-1,1] to [0,1]
+                    double aa_factor = s * s * (3.0 - 2.0 * s); // Smoothstep for edge
+                    // Linearly interpolate intensity from (1 - d/radius) at inner edge
+                    intensity = (1.0 - d / radius) * aa_factor;
+                } else {
+                    // Outside the circle
+                    continue;
+                }
+            }
+            else {
+                if (d <= radius) {// - aa_width) {
+                    double min_falloff_dist = radius - feather_width;
+                    double capped_distance = std::max(d, min_falloff_dist);
+                    intensity = (1.0 - (capped_distance - min_falloff_dist) / feather_width);
+                } else {
+                    // Outside the circle
+                    continue;
+                }
             }
 
             // Apply pixel value change
             int pixValChange = round(double(greatestPixValChange) * intensity);
             int newVal;
-            if(pixValChange > 0) {
+            if(greatestPixValChange > 0) {
                 newVal = std::max(0, std::min(oldVal + pixValChange, 255));
             }
             else {
-                newVal = std::max(0, std::min(int(oldVal * (1-GPRESS) * intensity + oldVal * (1-intensity)), 255));
+                newVal = std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
             }
             if(newVal != oldVal) {
                 _image[ind] = newVal;
@@ -241,8 +258,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double radius = width / 2;
     double interval = radius * 0.3;
     double pressure = (starts.pressure + ends.pressure)/2; //TODO: move this into the loop instead of being loop invariant
-    GPRESS = pressure;
-    int greatestPixValChange =  -64*std::min(1., std::max(0., pressure*pressure + pressure*0.1));// 128 * pressure * (_erase ? -1 : 1);
+    int greatestPixValChange = 0;
 
     double maxCenterNoise = radius * 0.25;
     if(!_erase) {
@@ -257,7 +273,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
 
     if (segmentLength == 0) {
         if (_isFirstSegment) {
-            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange);
+            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange, pressure);
             _lastCircleCenter = start;
             _remainingDistance = interval;
         }
@@ -269,7 +285,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
 
     // For the first segment, start at the start point
     if (_isFirstSegment) {
-        drawSoftCircle(start, radius, greatestPixValChange);
+        drawSoftCircle(start, radius, greatestPixValChange, pressure);
         _lastCircleCenter = start;
         _remainingDistance = interval;
         _isFirstSegment = false;
@@ -279,7 +295,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double distanceToNext = _remainingDistance;
     while (distanceToNext <= segmentLength + 1e-10) { // Small epsilon for floating-point errors
         Point2D center = sum(start, mul(unitDirection, distanceToNext));
-        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange);
+        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure);
         _lastCircleCenter = center;
         distanceToNext += interval;
     }
@@ -688,7 +704,8 @@ void Brush::paintLine(const SamplePoint& p1, const SamplePoint& p2)
         }
         else {
             if(_polyline.back() != p1) {
-                printf("Brush::paintLine - WARNING: paintLine called with p1 different from the previous paintLine's p2!\n");
+                //not sure why this happnes... it occasionally does - TODO: debug this... doesn't seem to cause visible adverse effects...
+                //printf("Brush::paintLine - WARNING: paintLine called with p1 different from the previous paintLine's p2!\n");
             }
             _polyline.push_back(p2);
         }
