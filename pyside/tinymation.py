@@ -613,6 +613,7 @@ def set_wd(wd):
     
 set_wd(os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymation'))
 
+
 import datetime, time
 def format_now(): return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
@@ -633,6 +634,62 @@ from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCurs
 from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication, QEventLoop, QSize
 
 app = QApplication(sys.argv)
+
+import psutil
+
+def is_already_running(lock_file_path):
+    """Check if another instance of the program is running.
+    This code is racy, strictly speaking, but you'd have to start the 2 processes
+    so close to each other for the race to happen that it's not realistic for a human user.
+    OTOH this avoids fiddling with real file locking or choosing a socket port or some such."""
+    if os.path.exists(lock_file_path):
+        try:
+            # Read the PID from the lock file
+            with open(lock_file_path, 'r') as f:
+                pid = int(f.read().strip())
+
+            # Check if the process with this PID is still running
+            if psutil.pid_exists(pid):
+                return True
+            else:
+                # PID exists but process is dead, remove stale lock file
+                os.remove(lock_file_path)
+                return False
+        except (ValueError, OSError):
+            # Invalid PID or file, assume stale lock file
+            os.remove(lock_file_path)
+            return False
+    return False
+
+def create_lock_file(lock_file_path):
+    """Create a lock file with the current process ID."""
+
+def show_already_running_dialog():
+    """Display a modal dialog indicating another instance is running."""
+    dialog = QMessageBox()
+    dialog.setWindowTitle("Tinymation is already running!")
+    dialog.setText("Tinymation is already running! Only one Tinymation window can run at a time.")
+    dialog.setIcon(QMessageBox.Warning)
+    dialog.setStandardButtons(QMessageBox.Ok)
+    dialog.exec()
+
+def create_lock_file():
+    lockpath = os.path.join(WD, '.lock')
+
+    if is_already_running(lockpath):
+        show_already_running_dialog()
+        sys.exit(1)
+
+    with open(lockpath, 'w') as f:
+        f.write(str(os.getpid()))
+
+def delete_lock_file():
+    try:
+        os.unlink(os.path.join(WD, '.lock'))
+    except:
+        pass
+
+create_lock_file()
 
 def pgsurf2qtimage(src, dst):
     iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
@@ -852,7 +909,9 @@ def add_circle(image, radius, color=(255,0,0,128), outline_color=(0,0,0,128)):
     result.blit(image, (radius, 0))
     return result
 
-pencil_cursor = load_cursor('pen.png')
+pen_cursor = load_cursor('pen.png', size=int(CURSOR_SIZE*1.5), hot_spot=(0.02,0.97))
+pen_cursor = (pen_cursor[0], load_image('pen-tool.png'))
+pencil_cursor = load_cursor('pencil.png', size=int(CURSOR_SIZE*1.5), hot_spot=(0.02,0.97))
 pencil_cursor = (pencil_cursor[0], load_image('pen-tool.png'))
 eraser_cursor = load_cursor('eraser.png')
 eraser_cursor = (eraser_cursor[0], load_image('eraser-tool.png'))
@@ -860,13 +919,13 @@ eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5), edit
 eraser_medium_cursor = (eraser_medium_cursor[0], eraser_cursor[1])
 eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2), edit=lambda s: add_circle(s, BIG_ERASER_WIDTH//2), hot_spot_offset=(BIG_ERASER_WIDTH//2,-BIG_ERASER_WIDTH//2))
 eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
-needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE*2))
+needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE*1.3), hot_spot=(0.02,0.97))
 flashlight_cursor = needle_cursor
 flashlight_cursor = (flashlight_cursor[0], load_image('needle-tool.png')) 
-paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], load_image('bucket-tool.png'))
+paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], load_image('splash-0.png')) #FIXME
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
-zoom_cursor = load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*2))
+zoom_cursor = (load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*2))[0], load_image('zoom-tool.png'))
 pan_cursor = load_cursor('pan.png', hot_spot=(0.5, 0.5), size=int(CURSOR_SIZE*2))
 finger_cursor = load_cursor('finger.png', hot_spot=(0.85, 0.17))
 
@@ -1560,17 +1619,13 @@ class ZoomTool(Button):
 
         da.set_zoom_center(da.frame2xy(*self.frame_start))
 
-class NewDeleteTool(PenTool):
+class NewDeleteTool(Button):
     def __init__(self, is_new, frame_func, clip_func, layer_func):
-        PenTool.__init__(self)
+        Button.__init__(self)
         self.is_new = is_new
         self.frame_func = frame_func
         self.clip_func = clip_func
         self.layer_func = layer_func
-
-    def on_mouse_down(self, x, y): pass
-    def on_mouse_up(self, x, y): pass
-    def on_mouse_move(self, x, y): pass
 
 def flood_fill_color_based_on_lines(color_rgba, lines, x, y, bucket_color, bbox_callback=None):
     flood_code = 2
@@ -1672,6 +1727,11 @@ class PaintBucketTool(Button):
     def choose_last_color():
         set_tool(PaintBucketTool.color2tool[PaintBucketTool.last_color])
 
+    def draw(self,*args):
+        if self.color[-1]:
+            return
+        Button.draw(self,*args)
+
     def __init__(self,color,change_color=None):
         Button.__init__(self)
         self.color = color
@@ -1754,6 +1814,7 @@ class PaintBucketTool(Button):
             if color.isValid():
                 self.color = color.toTuple()
                 layout.full_tool.cursor = self.change_color(self.color)
+                layout.palette_area().generate_colors_image()
                 return True
         finally:
             widget.setEnabled(True)
@@ -2118,8 +2179,6 @@ class FlashlightTool(Button):
         fading_mask.set_alpha(255)
         layout.drawing_area().set_fading_mask(fading_mask, skeleton)
         layout.drawing_area().fade_per_frame = 255/(FADING_RATE*15)
-    def on_mouse_up(self, x, y): pass
-    def on_mouse_move(self, x, y): pass
 
 # layout:
 #
@@ -2311,6 +2370,12 @@ class Layout:
     def movie_list_area(self):
         assert isinstance(self.elems[2], MovieListArea)
         return self.elems[2]
+
+    def palette_area(self):
+        for elem in self.elems:
+            if isinstance(elem, PaletteElem):
+                return elem
+        assert False, 'PaletteElem not found'
 
     def new_tool(self): return self.new_delete_tool() and self.tool.is_new
     def new_delete_tool(self): return isinstance(self.tool, NewDeleteTool) 
@@ -3508,8 +3573,8 @@ class MovieListArea(LayoutElemBase):
         self.pos_pix_share = 0 # between 0 and 1; our leftmost pixel position is sum(thumbnail width)*pos_pix_share
         self.drawn_once = False
 
-        play_icon_size = int(screen.get_width() * 0.15*0.14) * 0.8
-        self.play = scale_image(load_image('play.png'), play_icon_size)
+        play_icon_size = int(screen.get_width() * 0.15*0.14)
+        self.play = scale_image(load_image('play-small.png'), play_icon_size)
         self.buttons = []
         self.changed_cursor = False
         self.selected_xrange = (-1,-1)
@@ -3663,8 +3728,6 @@ class ToolSelectionButton(LayoutElemBase):
             if self.tool.tool.modify():
                 set_tool(self.tool)
                 self.tool.tool.button_surface = None # update from the new icon
-    def on_mouse_up(self,x,y): pass
-    def on_mouse_move(self,x,y): pass
 
 class TogglePlaybackButton(Button):
     def __init__(self, play_icon, pause_icon):
@@ -3683,8 +3746,6 @@ class TogglePlaybackButton(Button):
         Button.draw(self, self.rect, icon)
     def on_mouse_down(self,x,y):
         toggle_playing()
-    def on_mouse_up(self,x,y): pass
-    def on_mouse_move(self,x,y): pass
 
 class Tool:
     def __init__(self, tool, cursor, chars):
@@ -3968,10 +4029,10 @@ class Movie(MovieData):
                 s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
                 s.fill(BACKGROUND)
                 if self.layer_pos == 0:
-                    return s
+                    return s.subsurface(subset) if subset is not None else s
                 if not highlight:
                     s.blit(layers, (0, 0))
-                    return s
+                    return s.subsurface(subset) if subset is not None else s
 
                 layers.set_alpha(128)
                 da = layout.drawing_area()
@@ -4008,7 +4069,7 @@ class Movie(MovieData):
             def compute_value(_):
                 layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
                 if not highlight or self.layer_pos == len(self.layers)-1:
-                    return layers
+                    return layers.subsurface(subset) if subset is not None else layers
 
                 layers.set_alpha(128)
                 s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
@@ -4306,12 +4367,12 @@ def zoom_to_film_res():
 
 TOOLS = {
     'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
-    'pen': Tool(PenTool(width=2.5, zoom_changes_pixel_width=False), pencil_cursor, 'bB'),
+    'pen': Tool(PenTool(width=2.5, zoom_changes_pixel_width=False), pen_cursor, 'bB'),
     'pencil': Tool(PenTool(soft=True, width=4, zoom_changes_pixel_width=False), pencil_cursor, 'sS'),
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
     'eraser-big': Tool(PenTool(eraser=True, soft=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
-    'line-shift': Tool(PenLineShiftSmoothTool(), pencil_cursor, 'mM'),
+    'line-shift': Tool(PenLineShiftSmoothTool(), pen_cursor, 'mM'),
     'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'fF'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
@@ -4369,6 +4430,8 @@ def color_image(s, rgba):
     #    alphas[:] = alphas * (alphas<255) + rgba[-1] * (alphas==255)#np.minimum(alphas[:], 255 - pixels[:,:,0])
     return sc
 
+import random
+
 class Palette:
     def __init__(self, filename, rows=11, columns=3):
         s = load_image(filename)
@@ -4402,6 +4465,9 @@ class Palette:
         self.columns = columns
         self.colors = colors
 
+        self.splashes = [load_image(f) for f in ['splash-%d.png'%n for n in range(7)]] * 10
+#        random.shuffle(self.splashes)
+
         self.init_cursors()
 
     def bucket(self,color):
@@ -4424,10 +4490,33 @@ class Palette:
         radius = PAINT_BUCKET_WIDTH//2
         self.colors[row][col] = color
         sc = self.bucket(color)
-        self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], color))
+        self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(self.splashes[row*self.columns+col], color))#color_image(paint_bucket_cursor[1], color))
         return self.cursors[row][col]
 
 palette = Palette('palette.png')
+
+class PaletteElem(LayoutElemBase):
+    def init(self):
+        self.generate_colors_image()
+        
+    def generate_colors_image(self):
+        l,b,w,h = self.rect
+        col_width = w/palette.columns
+        row_height = h/palette.rows
+
+        self.colors_image = pg.Surface((w,h), pg.SRCALPHA)
+        scale = 1.2
+        rc = [(row,col) for row in range(palette.rows) for col in range(palette.columns)]
+        random.shuffle(rc)
+        for row,col in rc:
+            img = palette.cursors[palette.rows-row-1][col][1]
+            w, h = scale_and_preserve_aspect_ratio(img.get_width(), img.get_height(), col_width*scale, row_height*scale)
+            s = scale_image(img, w, h)
+            self.colors_image.blit(s, ((col - (scale-1)/2)*col_width, (row - (scale-1)/2)*row_height))
+
+    def draw(self):
+        l,b,_,_ = self.rect
+        screen.blit(self.colors_image, (l,b))
 
 def get_clip_dirs(sort_by): # sort_by is a stat struct attribute (st_something)
     '''returns the clip directories sorted by last modification time (latest first)'''
@@ -4517,8 +4606,11 @@ def init_layout():
 
     layout.add((TOOLBAR_X_START+color_w*2, 0.85-color_w, color_w, color_w*1.5), ToolSelectionButton(TOOLS['flashlight']))
     
+    first_xy = None
     for row,y in enumerate(np.arange(0.25,0.85-0.001,color_w)):
         for col,x in enumerate(np.arange(0,0.15-0.001,color_w)):
+            if first_xy is None:
+                first_xy = (TOOLBAR_X_START+x,y)
             tool = None
             if row == len(palette.colors):
                 if col == 0:
@@ -4534,6 +4626,9 @@ def init_layout():
                 PaintBucketTool.color2tool[tool.tool.color] = tool
             layout.add((TOOLBAR_X_START+x,y,color_w,color_w), ToolSelectionButton(tool))
             i += 1
+
+    palette_rect = (first_xy[0], first_xy[1], color_w*palette.columns, color_w*palette.rows)
+    layout.add(palette_rect, PaletteElem())
 
     funcs_width = [
         ('insert-frame', 0.33),
@@ -5170,5 +5265,8 @@ QTimer.singleShot(0, widget.start_loading)
 status = app.exec()
 dump_and_clear_profiling_data()
 pygame.quit()
+
+delete_lock_file()
+
 sys.exit(status)
 
