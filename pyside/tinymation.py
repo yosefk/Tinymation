@@ -722,6 +722,7 @@ UNDRAWABLE = (220, 215, 190)
 MARGIN = (220-80, 215-80, 190-80, 192)
 SELECTED = (220-80, 215-80, 190-80)
 UNUSED = SELECTED
+OUTLINE = (220-105, 215-105, 190-105)
 PROGRESS = (192-45, 255-25, 192-45)
 LAYERS_BELOW = (128,192,255)
 LAYERS_ABOVE = (255,192,0)
@@ -821,7 +822,7 @@ def meshgrid_color(rgb): tinylib.meshgrid_color(*color_c_params(rgb))
 def meshgrid_alpha(alpha): tinylib.meshgrid_alpha(*greyscale_c_params(alpha))
 
 import cv2
-def cv2_resize_surface(src, dst, inv_scale=None):
+def cv2_resize_surface(src, dst, inv_scale=None, best_quality=False):
     iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
     optr, ostride, owidth, oheight, obgr = color_c_params(pg.surfarray.pixels3d(dst))
     assert ibgr == obgr
@@ -841,14 +842,14 @@ def cv2_resize_surface(src, dst, inv_scale=None):
     elif owidth > iwidth:
         method = cv2.INTER_CUBIC
     else:
-        method = cv2.INTER_LINEAR
+        method = cv2.INTER_LINEAR if not best_quality else cv2.INTER_CUBIC
 
     if inv_scale is not None:
         cv2.resize(iattached, None, oattached, fx=inv_scale, fy=inv_scale, interpolation=method)
     else:
         cv2.resize(iattached, (owidth,oheight), oattached, interpolation=method)
 
-def scale_image(surface, width=None, height=None, inv_scale=None):
+def scale_image(surface, width=None, height=None, inv_scale=None, best_quality=False):
     assert width or height or inv_scale
 
     if inv_scale is not None:
@@ -865,11 +866,11 @@ def scale_image(surface, width=None, height=None, inv_scale=None):
     if not width:
         width = int(surface.get_width() * height / surface.get_height())
 
-    if width < surface.get_width()//2 and height < surface.get_height()//2:
+    if not best_quality and width < surface.get_width()//2 and height < surface.get_height()//2:
         return scale_image(scale_image(surface, surface.get_width()//2, surface.get_height()//2), width, height)
 
     ret = pg.Surface((width, height), pg.SRCALPHA)
-    cv2_resize_surface(surface, ret, inv_scale)
+    cv2_resize_surface(surface, ret, inv_scale, best_quality)
     ret.set_alpha(surface.get_alpha())
     #ret = pg.transform.smoothscale(surface, (width, height))
 
@@ -886,7 +887,7 @@ def surf2cursor(surface, hotx, hoty):
 
 def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=255 if on_linux else 192, edit=lambda x: x, hot_spot_offset=(0,0)):
   surface = load_image(file)
-  surface = scale_image(surface, size, size*surface.get_height()/surface.get_width())#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
+  surface = scale_image(surface, size, size*surface.get_height()/surface.get_width(), best_quality=True)#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
       surface = pg.transform.flip(surface, True, True)
   non_transparent_surface = surface.copy()
@@ -909,9 +910,9 @@ def add_circle(image, radius, color=(255,0,0,128), outline_color=(0,0,0,128)):
     result.blit(image, (radius, 0))
     return result
 
-pen_cursor = load_cursor('pen.png', size=int(CURSOR_SIZE*1.5), hot_spot=(0.02,0.97))
+pen_cursor = load_cursor('pen.png', size=int(CURSOR_SIZE), hot_spot=(0.02,0.97))
 pen_cursor = (pen_cursor[0], load_image('pen-tool.png'))
-pencil_cursor = load_cursor('pencil.png', size=int(CURSOR_SIZE*1.5), hot_spot=(0.02,0.97))
+pencil_cursor = load_cursor('pencil.png', size=int(CURSOR_SIZE), hot_spot=(0.02,0.97))
 pencil_cursor = (pencil_cursor[0], load_image('pen-tool.png'))
 eraser_cursor = load_cursor('eraser.png')
 eraser_cursor = (eraser_cursor[0], load_image('eraser-tool.png'))
@@ -919,14 +920,13 @@ eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5), edit
 eraser_medium_cursor = (eraser_medium_cursor[0], eraser_cursor[1])
 eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2), edit=lambda s: add_circle(s, BIG_ERASER_WIDTH//2), hot_spot_offset=(BIG_ERASER_WIDTH//2,-BIG_ERASER_WIDTH//2))
 eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
-needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE*1.3), hot_spot=(0.02,0.97))
+needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE), hot_spot=(0.02,0.97))
 flashlight_cursor = needle_cursor
 flashlight_cursor = (flashlight_cursor[0], load_image('needle-tool.png')) 
 paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], load_image('splash-0.png')) #FIXME
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
-zoom_cursor = (load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*2))[0], load_image('zoom-tool.png'))
-pan_cursor = load_cursor('pan.png', hot_spot=(0.5, 0.5), size=int(CURSOR_SIZE*2))
+zoom_cursor = (load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*1.5))[0], load_image('zoom-tool.png'))
 finger_cursor = load_cursor('finger.png', hot_spot=(0.85, 0.17))
 
 # for locked screen
@@ -1147,7 +1147,7 @@ class Button(LayoutElemBase):
         _, _, w, h = cursor_surface.get_rect()
         scaled_width, scaled_height = scale_and_preserve_aspect_ratio(w, h, width, height)
         if not self.button_surface:
-            surface = scale_image(cursor_surface, scaled_width, scaled_height)
+            surface = scale_image(cursor_surface, scaled_width, scaled_height, best_quality=True)
             self.button_surface = surface
         self.screen_left = int(left+(width-scaled_width)/2)
         self.screen_bottom = int(bottom+height-scaled_height)
@@ -1812,7 +1812,9 @@ class PaintBucketTool(Button):
             trace.event('modify-color')
             color = QColorDialog.getColor(QColor(*self.color), options=QColorDialog.DontUseNativeDialog | QColorDialog.ShowAlphaChannel)
             if color.isValid():
+                tool = PaintBucketTool.color2tool[self.color]
                 self.color = color.toTuple()
+                PaintBucketTool.color2tool[self.color] = tool
                 layout.full_tool.cursor = self.change_color(self.color)
                 layout.palette_area().generate_colors_image()
                 return True
@@ -2105,8 +2107,6 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     maxx = min(res.IWIDTH-1, math.ceil(max(px)) + margin)
     maxy = min(res.IHEIGHT-1, math.ceil(max(py)) + margin)
     history_item = HistoryItem('lines', bbox=(minx, miny, maxx, maxy))
-    history_item.editable_pen_line = EditablePenLine(list(zip(px,py)))
-    history.append_item(history_item)
 
     ptr, ystride, width, height = greyscale_c_params(lines)
     brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, 2.5, 0, 0, 0, 0, ptr, width, height, 4, ystride, 0)
@@ -2118,7 +2118,17 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     tinylib.brush_paint(brush, len(px), arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, 1, region)
     tinylib.brush_end_paint(brush, region)
+
+    polyline_length = tinylib.brush_get_polyline_length(brush)
+    polyline = np.zeros((polyline_length, 2), dtype=float, order='F')
+    polyline_x = polyline[:, 0]
+    polyline_y = polyline[:, 1]
+    tinylib.brush_get_polyline(brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, 0)
+
     tinylib.brush_free(brush)
+
+    history_item.editable_pen_line = EditablePenLine(polyline)
+    history.append_item(history_item)
 
     return True
 
@@ -2233,10 +2243,6 @@ class Layout:
         # this is important for vertical_movie_on_horizontal_screen.
         self.elems_event_order = self.elems[1:] + [self.drawing_area()]
 
-    def draw_locked(self):
-        screen.fill(PEN)
-        screen.blit(locked_image, ((screen.get_width()-locked_image.get_width())//2, (screen.get_height()-locked_image.get_height())//2))
-
     def hidden(self, elem):
         return self.mode == DRAWING_LAYOUT and (isinstance(elem, TimelineArea) or isinstance(elem, LayersArea) or isinstance(elem, TogglePlaybackButton))
 
@@ -2260,7 +2266,7 @@ class Layout:
                     pygame.draw.rect(screen, (255,0,0), elem.rect, 3, 3)
                     continue
                 if elem.draw_border:
-                    pygame.draw.rect(screen, PEN, elem.rect, 1, 1)
+                    pygame.draw.rect(screen, OUTLINE, elem.rect, 1, 1)
 
     def draw_upon_zoom(self):
         cache.lock() # the chance to need to redraw with the same intermediate zoom/pan is low
@@ -2921,15 +2927,15 @@ class TimelineArea(LayoutElemBase):
         self._calc_factors()
 
         eye_icon_size = int(screen.get_width() * 0.15*0.14)
-        self.eye_open = scale_image(load_image('light_on.png'), eye_icon_size)
-        self.eye_shut = scale_image(load_image('light_off.png'), eye_icon_size)
+        self.eye_open = scale_image(load_image('light_on.png'), eye_icon_size, best_quality=True)
+        self.eye_shut = scale_image(load_image('light_off.png'), eye_icon_size, best_quality=True)
 
-        self.loop_icon = scale_image(load_image('loop.png'), int(screen.get_width()*0.15*0.14))
-        self.arrow_icon = scale_image(load_image('arrow.png'), int(screen.get_width()*0.15*0.2))
+        self.loop_icon = scale_image(load_image('loop.png'), int(screen.get_width()*0.15*0.14), best_quality=True)
+        self.arrow_icon = scale_image(load_image('arrow.png'), int(screen.get_width()*0.15*0.2), best_quality=True)
 
-        self.no_hold = scale_image(load_image('no_hold.png'), int(screen.get_width()*0.15*0.25))
-        self.hold_active = scale_image(load_image('hold_yellow.png'), int(screen.get_width()*0.15*0.25))
-        self.hold_inactive = scale_image(load_image('hold_grey.png'), int(screen.get_width()*0.15*0.25))
+        self.no_hold = scale_image(load_image('no_hold.png'), int(screen.get_width()*0.15*0.25), best_quality=True)
+        self.hold_active = scale_image(load_image('hold_yellow.png'), int(screen.get_width()*0.15*0.25), best_quality=True)
+        self.hold_inactive = scale_image(load_image('hold_grey.png'), int(screen.get_width()*0.15*0.25), best_quality=True)
 
         # stuff for light table [what positions are enabled and what the resulting
         # mask to be rendered together with the current frame is]
@@ -3118,7 +3124,7 @@ class TimelineArea(LayoutElemBase):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
             surface.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             border = 1 + 2*(pos==movie.pos)
-            pygame.draw.rect(surface, PEN, (x, bottom, thumb_width, height), border)
+            pygame.draw.rect(surface, OUTLINE, (x, bottom, thumb_width, height), border)
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
                 eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
@@ -3286,12 +3292,12 @@ class LayersArea(LayoutElemBase):
         self.prevy = None
         self.color_images = {}
         icon_height = min(int(screen.get_width() * 0.15*0.14), self.thumbnail_height / 2)
-        self.eye_open = scale_image(load_image('eye_open.png'), height=icon_height)
-        self.eye_shut = scale_image(load_image('eye_shut.png'), height=icon_height)
-        self.light_on = scale_image(load_image('light_on.png'), height=icon_height)
-        self.light_off = scale_image(load_image('light_off.png'), height=icon_height)
-        self.locked = scale_image(load_image('locked.png'), height=icon_height)
-        self.unlocked = scale_image(load_image('unlocked.png'), height=icon_height)
+        self.eye_open = scale_image(load_image('eye_open.png'), height=icon_height, best_quality=True)
+        self.eye_shut = scale_image(load_image('eye_shut.png'), height=icon_height, best_quality=True)
+        self.light_on = scale_image(load_image('light_on.png'), height=icon_height, best_quality=True)
+        self.light_off = scale_image(load_image('light_off.png'), height=icon_height, best_quality=True)
+        self.locked = scale_image(load_image('locked.png'), height=icon_height, best_quality=True)
+        self.unlocked = scale_image(load_image('unlocked.png'), height=icon_height, best_quality=True)
         self.eye_boundaries = []
         self.lit_boundaries = []
         self.lock_boundaries = []
@@ -3351,7 +3357,7 @@ class LayersArea(LayoutElemBase):
             image_left = (width - image.get_width())/2
             pygame.draw.rect(surface, BACKGROUND, (image_left, blit_bottom, image.get_width(), image.get_height()))
             surface.blit(image, (image_left, blit_bottom), image.get_rect()) 
-            pygame.draw.rect(surface, PEN, (image_left, blit_bottom, image.get_width(), image.get_height()), border)
+            pygame.draw.rect(surface, OUTLINE, (image_left, blit_bottom, image.get_width(), image.get_height()), border)
 
             max_border = 3
             if len(movie.frames) > 1 and layer.visible and list(layout.timeline_area().light_table_positions()):
@@ -3574,7 +3580,7 @@ class MovieListArea(LayoutElemBase):
         self.drawn_once = False
 
         play_icon_size = int(screen.get_width() * 0.15*0.14)
-        self.play = scale_image(load_image('play-small.png'), play_icon_size)
+        self.play = scale_image(load_image('play-small.png'), play_icon_size, best_quality=True)
         self.buttons = []
         self.changed_cursor = False
         self.selected_xrange = (-1,-1)
@@ -3639,7 +3645,7 @@ class MovieListArea(LayoutElemBase):
             else:
                 self.selected_xrange = (startx, startx + image.get_width())
             border = 1 + selected*2
-            pygame.draw.rect(surface, PEN, (startx, 0, image.get_width(), image.get_height()), border)
+            pygame.draw.rect(surface, OUTLINE, (startx, 0, image.get_width(), image.get_height()), border)
             leftmost += image.get_width()
             covered += image.get_width()
             pos += 1
@@ -4465,8 +4471,10 @@ class Palette:
         self.columns = columns
         self.colors = colors
 
-        self.splashes = [load_image(f) for f in ['splash-%d.png'%n for n in range(7)]] * 10
-#        random.shuffle(self.splashes)
+        self.splashes = [load_image(f) for f in ['splash-%d.png'%n for n in range(self.columns*self.rows)]]
+        random.seed(time.time())
+        random.shuffle(self.splashes)
+        self.splash_index = 0
 
         self.init_cursors()
 
@@ -4483,20 +4491,22 @@ class Palette:
 
         sc = self.bucket(self.bg_color)
         cursor = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], self.bg_color))
-        self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width()))
+        self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width(), best_quality=True))
         
     def change_color_func(self, r, c): return lambda color: self.change_color(r, c, color)
     def change_color(self, row, col, color):
         radius = PAINT_BUCKET_WIDTH//2
         self.colors[row][col] = color
         sc = self.bucket(color)
-        self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(self.splashes[row*self.columns+col], color))#color_image(paint_bucket_cursor[1], color))
+        self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(self.splashes[row*self.columns+col], color))
         return self.cursors[row][col]
 
 palette = Palette('palette.png')
 
 class PaletteElem(LayoutElemBase):
     def init(self):
+        self.row_col_perm = [(row,col) for row in range(palette.rows) for col in range(palette.columns)]
+        random.shuffle(self.row_col_perm)
         self.generate_colors_image()
         
     def generate_colors_image(self):
@@ -4505,14 +4515,18 @@ class PaletteElem(LayoutElemBase):
         row_height = h/palette.rows
 
         self.colors_image = pg.Surface((w,h), pg.SRCALPHA)
-        scale = 1.2
-        rc = [(row,col) for row in range(palette.rows) for col in range(palette.columns)]
-        random.shuffle(rc)
-        for row,col in rc:
+        for row,col in self.row_col_perm:
+            scale = 1.2 if row != 0 and row != palette.rows-1 else 1.1
             img = palette.cursors[palette.rows-row-1][col][1]
             w, h = scale_and_preserve_aspect_ratio(img.get_width(), img.get_height(), col_width*scale, row_height*scale)
-            s = scale_image(img, w, h)
-            self.colors_image.blit(s, ((col - (scale-1)/2)*col_width, (row - (scale-1)/2)*row_height))
+            s = scale_image(img, w, h, best_quality=True)
+            offsetx = (col_width*scale - w) / 2
+            offsety = (row_height*scale - h) / 2
+            if row == 0:
+                offsety += row_height*(scale-1)/2
+            elif row == palette.rows-1:
+                offsety -= row_height*(scale-1)/2
+            self.colors_image.blit(s, (offsetx + (col - (scale-1)/2)*col_width, offsety + (row - (scale-1)/2)*row_height))
 
     def draw(self):
         l,b,_,_ = self.rect
