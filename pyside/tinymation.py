@@ -50,6 +50,7 @@ CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.pn
 # makes the png the image inside the directory icon displayed in Explorer... which is nice
 FRAME_FMT = 'frame%04d.png'
 CURRENT_FRAME_FILE = 'current_frame.png'
+PALETTE_FILE = 'palette.png'
 BACKGROUND = (240, 235, 220)
 PEN = (20, 20, 20)
 
@@ -579,7 +580,8 @@ class ExportProgressStatus:
             if pngs:
                 last = get_last_modified([os.path.join(clip, f) for f in pngs])
                 m = fmt.match(os.path.basename(last))
-                self.done += int(m.groups()[0]) + 1 # frame 3 being ready means 4 are done
+                if m:
+                    self.done += int(m.groups()[0]) + 1 # frame 3 being ready means 4 are done
 
         if self.first:
             self._init(live_clips)
@@ -1812,7 +1814,9 @@ class PaintBucketTool(Button):
             trace.event('modify-color')
             color = QColorDialog.getColor(QColor(*self.color), options=QColorDialog.DontUseNativeDialog | QColorDialog.ShowAlphaChannel)
             if color.isValid():
+                # FIXME: add an undo op
                 tool = PaintBucketTool.color2tool[self.color]
+                del PaintBucketTool.color2tool[self.color]
                 self.color = color.toTuple()
                 PaintBucketTool.color2tool[self.color] = tool
                 layout.full_tool.cursor = self.change_color(self.color)
@@ -3763,10 +3767,19 @@ class Movie(MovieData):
     def __init__(self, dir, progress=default_progress_callback):
         iwidth, iheight = (res.IWIDTH, res.IHEIGHT)
         MovieData.__init__(self, dir, progress=progress)
-        if (iwidth, iheight) != (res.IWIDTH, res.IHEIGHT):
-            init_layout()
+
         self.edited_since_export = True # MovieList can set it safely to false - we don't know
         # if the last exporting process is done or not
+
+        # load the movie's palette
+        palette_file = os.path.join(dir, PALETTE_FILE)
+        global palette
+        if os.path.exists(palette_file):
+            palette = Palette(os.path.join(dir, PALETTE_FILE))
+        else: # use the default palette
+            palette = Palette(PALETTE_FILE)
+
+        init_layout() # aspect ratio and/or palette might have changed
 
     def toggle_hold(self):
         pos = self.pos
@@ -4142,6 +4155,7 @@ class Movie(MovieData):
         history = History()
 
         self.render_and_save_current_frame()
+        palette.save(os.path.join(self.dir, PALETTE_FILE))
         self.garbage_collect_layer_dirs()
 
     def fit_to_resolution(self):
@@ -4426,29 +4440,33 @@ def restore_tool():
 def color_image(s, rgba):
     sc = s.copy()
     pixels = pg.surfarray.pixels3d(sc)
+
+    alphas = pg.surfarray.pixels_alpha(sc)
+    alphas[:] = np.minimum(alphas[:], ((255 - pixels[:,:,0]).astype(np.int32) + rgba[-1]))
+
     for ch in range(3):
         pixels[:,:,ch] = (pixels[:,:,ch].astype(int)*rgba[ch])//255
-    if rgba[-1] == 0:
-        alphas = pg.surfarray.pixels_alpha(sc)
-        alphas[:] = np.minimum(alphas[:], 255 - pixels[:,:,0])
-    #if rgba[-1] < 255:
-    #    alphas = pg.surfarray.pixels_alpha(sc)
-    #    alphas[:] = alphas * (alphas<255) + rgba[-1] * (alphas==255)#np.minimum(alphas[:], 255 - pixels[:,:,0])
     return sc
 
 import random
 
+PALETTE_ROWS = 11
+PALETTE_COLUMNS = 3
+
 class Palette:
-    def __init__(self, filename, rows=11, columns=3):
+    splashes = [load_image(f) for f in ['splash-%d.png'%n for n in range(PALETTE_COLUMNS*PALETTE_ROWS)]]
+    random.seed(time.time())
+    random.shuffle(splashes)
+
+    def __init__(self, filename, rows=PALETTE_ROWS, columns=PALETTE_COLUMNS):
         s = load_image(filename)
         color_hist = {}
         first_color_hit = {}
-        for y in range(s.get_height()):
-            for x in range(s.get_width()):
-                r,g,b,a = s.get_at((x,y))
-                color = r,g,b
+        for x in range(s.get_width()):
+            for y in range(s.get_height()):
+                color = tuple(s.get_at((x,y)))
                 if color not in first_color_hit:
-                    first_color_hit[color] = (y / (s.get_height()/3))*s.get_width() + x
+                    first_color_hit[color] = (x / (s.get_width()/3))*s.get_height() + y
                 color_hist[color] = color_hist.get(color,0) + 1
 
         colors = [[None for col in range(columns)] for row in range(rows)]
@@ -4459,7 +4477,7 @@ class Palette:
         col = 0
         for hit, color in hit2color:
             if color in color2popularity:
-                colors[row][col] = color + (255,)
+                colors[rows-row-1][col] = color
                 row+=1
                 if row == rows:
                     col += 1
@@ -4471,12 +4489,19 @@ class Palette:
         self.columns = columns
         self.colors = colors
 
-        self.splashes = [load_image(f) for f in ['splash-%d.png'%n for n in range(self.columns*self.rows)]]
-        random.seed(time.time())
-        random.shuffle(self.splashes)
-        self.splash_index = 0
-
         self.init_cursors()
+
+    def save(self, filename):
+        pix = 20
+        s = pg.Surface((self.columns*pix, self.rows*pix), pg.SRCALPHA)
+        rgb = pg.surfarray.pixels3d(s)
+        alpha = pg.surfarray.pixels_alpha(s)
+        for row in range(self.rows):
+            for col in range(self.columns):
+                color = self.colors[self.rows-row-1][col]
+                rgb[col*pix:(col+1)*pix,row*pix:(row+1)*pix] = color[:3]
+                alpha[col*pix:(col+1)*pix,row*pix:(row+1)*pix] = color[-1]
+        pg.image.save(s, filename)
 
     def bucket(self,color):
         radius = PAINT_BUCKET_WIDTH//2
@@ -4501,12 +4526,12 @@ class Palette:
         self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(self.splashes[row*self.columns+col], color))
         return self.cursors[row][col]
 
-palette = Palette('palette.png')
 
 class PaletteElem(LayoutElemBase):
+    row_col_perm = [(row,col) for row in range(PALETTE_ROWS) for col in range(PALETTE_COLUMNS)]
+    random.shuffle(row_col_perm)
+
     def init(self):
-        self.row_col_perm = [(row,col) for row in range(palette.rows) for col in range(palette.columns)]
-        random.shuffle(self.row_col_perm)
         self.generate_colors_image()
         
     def generate_colors_image(self):
@@ -4551,6 +4576,7 @@ def get_clip_dirs(sort_by): # sort_by is a stat struct attribute (st_something)
 MAX_LAYERS = 8
 
 layout = None
+palette = Palette(PALETTE_FILE)
 
 def init_layout():
     global layout
