@@ -1722,6 +1722,21 @@ def integer_points_near_line_segment(x1, y1, x2, y2, distance):
     
     return result_points.astype(np.int32)
 
+# FIXME: you can't keep paint_bucket_tool - when movies are closed and reopened the objects are recreated
+class ChangeColorHistoryItem(HistoryItemBase):
+    def __init__(self, paint_bucket_tool, new_color):
+        HistoryItemBase.__init__(self)
+        self.paint_bucket_tool = paint_bucket_tool
+        self.new_color = new_color
+    def undo(self):
+        old_color = self.paint_bucket_tool.color
+        self.paint_bucket_tool.modify_color(self.new_color)
+        return ChangeColorHistoryItem(self.paint_bucket_tool, old_color)
+    def __str__(self):
+        return f'InsertLayerHistoryItem(removing layer {self.layer_pos_before_undo})'
+
+# FIXME: color2tool should be a part of the layout since it's reconstructed when we close/open movies
+# last_color should be per movie
 class PaintBucketTool(Button):
     color2tool = {}
     last_color = BACKGROUND+(0,)
@@ -1814,16 +1829,21 @@ class PaintBucketTool(Button):
             trace.event('modify-color')
             color = QColorDialog.getColor(QColor(*self.color), options=QColorDialog.DontUseNativeDialog | QColorDialog.ShowAlphaChannel)
             if color.isValid():
-                # FIXME: add an undo op
-                tool = PaintBucketTool.color2tool[self.color]
-                del PaintBucketTool.color2tool[self.color]
-                self.color = color.toTuple()
-                PaintBucketTool.color2tool[self.color] = tool
-                layout.full_tool.cursor = self.change_color(self.color)
-                layout.palette_area().generate_colors_image()
+                new_color = color.toTuple()
+                old_color = self.color
+                self.modify_color(new_color)
+                history.append_item(ChangeColorHistoryItem(self, old_color))
                 return True
         finally:
             widget.setEnabled(True)
+
+    def modify_color(self, new_color):
+        tool = PaintBucketTool.color2tool[self.color]
+        del PaintBucketTool.color2tool[self.color]
+        self.color = new_color 
+        PaintBucketTool.color2tool[self.color] = tool
+        layout.full_tool.cursor = self.change_color(self.color)
+        layout.palette_area().generate_colors_image()
 
 NO_PATH_DIST = 10**6
 
