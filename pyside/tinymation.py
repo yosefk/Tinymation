@@ -932,7 +932,7 @@ eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
 needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE), hot_spot=(0.02,0.97))
 flashlight_cursor = needle_cursor
 flashlight_cursor = (flashlight_cursor[0], load_image('needle-tool.png')) 
-paint_bucket_cursor = (load_cursor('paint_bucket.png')[1], load_image('splash-0.png')) #FIXME
+paint_bucket_cursor = (load_cursor('paint_bucket.png', size=int(CURSOR_SIZE*1.2))[1], load_image('splash-0.png')) #FIXME
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 zoom_cursor = (load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*1.5))[0], load_image('zoom-tool.png'))
