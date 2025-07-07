@@ -887,7 +887,7 @@ def surf2cursor(surface, hotx, hoty):
   pixmap = QPixmap.fromImage(image)
   return QCursor(pixmap, hotX=hotx, hotY=hoty)
 
-def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=255 if on_linux else 192, edit=lambda x: x, hot_spot_offset=(0,0)):
+def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=192, edit=lambda x: (x, None), hot_spot_offset=(0,0)):
   surface = load_image(file)
   surface = scale_image(surface, size, size*surface.get_height()/surface.get_width(), best_quality=True)#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
@@ -896,31 +896,38 @@ def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=25
   alpha = pg.surfarray.pixels_alpha(surface)
   alpha[:] = np.minimum(alpha, min_alpha)
   del alpha
-  surface = edit(surface)
-  hotx = minmax(int(hot_spot[0] * surface.get_width()) + hot_spot_offset[0], 0, surface.get_width()-1)
-  hoty = minmax(int(hot_spot[1] * surface.get_height()) + hot_spot_offset[1], 0, surface.get_height()-1)
+  surface, hot = edit(surface)
+  if hot is None:
+      hotx = minmax(int(hot_spot[0] * surface.get_width()) + hot_spot_offset[0], 0, surface.get_width()-1)
+      hoty = minmax(int(hot_spot[1] * surface.get_height()) + hot_spot_offset[1], 0, surface.get_height()-1)
+  else:
+      hotx, hoty = hot
   #return pg.cursors.Cursor((hotx, hoty), surface), non_transparent_surface
   return surf2cursor(surface, hotx, hoty), non_transparent_surface
 
-def add_circle(image, radius, color=(255,0,0,128), outline_color=(0,0,0,128)):
-    new_width = radius + image.get_width()
-    new_height = radius + image.get_height()
+def add_circle(image, radius, offset=(0,1), color=(255,0,0,128), outline_color=(0,0,0,128)):
+    new_width = max(image.get_width(), radius + round(image.get_width()*(1-offset[0])))
+    new_height = max(image.get_height(), radius + round(image.get_height()*offset[1]))
     result = pg.Surface((new_width, new_height), pg.SRCALPHA)
-    pg.gfxdraw.filled_circle(result, radius, new_height-radius, radius, outline_color)
-    pg.gfxdraw.filled_circle(result, radius, new_height-radius, radius-WIDTH+1, (0,0,0,0))
-    pg.gfxdraw.filled_circle(result, radius, new_height-radius, radius-WIDTH+1, color)
-    result.blit(image, (radius, 0))
-    return result
+    xoffset = round(offset[0]*image.get_width())
+    yoffset = round(offset[1]*image.get_height())
+    pg.gfxdraw.filled_circle(result, radius, yoffset, radius, outline_color)
+    pg.gfxdraw.filled_circle(result, radius, yoffset, radius-WIDTH+1, (0,0,0,0))
+    pg.gfxdraw.filled_circle(result, radius, yoffset, radius-WIDTH+1, color)
+    result.blit(image, (radius-xoffset, 0))
+    return result, (radius, yoffset)
 
-pen_cursor = load_cursor('pen.png', size=int(CURSOR_SIZE), hot_spot=(0.02,0.97))
+pen_cursor = load_cursor('pen.png', size=int(CURSOR_SIZE*1.3), hot_spot=(0.02,0.97))
 pen_cursor = (pen_cursor[0], load_image('pen-tool.png'))
-pencil_cursor = load_cursor('pencil.png', size=int(CURSOR_SIZE), hot_spot=(0.02,0.97))
-pencil_cursor = (pencil_cursor[0], load_image('pen-tool.png'))
-eraser_cursor = load_cursor('eraser.png')
+pencil_cursor = load_cursor('pencil.png', size=int(CURSOR_SIZE*1.3), hot_spot=(0.02,0.97))
+pencil_cursor = (pencil_cursor[0], load_image('pencil-tool.png'))
+tweezers_cursor = load_cursor('tweezers.png', size=int(CURSOR_SIZE*1.5), hot_spot=(0.03,0.97))
+tweezers_cursor = (tweezers_cursor[0], load_image('tweezers-tool.png'))
+eraser_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*0.7), hot_spot=(0.02,0.9))
 eraser_cursor = (eraser_cursor[0], load_image('eraser-tool.png'))
-eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5), edit=lambda s: add_circle(s, MEDIUM_ERASER_WIDTH//2), hot_spot_offset=(MEDIUM_ERASER_WIDTH//2,-MEDIUM_ERASER_WIDTH//2))
+eraser_medium_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE), edit=lambda s: add_circle(s, MEDIUM_ERASER_WIDTH//2, offset=(0.02,0.9)), hot_spot_offset=(MEDIUM_ERASER_WIDTH//2,-MEDIUM_ERASER_WIDTH//2))
 eraser_medium_cursor = (eraser_medium_cursor[0], eraser_cursor[1])
-eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*2), edit=lambda s: add_circle(s, BIG_ERASER_WIDTH//2), hot_spot_offset=(BIG_ERASER_WIDTH//2,-BIG_ERASER_WIDTH//2))
+eraser_big_cursor = load_cursor('eraser.png', size=int(CURSOR_SIZE*1.5), edit=lambda s: add_circle(s, BIG_ERASER_WIDTH//2, offset=(0.02,0.9)), hot_spot_offset=(BIG_ERASER_WIDTH//2,-BIG_ERASER_WIDTH//2))
 eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
 needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE), hot_spot=(0.02,0.97))
 flashlight_cursor = needle_cursor
@@ -1134,6 +1141,7 @@ class LayoutElemBase:
     def hit(self, x, y): return True
     def modify(self): pass
     def draw(self): pass
+    def highlight_selection(self): pass
     def on_mouse_down(self, x, y): pass
     def on_mouse_move(self, x, y): pass
     def on_mouse_up(self, x, y): pass
@@ -1478,6 +1486,7 @@ def simplify_polyline(points, threshold):
 
 class PenLineShiftSmoothTool(Button):
     def __init__(self):
+        Button.__init__(self)
         self.editable_pen_line = None
 
     def on_mouse_down(self, x, y):
@@ -2278,6 +2287,11 @@ class Layout:
                 return
 
         screen.fill(UNDRAWABLE)
+
+        if not self.is_playing:
+            for elem in self.elems:
+                elem.highlight_selection()
+
         for elem in self.elems:
             if not self.is_playing or isinstance(elem, DrawingArea) or isinstance(elem, TogglePlaybackButton):
                 if self.hidden(elem):
@@ -3746,8 +3760,10 @@ class ToolSelectionButton(LayoutElemBase):
     def __init__(self, tool):
         LayoutElemBase.__init__(self)
         self.tool = tool
+    def highlight_selection(self):
+        if self.tool is layout.full_tool:
+            pg.draw.rect(screen, SELECTED, self.rect)
     def draw(self):
-        pg.draw.rect(screen, SELECTED if self.tool is layout.full_tool else UNDRAWABLE, self.rect)
         self.tool.tool.draw(self.rect,self.tool.cursor[1])
     def hit(self,x,y): return self.tool.tool.hit(x,y,self.rect)
     def on_mouse_down(self,x,y):
@@ -4412,8 +4428,8 @@ TOOLS = {
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
     'eraser-big': Tool(PenTool(eraser=True, soft=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
-    'line-shift': Tool(PenLineShiftSmoothTool(), pen_cursor, 'mM'),
-    'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'fF'),
+    'tweezers': Tool(PenLineShiftSmoothTool(), tweezers_cursor, 'mM'),
+    'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'nN'), # needle
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
     # without any more ceremony. but when it's used thru a button, the user needs to
@@ -4437,7 +4453,6 @@ FUNCTIONS = {
     'toggle-layer-lock': (toggle_layer_lock, 'l'),
     'zoom-to-film-res': (zoom_to_film_res, '1'),
     'last-paint-bucket': (PaintBucketTool.choose_last_color, 'kK'),
-    'rename-clip': (rename_clip, 'nN'),
 }
 
 tool_change = 0
@@ -4525,7 +4540,7 @@ class Palette:
 
     def bucket(self,color):
         radius = PAINT_BUCKET_WIDTH//2
-        return add_circle(color_image(paint_bucket_cursor[0], color), radius)
+        return add_circle(color_image(paint_bucket_cursor[0], color), radius)[0]
 
     def init_cursors(self):
         radius = PAINT_BUCKET_WIDTH//2
@@ -4652,10 +4667,11 @@ def init_layout():
     layout.add((LAYERS_X_START, LAYERS_Y_START, LAYERS_X_SHARE, LAYERS_Y_SHARE), LayersArea())
 
     tools_width_height = [
-        ('pencil', 0.33, 1),
-        ('eraser-big', 0.27, 1),
-        ('eraser-medium', 0.21, 0.8),
-        ('eraser', 0.15, 0.6),
+        ('pen', 0.23, 1),
+        ('pencil', 0.23, 1),
+        ('eraser-big', 0.23, 0.88),
+        ('eraser-medium', 0.18, 0.68),
+        ('eraser', 0.13, 0.48),
     ]
     offset = 0
     for tool, width, height in tools_width_height:
@@ -4664,7 +4680,8 @@ def init_layout():
     color_w = 0.025*2
     i = 0
 
-    layout.add((TOOLBAR_X_START+color_w*2, 0.85-color_w, color_w, color_w*1.5), ToolSelectionButton(TOOLS['flashlight']))
+    layout.add((TOOLBAR_X_START+color_w*2.4, 0.86, color_w*.6, color_w*1.2), ToolSelectionButton(TOOLS['flashlight']))
+    layout.add((TOOLBAR_X_START+color_w*1.9, 0.85-color_w, color_w*1.1, color_w*1.7), ToolSelectionButton(TOOLS['tweezers']))
     
     first_xy = None
     for row,y in enumerate(np.arange(0.25,0.85-0.001,color_w)):
@@ -4706,7 +4723,7 @@ def init_layout():
 
     layout.freeze()
 
-    set_tool(last_tool if last_tool else TOOLS['pencil'])
+    set_tool(last_tool if last_tool else TOOLS['pen'])
 
 def new_movie_clip_dir(): return os.path.join(WD, format_now())
 
@@ -5054,6 +5071,12 @@ def process_keydown_event(event):
     # Ctrl-P: dump profiling data
     if ctrl and event.key() == Qt.Key_P:
         dump_and_clear_profiling_data()
+        return
+
+    # Ctrl-N: rename
+    if ctrl and event.key() == Qt.Key_N:
+        rename_clip()
+        return
 
     # Ctrl-1/2: set layout to drawing/animation
     if ctrl and event.key() == Qt.Key_1:
@@ -5312,7 +5335,7 @@ class TinymationWidget(QWidget):
             handle_test_event(self, command)
 
 widget = TinymationWidget()
-try_set_cursor(pencil_cursor[0])
+try_set_cursor(pen_cursor[0])
 
 def signal_handler(sig, frame):
     print("\nInterrupted by Ctrl+C! Shutting down, please wait...")
