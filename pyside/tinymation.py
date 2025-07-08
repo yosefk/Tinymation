@@ -2968,7 +2968,7 @@ class TimelineArea(LayoutElemBase):
         self.eye_open = scale_image(load_image('light_on.png'), eye_icon_size, best_quality=True)
         self.eye_shut = scale_image(load_image('light_off.png'), eye_icon_size, best_quality=True)
 
-        self.loop_icon = scale_image(load_image('loop.png'), int(screen.get_width()*0.15*0.14), best_quality=True)
+        self.loop_icon = scale_image(load_image('loop.png'), int(screen.get_width()*0.15*0.2), best_quality=True)
         self.arrow_icon = scale_image(load_image('arrow.png'), int(screen.get_width()*0.15*0.2), best_quality=True)
 
         self.no_hold = scale_image(load_image('no_hold.png'), int(screen.get_width()*0.15*0.25), best_quality=True)
