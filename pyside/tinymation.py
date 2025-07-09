@@ -2971,9 +2971,9 @@ class TimelineArea(LayoutElemBase):
         self.loop_icon = scale_image(load_image('loop.png'), int(screen.get_width()*0.15*0.2), best_quality=True)
         self.arrow_icon = scale_image(load_image('arrow.png'), int(screen.get_width()*0.15*0.2), best_quality=True)
 
-        self.no_hold = scale_image(load_image('no_hold.png'), int(screen.get_width()*0.15*0.25), best_quality=True)
-        self.hold_active = scale_image(load_image('hold_yellow.png'), int(screen.get_width()*0.15*0.25), best_quality=True)
-        self.hold_inactive = scale_image(load_image('hold_grey.png'), int(screen.get_width()*0.15*0.25), best_quality=True)
+        self.no_hold = scale_image(load_image('no_hold.png'), int(screen.get_width()*0.15*0.11), best_quality=True)
+        self.hold_active = scale_image(load_image('hold_yellow.png'), int(screen.get_width()*0.15*0.20), best_quality=True)
+        self.hold_inactive = scale_image(load_image('hold_grey.png'), int(screen.get_width()*0.15*0.17), best_quality=True)
 
         # stuff for light table [what positions are enabled and what the resulting
         # mask to be rendered together with the current frame is]
@@ -3237,12 +3237,14 @@ class TimelineArea(LayoutElemBase):
                 continue # can't toggle hold at frame 0
             if movie.frames[pos].hold:
                 hold = self.hold_active if pos == movie.pos else self.hold_inactive
+                offset = -hold.get_width() / 2
             elif pos == movie.pos:
                 hold = self.no_hold
+                offset = hold.get_width() * 0.1
             else:
                 continue
-            hold_left = left-hold.get_width()/2
-            hold_bottom = bottom if pos == movie.pos else bottom+height-hold.get_height()
+            hold_left = left+offset
+            hold_bottom = bottom if pos == movie.pos else bottom+height-hold.get_height()*1.1
             self.scroll_indicator.surface.blit(hold, (hold_left, hold_bottom), hold.get_rect())
             if pos == movie.pos:
                 self.toggle_hold_boundaries = (hold_left, hold_bottom, hold_left+hold.get_width(), hold_bottom+hold.get_height())
