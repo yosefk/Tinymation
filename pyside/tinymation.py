@@ -119,7 +119,7 @@ class Frame:
 
         self.compression_subprocess = None
 
-    def __del__(self):
+    def mark_as_garbage_in_cache(self):
         cache.delete_id(self.cache_id())
 
     def read_pixels(self):
@@ -3501,8 +3501,13 @@ class ProgressBar:
         self.draw()
         widget.setEnabled(False) # this works better than processEvents(QEventLoop.ExcludeUserInputEvents)
         # which queues the events and then you get them after the progress bar rendering is done
+        self.closed = False
     def __del__(self):
+        if not self.closed:
+            self.close()
+    def close(self):
         widget.setEnabled(True)
+        self.closed = True
     def on_progress(self, done, total):
         self.done = done
         self.total = total
@@ -3523,7 +3528,9 @@ class ProgressBar:
 def open_movie_with_progress_bar(clipdir):
     trace.event('open-clip')
     progress_bar = ProgressBar('Loading...')
-    return Movie(clipdir, progress=progress_bar.on_progress)
+    movie = Movie(clipdir, progress=progress_bar.on_progress)
+    progress_bar.close()
+    return movie
 
 class MovieList:
     def __init__(self):
@@ -3601,6 +3608,7 @@ class MovieList:
             time.sleep(0.3)
             progress_bar.on_progress(progress_status.done, progress_status.total)
 
+        progress_bar.close()
         self.exporting_processes = {}
 
 # 2 questions for a movie list:
@@ -4192,7 +4200,14 @@ class Movie(MovieData):
 
         self.render_and_save_current_frame()
         palette.save(os.path.join(self.dir, PALETTE_FILE))
+
         self.garbage_collect_layer_dirs()
+        self.mark_as_garbage_in_cache()
+
+    def mark_as_garbage_in_cache(self):
+        for layer in self.layers:
+            for frame in layer.frames:
+                frame.mark_as_garbage_in_cache()
 
     def fit_to_resolution(self):
         for layer in self.layers:
@@ -5011,6 +5026,20 @@ def dump_and_clear_profiling_data():
     trace.save('event-trace')
     trace.clear()
 
+import repl
+def run_repl():
+    def on_close():
+        widget.repl = None
+    window = repl.REPLDialog(parent=widget, namespace=globals(), on_close=on_close)
+    window.show()
+    widget.repl = window # keep a reference
+
+    # note that this only helps "partially" - we lose the ability to set cursors
+    # after _closing_ the REPL window for some reason. it works as long as it's open...
+    global needle_cursor_selected
+    try_set_cursor(layout.full_tool.cursor[0])
+    needle_cursor_selected = False
+
 # TODO: proper test for modifiers; less use of Ctrl
 def process_keydown_event(event):
     ctrl = event.modifiers() & Qt.ControlModifier
@@ -5071,6 +5100,11 @@ def process_keydown_event(event):
     # Ctrl-P: dump profiling data
     if ctrl and event.key() == Qt.Key_P:
         dump_and_clear_profiling_data()
+        return
+
+    # Ctrl-D: debug with a REPL
+    if ctrl and event.key() == Qt.Key_D:
+        run_repl()
         return
 
     # Ctrl-N: rename

@@ -86,9 +86,13 @@ class Cache:
             vsize = self._size(value)
             self.computed_bytes += vsize
             if self.locked or not self._has_room_for(vsize):
+                if self.debug:
+                    print('Missed and no room for', key[0])
                 return key[0], value
             self.cache_size += vsize
             self.key2value[key] = value
+            if self.debug:
+                print('Missed and cached', key[0])
         else:
             self.key2value.move_to_end(key)
             self.hit_bytes += self._size(value)
@@ -102,6 +106,8 @@ class Cache:
             if not self.key2value: # nothing left to evict...
                 return False
             key, value = self.key2value.popitem(last=False)
+            if self.debug:
+                print('evicted', key)
             self.cache_size -= self._size(value)
         return True
 
@@ -115,7 +121,8 @@ class Cache:
         for id, version in id2version:
             current_version = self.id2version.get(id)
             if current_version is None or version < current_version:
-                #print('stale',id,version,current_version)
+                if self.debug:
+                    print('stale',id,version,current_version)
                 return True
         return False
     def collect_garbage(self):
@@ -125,7 +132,8 @@ class Cache:
             if self._stale(key):
                 del self.key2value[key]
                 self.cache_size -= self._size(value)
-        #print('gc',orig,orig_size,'->',len(self.key2value),self.cache_size,'computed',self.computed_bytes,'cached',self.hit_bytes,tdiff())
+        if self.debug:
+            print('gc',orig,orig_size,'->',len(self.key2value),self.cache_size,'computed',self.computed_bytes,'cached',self.hit_bytes)
         self.gc_iter += 1
         self.computed_bytes = 0
         self.hit_bytes = 0
