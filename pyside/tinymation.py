@@ -1176,17 +1176,20 @@ class Button(LayoutElemBase):
             return False
         return alpha > 0
 
-locked_image = load_image('locked.png')
+locked_image = load_image('lock-mask.png')
 invisible_image = load_image('eye_shut.png')
 def curr_layer_locked():
     effectively_locked = movie.curr_layer().locked or not movie.curr_layer().visible
     if effectively_locked: # invisible layers are effectively locked but we show it differently
+        da = layout.drawing_area()
         reason_image = locked_image if movie.curr_layer().locked else invisible_image
-        fading_mask = new_frame()
+        tw, th = scale_and_preserve_aspect_ratio(reason_image.get_width(), reason_image.get_height(), 3*da.iwidth/4, 3*da.iheight/4)
+        reason_image = scale_image(reason_image, tw, th, best_quality=True)
+        fading_mask = pg.Surface((da.iwidth, da.iheight), pg.SRCALPHA) #new_frame()
         fading_mask.blit(reason_image, ((fading_mask.get_width()-reason_image.get_width())//2, (fading_mask.get_height()-reason_image.get_height())//2))
         fading_mask.set_alpha(192)
-        layout.drawing_area().set_fading_mask(fading_mask)
-        layout.drawing_area().fade_per_frame = 192/(FADING_RATE*3)
+        da.set_fading_mask(fading_mask, prescaled_fading_mask=True)
+        da.fade_per_frame = 192/(FADING_RATE*7)
     return effectively_locked
 
 def find_nearest(array, center_x, center_y, value):
@@ -2445,6 +2448,7 @@ class DrawingArea(LayoutElemBase):
         LayoutElemBase.__init__(self)
         self.vertical_movie_on_horizontal_screen = vertical_movie_on_horizontal_screen
     def init(self):
+        self.prescaled_fading_mask = False
         self.fading_mask = None
         self.fading_func = None
         self.fade_per_frame = 0
@@ -2629,13 +2633,16 @@ class DrawingArea(LayoutElemBase):
         if surface is None:
             return None
         return cache.fetch(ScaledSurface())
-    def set_fading_mask(self, fading_mask, skeleton=None):
+    def set_fading_mask(self, fading_mask, skeleton=None, prescaled_fading_mask=False):
         self.fading_mask_version += 1
         cache.update_id('fading-mask', self.fading_mask_version)
         self.fading_mask = fading_mask
+        self.prescaled_fading_mask = prescaled_fading_mask
         global last_skeleton
         last_skeleton = skeleton
     def scaled_fading_mask(self):
+        if self.prescaled_fading_mask:
+            return self.fading_mask
         key = (('fading-mask',self.fading_mask_version),), 'fading-mask'
         m = self.scale_and_cache(self.fading_mask, key)
         m.set_alpha(self.fading_mask.get_alpha())
@@ -3336,8 +3343,8 @@ class LayersArea(LayoutElemBase):
         self.eye_shut = scale_image(load_image('eye_shut.png'), height=icon_height, best_quality=True)
         self.light_on = scale_image(load_image('light_on.png'), height=icon_height, best_quality=True)
         self.light_off = scale_image(load_image('light_off.png'), height=icon_height, best_quality=True)
-        self.locked = scale_image(load_image('locked.png'), height=icon_height, best_quality=True)
-        self.unlocked = scale_image(load_image('unlocked.png'), height=icon_height, best_quality=True)
+        self.locked = scale_image(load_image('locked.png'), height=icon_height*1.2, best_quality=True)
+        self.unlocked = scale_image(load_image('unlocked.png'), height=icon_height*1.2, best_quality=True)
         self.eye_boundaries = []
         self.lit_boundaries = []
         self.lock_boundaries = []
