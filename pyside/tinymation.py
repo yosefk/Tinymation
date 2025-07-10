@@ -2663,14 +2663,8 @@ class DrawingArea(LayoutElemBase):
             zoom_params = self.get_zoom_pan_params()
             self.reset_zoom_pan_params()
 
-        def draw_margin(margin_color):
-            pygame.gfxdraw.box(self.subsurface, (0, 0, width, self.ymargin), margin_color)
-            pygame.gfxdraw.box(self.subsurface, (0, self.ymargin, self.lmargin, height-self.ymargin), margin_color)
-            pygame.gfxdraw.box(self.subsurface, (width-self.rmargin, self.ymargin, self.rmargin, height-self.ymargin), margin_color)
-            pygame.gfxdraw.box(self.subsurface, (self.lmargin, height-self.ymargin, width-self.lmargin-self.rmargin, self.ymargin), margin_color)
-
         if not layout.is_playing:
-            draw_margin(BACKGROUND)
+            self.draw_margin_where_needed((self.lmargin, self.ymargin, self.iwidth, self.iheight), BACKGROUND)
 
         pos = layout.playing_index if layout.is_playing else movie.pos
         highlight = not layout.is_playing and not movie.curr_layer().locked
@@ -2694,15 +2688,28 @@ class DrawingArea(LayoutElemBase):
 
         self.subsurface.blits([(surface, starting_point) for surface in surfaces])
 
+        margin_area = (starting_point[0], starting_point[1], scaled_roi_subset[2], scaled_roi_subset[3])
+
         eps = 0.019
         if self.zoom > 1 + eps:
             self.draw_zoom_surface()
+            self.draw_margin_where_needed(margin_area, MARGIN)
         else:
             margin_color = UNDRAWABLE if layout.is_playing else MARGIN
-            draw_margin(margin_color)
+            self.draw_margin_where_needed(margin_area, margin_color)
 
         if layout.is_playing:
             self.restore_zoom_pan_params(zoom_params)
+
+    def draw_margin_where_needed(self, margin_area, margin_color):
+        left, bottom, width, height = self.rect
+        l,b,w,h = margin_area
+        r = l+w
+        t = b+h
+        pygame.gfxdraw.box(self.subsurface, (0, 0, l, height), margin_color)
+        pygame.gfxdraw.box(self.subsurface, (r, 0, width-r, height), margin_color)
+        pygame.gfxdraw.box(self.subsurface, (l, 0, r-l, b), margin_color)
+        pygame.gfxdraw.box(self.subsurface, (l, t, r-l, height-t), margin_color)
 
     def draw_region(self, frame_region):
         trace.stop()
@@ -2774,8 +2781,10 @@ class DrawingArea(LayoutElemBase):
             right = min(x+w, s.get_width())
             top = min(y+h, s.get_height())
             return x,y,right-x,top-y
+
         roi = (sx, sy, scaled_layer.get_width() - xshrink, scaled_layer.get_height() - yshrink)
         trimmed_roi = trim(*roi, self.subsurface)
+                
         if trimmed_roi[2] <= 0 or trimmed_roi[3] <= 0:
             return # drawing outside the visible area - nothing to repaint
 
