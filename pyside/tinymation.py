@@ -2284,7 +2284,7 @@ class Layout:
 
     def draw(self):
         if self.is_pressed:
-            if self.focus_elem is self.drawing_area():
+            if self.focus_elem is self.drawing_area() and not self.drawing_area().redraw_fading_mask:
                 return
             if self.focus_elem is None or not self.focus_elem.redraw:
                 return
@@ -2464,6 +2464,7 @@ class DrawingArea(LayoutElemBase):
         self.yoffset = 0
         self.fading_mask_version = 0
         self.restore_tool_on_mouse_up = False
+        self.redraw_fading_mask = False
 
         left, bottom, width, height = self.rect
         self.iwidth, self.iheight = scale_and_fully_preserve_aspect_ratio(res.IWIDTH, res.IHEIGHT, width - xmargin*2, height - self.ymargin*2)
@@ -2638,6 +2639,7 @@ class DrawingArea(LayoutElemBase):
         cache.update_id('fading-mask', self.fading_mask_version)
         self.fading_mask = fading_mask
         self.prescaled_fading_mask = prescaled_fading_mask
+        self.redraw_fading_mask = True
         global last_skeleton
         last_skeleton = skeleton
     def scaled_fading_mask(self):
@@ -2810,6 +2812,8 @@ class DrawingArea(LayoutElemBase):
     def clear_fading_mask(self):
         global last_skeleton
         last_skeleton = None
+        if self.fading_mask is not None:
+            self.redraw_fading_mask = True
         self.fading_mask = None
         self.fading_func = None
 
@@ -2833,6 +2837,7 @@ class DrawingArea(LayoutElemBase):
         else:
             alpha = self.fading_func(alpha, self.fade_per_frame)
         self.fading_mask.set_alpha(max(0,alpha))
+        self.redraw_fading_mask = True
 
     def fix_xy(self,x,y):
         left, bottom, _, _ = self.rect
@@ -2842,6 +2847,8 @@ class DrawingArea(LayoutElemBase):
         if alt:
             set_tool(TOOLS['zoom'])
             layout.restore_tool_on_mouse_up = True
+        else:
+            self.clear_fading_mask()
         trace.class_context(layout.tool)
         layout.tool.on_mouse_down(*self.fix_xy(x,y))
     def on_mouse_up(self,x,y):
@@ -4885,6 +4892,8 @@ class History:
                 self.undo.append(undo)
             self.redo.pop()
 
+        layout.drawing_area().clear_fading_mask() # changing canvas state invalidates old skeletons
+
     def clear(self):
         History.byte_size -= sum([op.byte_size() for op in self.undo+self.redo])
         self.undo = []
@@ -5282,8 +5291,9 @@ class TinymationWidget(QWidget):
         self.update()
 
     def redrawLayoutIfNeeded(self, event=None):
-        if event is None or (layout.is_playing and event.type == PLAYBACK_TIMER_EVENT) or (layout.drawing_area().fading_mask and event.type == FADING_TIMER_EVENT) or event.type not in timer_events and not movie_list.opening:
+        if event is None or (layout.is_playing and event.type == PLAYBACK_TIMER_EVENT) or layout.drawing_area().redraw_fading_mask or event.type not in timer_events and not movie_list.opening:
             layout.draw()
+            layout.drawing_area().redraw_fading_mask = False
             if not layout.is_playing:
                cache.collect_garbage()
 
