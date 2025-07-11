@@ -44,6 +44,8 @@ import res
 
 import pygame
 pg = pygame
+import surf
+from surf import Surface
 
 FRAME_RATE = 12
 CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
@@ -62,14 +64,14 @@ def fit_to_resolution(surface):
     if w == res.IWIDTH and h == res.IHEIGHT:
         return surface
     elif w == res.IHEIGHT and h == res.IWIDTH:
-        return pg.transform.rotate(surface, 90 * (1 if w>h else -1)) 
+        return surf.rotate(surface, 90 * (1 if w>h else -1)) 
     else:
-        return pg.transform.smoothscale(surface, (w, h))
+        return surf.smoothscale(surface, (w, h))
 
 def new_frame():
-    frame = pg.Surface((res.IWIDTH, res.IHEIGHT), pg.SRCALPHA)
+    frame = Surface((res.IWIDTH, res.IHEIGHT), surf.SRCALPHA)
     frame.fill(BACKGROUND)
-    pg.surfarray.pixels_alpha(frame)[:] = 0
+    surf.pixels_alpha(frame)[:] = 0
     return frame
 
 def load_image(fname):
@@ -77,13 +79,13 @@ def load_image(fname):
         asset = os.path.join(ASSETS, fname)
         if os.path.exists(asset):
             fname=asset
-    s = pg.image.load(fname)
+    s = surf.load(fname)
     # surfaces loaded from file have a different RGB/BGR layout - normalize it
     # FIXME: why do we need try/except?..
     try:
-        ret = pg.Surface((s.get_width(), s.get_height()), pg.SRCALPHA)
-        pg.surfarray.pixels3d(ret)[:] = pg.surfarray.pixels3d(s)
-        pg.surfarray.pixels_alpha(ret)[:] = pg.surfarray.pixels_alpha(s)
+        ret = Surface((s.get_width(), s.get_height()), surf.SRCALPHA)
+        surf.pixels3d(ret)[:] = surf.pixels3d(s)
+        surf.pixels_alpha(ret)[:] = surf.pixels_alpha(s)
     except:
         return ret
     return ret
@@ -139,9 +141,9 @@ class Frame:
         if not self.empty():
             return
         self.color = new_frame()
-        self.lines = pg.Surface((self.color.get_width(), self.color.get_height()), pg.SRCALPHA)
+        self.lines = Surface((self.color.get_width(), self.color.get_height()), surf.SRCALPHA)
         self.lines.fill(PEN)
-        pg.surfarray.pixels_alpha(self.lines)[:] = 0
+        surf.pixels_alpha(self.lines)[:] = 0
 
     def get_content(self): return self.color.copy(), self.lines.copy()
     def set_content(self, content):
@@ -204,7 +206,7 @@ class Frame:
             fnames = []
             for surf_id in self.surf_ids():
                 fname_png, fname_bmp = self.filenames_png_bmp(surf_id)
-                pg.image.save(self.surf_by_id(surf_id), fname_bmp)
+                surf.save(self.surf_by_id(surf_id), fname_bmp)
                 fnames += [fname_bmp, fname_png]
             self.compression_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'compress-and-remove']+fnames)
             self.dirty = False
@@ -240,7 +242,7 @@ _large_empty_surface = None
 def large_empty_surface(width, height):
     global _large_empty_surface
     if _large_empty_surface is None or _large_empty_surface.get_width() < width or _large_empty_surface.get_height() < height:
-        _large_empty_surface = pg.Surface((width*2, height*2), pg.SRCALPHA)
+        _large_empty_surface = Surface((width*2, height*2), surf.SRCALPHA)
 
     return _large_empty_surface.subsurface(0, 0, width, height)
 
@@ -398,7 +400,7 @@ class MovieData:
             if not width: width=res.IWIDTH
             if not height: height=res.IHEIGHT
         if not roi: roi = (0, 0, res.IWIDTH, res.IHEIGHT)
-        s = pg.Surface((width if width else round(roi[2]*inv_scale), height if height else round(roi[3]*inv_scale)), pg.SRCALPHA)
+        s = Surface((width if width else round(roi[2]*inv_scale), height if height else round(roi[3]*inv_scale)), surf.SRCALPHA)
         if not transparent:
             s.fill(BACKGROUND)
         surfaces = []
@@ -481,12 +483,12 @@ def export(clipdir):
 
                 frame = movie._blit_layers(movie.layers, i)
                 transparent_frame = movie._blit_layers(movie.layers, i, transparent=True)
-                frame = pg.Surface((res.IWIDTH, res.IHEIGHT), pg.SRCALPHA)
+                frame = Surface((res.IWIDTH, res.IHEIGHT), surf.SRCALPHA)
                 frame.fill(BACKGROUND)
                 frame.blit(transparent_frame, (0,0))
 
                 check_if_interrupted()
-                pixels = transpose_xy(pg.surfarray.pixels3d(frame))
+                pixels = transpose_xy(surf.pixels3d(frame))
                 check_if_interrupted()
 
                 # append each frame twice at MP4 to get a standard 24 fps frame rate
@@ -497,8 +499,8 @@ def export(clipdir):
                 check_if_interrupted() 
                 mp4_writer.write_frame(pixels)
                 check_if_interrupted() 
-                transparent_pixels = transpose_xy(pg.surfarray.pixels3d(transparent_frame))
-                transparent_pixels = np.dstack([cv2.cvtColor(transparent_pixels, cv2.COLOR_RGB2BGR), transpose_xy(pg.surfarray.pixels_alpha(transparent_frame))])
+                transparent_pixels = transpose_xy(surf.pixels3d(transparent_frame))
+                transparent_pixels = np.dstack([cv2.cvtColor(transparent_pixels, cv2.COLOR_RGB2BGR), transpose_xy(surf.pixels_alpha(transparent_frame))])
 
                 cv2.imwrite(movie.png_path(i), transparent_pixels)
                 check_if_interrupted()
@@ -694,7 +696,7 @@ def delete_lock_file():
 create_lock_file()
 
 def pgsurf2qtimage(src, dst):
-    iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
+    iptr, istride, iwidth, iheight, ibgr = color_c_params(surf.pixels3d(src))
     ibuffer = ct.cast(iptr, ct.POINTER(ct.c_uint8 * (iheight * istride * 4))).contents
     iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
 
@@ -711,7 +713,7 @@ def pgsurf2qtimage(src, dst):
 #screen = pg.display.set_mode((350, 800), pg.RESIZABLE)
 #screen = pg.display.set_mode((1200, 350), pg.RESIZABLE)
 #screen = pg.display.set_mode((0, 0), pg.FULLSCREEN)
-screen = pg.Surface((1920, 1200), pg.SRCALPHA)#pg.display.set_mode((0, 0), pg.FULLSCREEN)
+screen = Surface((1920, 1200), surf.SRCALPHA)#pg.display.set_mode((0, 0), pg.FULLSCREEN)
 
 screen.fill(BACKGROUND)
 #pg.display.flip()
@@ -815,7 +817,7 @@ tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ct.c_void_p]*3 + [ct.c_
 tinylib.fitpack_parcur.argtypes = [ct.c_void_p]*2 + [ct.c_int]*3 + [ct.c_double] + [ct.c_void_p]*3
 
 def rgba_array(surface):
-    ptr, ystride, width, height, bgr = color_c_params(pg.surfarray.pixels3d(surface))
+    ptr, ystride, width, height, bgr = color_c_params(surf.pixels3d(surface))
     buffer = ct.cast(ptr, ct.POINTER(ct.c_uint8 * (height * ystride * 4))).contents
     return np.ndarray((width,height,4), dtype=np.uint8, buffer=buffer, strides=(4, ystride, 1)), bgr
 
@@ -825,8 +827,8 @@ def meshgrid_alpha(alpha): tinylib.meshgrid_alpha(*greyscale_c_params(alpha))
 
 import cv2
 def cv2_resize_surface(src, dst, inv_scale=None, best_quality=False):
-    iptr, istride, iwidth, iheight, ibgr = color_c_params(pg.surfarray.pixels3d(src))
-    optr, ostride, owidth, oheight, obgr = color_c_params(pg.surfarray.pixels3d(dst))
+    iptr, istride, iwidth, iheight, ibgr = color_c_params(surf.pixels3d(src))
+    optr, ostride, owidth, oheight, obgr = color_c_params(surf.pixels3d(dst))
     assert ibgr == obgr
 
     ibuffer = ct.cast(iptr, ct.POINTER(ct.c_uint8 * (iheight * istride * 4))).contents
@@ -871,10 +873,10 @@ def scale_image(surface, width=None, height=None, inv_scale=None, best_quality=F
     if not best_quality and width < surface.get_width()//2 and height < surface.get_height()//2:
         return scale_image(scale_image(surface, surface.get_width()//2, surface.get_height()//2), width, height)
 
-    ret = pg.Surface((width, height), pg.SRCALPHA)
+    ret = Surface((width, height), surf.SRCALPHA)
     cv2_resize_surface(surface, ret, inv_scale, best_quality)
     ret.set_alpha(surface.get_alpha())
-    #ret = pg.transform.smoothscale(surface, (width, height))
+    #ret = surf.smoothscale(surface, (width, height))
 
     return ret
 
@@ -889,11 +891,11 @@ def surf2cursor(surface, hotx, hoty):
 
 def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=192, edit=lambda x: (x, None), hot_spot_offset=(0,0)):
   surface = load_image(file)
-  surface = scale_image(surface, size, size*surface.get_height()/surface.get_width(), best_quality=True)#pg.transform.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
+  surface = scale_image(surface, size, size*surface.get_height()/surface.get_width(), best_quality=True)#surf.scale(surface, (CURSOR_SIZE, CURSOR_SIZE))
   if flip:
-      surface = pg.transform.flip(surface, True, True)
+      surface = surf.flip(surface, True, True)
   non_transparent_surface = surface.copy()
-  alpha = pg.surfarray.pixels_alpha(surface)
+  alpha = surf.pixels_alpha(surface)
   alpha[:] = np.minimum(alpha, min_alpha)
   del alpha
   surface, hot = edit(surface)
@@ -908,12 +910,12 @@ def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=19
 def add_circle(image, radius, offset=(0,1), color=(255,0,0,128), outline_color=(0,0,0,128)):
     new_width = max(image.get_width(), radius + round(image.get_width()*(1-offset[0])))
     new_height = max(image.get_height(), radius + round(image.get_height()*offset[1]))
-    result = pg.Surface((new_width, new_height), pg.SRCALPHA)
+    result = Surface((new_width, new_height), surf.SRCALPHA)
     xoffset = round(offset[0]*image.get_width())
     yoffset = round(offset[1]*image.get_height())
-    pg.gfxdraw.filled_circle(result, radius, yoffset, radius, outline_color)
-    pg.gfxdraw.filled_circle(result, radius, yoffset, radius-WIDTH+1, (0,0,0,0))
-    pg.gfxdraw.filled_circle(result, radius, yoffset, radius-WIDTH+1, color)
+    surf.filled_circle(result, radius, yoffset, radius, outline_color)
+    surf.filled_circle(result, radius, yoffset, radius-WIDTH+1, (0,0,0,0))
+    surf.filled_circle(result, radius, yoffset, radius-WIDTH+1, color)
     result.blit(image, (radius-xoffset, 0))
     return result, (radius, yoffset)
 
@@ -939,7 +941,7 @@ zoom_cursor = (load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZ
 finger_cursor = load_cursor('finger.png', hot_spot=(0.85, 0.17))
 
 # for locked screen
-empty_cursor = surf2cursor(pg.Surface((10,10), pg.SRCALPHA), 0, 0)
+empty_cursor = surf2cursor(Surface((10,10), surf.SRCALPHA), 0, 0)
 
 # set_cursor can fail on some machines so we don't count on it to work.
 # we set it early on to "give a sign of life" while the window is black;
@@ -1185,7 +1187,7 @@ def curr_layer_locked():
         reason_image = locked_image if movie.curr_layer().locked else invisible_image
         tw, th = scale_and_preserve_aspect_ratio(reason_image.get_width(), reason_image.get_height(), 3*da.iwidth/4, 3*da.iheight/4)
         reason_image = scale_image(reason_image, tw, th, best_quality=True)
-        fading_mask = pg.Surface((da.iwidth, da.iheight), pg.SRCALPHA) #new_frame()
+        fading_mask = Surface((da.iwidth, da.iheight), surf.SRCALPHA) #new_frame()
         fading_mask.blit(reason_image, ((fading_mask.get_width()-reason_image.get_width())//2, (fading_mask.get_height()-reason_image.get_height())//2))
         fading_mask.set_alpha(192)
         da.set_fading_mask(fading_mask, prescaled_fading_mask=True)
@@ -1228,7 +1230,7 @@ class PenTool(Button):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
         flood_code = 2
 
-        color = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+        color = surf.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
         color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color)
         assert color_width == width and color_height == height
         # the RGB values of transparent colors can actually matter in some (stupid) contexts - pasting into
@@ -1276,7 +1278,7 @@ class PenTool(Button):
         self.points = []
         self.polyline = []
         self.bucket_color = None
-        self.lines_array = pg.surfarray.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
+        self.lines_array = surf.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
 
         cx, cy = layout.drawing_area().xy2frame(x, y)
         self.init_brush(cx, cy)
@@ -1508,7 +1510,7 @@ class PenLineShiftSmoothTool(Button):
             last_item.copy_saved_subsurface_into(self.frame_without_line)
 
         pen = TOOLS['pen'].tool
-        pen.lines_array = pg.surfarray.pixels_alpha(self.lines)
+        pen.lines_array = surf.pixels_alpha(self.lines)
 
         self.history_item = HistoryItem('lines')
 
@@ -1785,7 +1787,7 @@ class PaintBucketTool(Button):
         self.px = x
         self.py = y
         
-        color_rgba = pg.surfarray.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+        color_rgba = surf.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
         bbox = flood_fill_color_based_on_mask_many_seeds(color_rgba, self.pen_mask, xs, ys, self.color)
         if bbox:
             self.bboxes.append(bbox)
@@ -1806,7 +1808,7 @@ class PaintBucketTool(Button):
         self.bboxes = []
         self.px = None
         self.py = None
-        lines = pg.surfarray.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
+        lines = surf.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
         self.pen_mask = lines == 255
 
         self.fill(x,y)
@@ -1967,11 +1969,11 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
     v = 1
     outer = [255*o for o in colorsys.hsv_to_rgb(h,s,v)]
 
-    fading_mask = pg.Surface((flood_mask.shape[0], flood_mask.shape[1]), pg.SRCALPHA)
-    fm = pg.surfarray.pixels3d(fading_mask)
+    fading_mask = Surface((flood_mask.shape[0], flood_mask.shape[1]), surf.SRCALPHA)
+    fm = surf.pixels3d(fading_mask)
     for ch in range(3):
          fm[skx,sky,ch] = outer[ch]*(1-skeleton) + inner[ch]*skeleton
-    pg.surfarray.pixels_alpha(fading_mask)[skx,sky] = fmb*255*np.maximum(0,pow(1 - outer_d/maxdist, 3))
+    surf.pixels_alpha(fading_mask)[skx,sky] = fmb*255*np.maximum(0,pow(1 - outer_d/maxdist, 3))
 
     return fading_mask, (skeleton, skx, sky)
 
@@ -2183,8 +2185,8 @@ class FlashlightTool(Button):
         try_to_patch = ctrl_is_pressed()
         frame = movie.edit_curr_frame() if try_to_patch else movie.curr_frame()
 
-        color = pg.surfarray.pixels3d(frame.surf_by_id('color'))
-        lines = pg.surfarray.pixels_alpha(frame.surf_by_id('lines'))
+        color = surf.pixels3d(frame.surf_by_id('color'))
+        lines = surf.pixels_alpha(frame.surf_by_id('lines'))
         if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1] or lines[x,y] == 255:
             return
 
@@ -2304,10 +2306,10 @@ class Layout:
                 except:
                     import traceback
                     traceback.print_exc()
-                    pg.draw.rect(screen, (255,0,0), elem.rect, 3, 3)
+                    surf.rect(screen, (255,0,0), elem.rect, 3, 3)
                     continue
                 if elem.draw_border:
-                    pg.draw.rect(screen, OUTLINE, elem.rect, 1, 1)
+                    surf.rect(screen, OUTLINE, elem.rect, 1, 1)
 
     def draw_upon_zoom(self):
         cache.lock() # the chance to need to redraw with the same intermediate zoom/pan is low
@@ -2481,10 +2483,10 @@ class DrawingArea(LayoutElemBase):
             self.rmargin = xmargin
 
         w, h = ((self.iwidth+self.lmargin+self.rmargin + self.iheight+self.ymargin*2)//2,)*2
-        self.zoom_surface = pg.Surface((w,h ), pg.SRCALPHA)
+        self.zoom_surface = Surface((w,h ), surf.SRCALPHA)
         self.zoom_surface.fill(([(a+b)//2 for a,b in zip(MARGIN[:3], BACKGROUND[:3])]))
-        rgb = pg.surfarray.pixels3d(self.zoom_surface)
-        alpha = pg.surfarray.pixels_alpha(self.zoom_surface)
+        rgb = surf.pixels3d(self.zoom_surface)
+        alpha = surf.pixels_alpha(self.zoom_surface)
         yv, xv = np.meshgrid(np.arange(h), np.arange(w))
         cx, cy = w/2, h/2
         dist = np.sqrt((xv-cx)**2 + (yv-cy)**2)
@@ -2706,10 +2708,10 @@ class DrawingArea(LayoutElemBase):
         l,b,w,h = margin_area
         r = l+w
         t = b+h
-        pg.gfxdraw.box(self.subsurface, (0, 0, l, height), margin_color)
-        pg.gfxdraw.box(self.subsurface, (r, 0, width-r, height), margin_color)
-        pg.gfxdraw.box(self.subsurface, (l, 0, r-l, b), margin_color)
-        pg.gfxdraw.box(self.subsurface, (l, t, r-l, height-t), margin_color)
+        surf.box(self.subsurface, (0, 0, l, height), margin_color)
+        surf.box(self.subsurface, (r, 0, width-r, height), margin_color)
+        surf.box(self.subsurface, (l, 0, r-l, b), margin_color)
+        surf.box(self.subsurface, (l, t, r-l, height-t), margin_color)
 
     def draw_region(self, frame_region):
         trace.stop()
@@ -2812,10 +2814,10 @@ class DrawingArea(LayoutElemBase):
         self.subsurface.blit(self.zoom_surface, (start_x, start_y))
         end_x = start_x + self.zoom_surface.get_width()
         end_y = start_y + self.zoom_surface.get_height()
-        pg.gfxdraw.box(self.subsurface, (0, 0, self.subsurface.get_width(), start_y), MARGIN)
-        pg.gfxdraw.box(self.subsurface, (0, end_y, self.subsurface.get_width(), self.subsurface.get_height()), MARGIN)
-        pg.gfxdraw.box(self.subsurface, (0, start_y, start_x, end_y-start_y), MARGIN)
-        pg.gfxdraw.box(self.subsurface, (end_x, start_y, self.subsurface.get_width(), end_y-start_y), MARGIN)
+        surf.box(self.subsurface, (0, 0, self.subsurface.get_width(), start_y), MARGIN)
+        surf.box(self.subsurface, (0, end_y, self.subsurface.get_width(), self.subsurface.get_height()), MARGIN)
+        surf.box(self.subsurface, (0, start_y, start_x, end_y-start_y), MARGIN)
+        surf.box(self.subsurface, (end_x, start_y, self.subsurface.get_width(), end_y-start_y), MARGIN)
         self.subsurface.set_clip(None)
 
     def clear_fading_mask(self):
@@ -2870,13 +2872,13 @@ class DrawingArea(LayoutElemBase):
 class ScrollIndicator:
     def __init__(self, w, h, vertical=False):
         self.vertical = vertical
-        self.surface = pg.Surface((w, h), pg.SRCALPHA)
+        self.surface = Surface((w, h), surf.SRCALPHA)
         scroll_size = (w*2, int(w*2)) if vertical else (int(h*2), h*2)
-        self.scroll_left = pg.Surface(scroll_size, pg.SRCALPHA)
-        self.scroll_right = pg.Surface(scroll_size, pg.SRCALPHA)
+        self.scroll_left = Surface(scroll_size, surf.SRCALPHA)
+        self.scroll_right = Surface(scroll_size, surf.SRCALPHA)
 
-        rgb_left = pg.surfarray.pixels3d(self.scroll_left)
-        rgb_right = pg.surfarray.pixels3d(self.scroll_right)
+        rgb_left = surf.pixels3d(self.scroll_left)
+        rgb_right = surf.pixels3d(self.scroll_right)
 
         y, x = np.meshgrid(np.arange(scroll_size[1]), np.arange(scroll_size[0]))
         s = h
@@ -2884,8 +2886,8 @@ class ScrollIndicator:
             x, y = y, x
             s = w
         yhdist = np.abs(y-s)/s
-        alpha_left = pg.surfarray.pixels_alpha(self.scroll_left)
-        alpha_right = pg.surfarray.pixels_alpha(self.scroll_right)
+        alpha_left = surf.pixels_alpha(self.scroll_left)
+        alpha_right = surf.pixels_alpha(self.scroll_right)
         dist = np.sqrt((y-s)**2 + (x+s/9)**2) # defines the center offset
         dist = np.abs(s/0.78-dist) # defines the ring radius
         dist = np.minimum(dist, s/4.5) # defines the ring width
@@ -3135,20 +3137,20 @@ class TimelineArea(LayoutElemBase):
                     step_aligned_frame_roi, scaled_roi_subset, _ = da.rois()
                     scaled_layer = movie.get_thumbnail(movie.pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=1/da.xscale).subsurface(scaled_roi_subset)
 
-                    alpha = pg.surfarray.pixels_alpha(scaled_layer)
+                    alpha = surf.pixels_alpha(scaled_layer)
 
                 masks = []
 
                 if held_inside:
                     inside = held_inside.copy()
-                    ialpha = pg.surfarray.pixels_alpha(inside)
+                    ialpha = surf.pixels_alpha(inside)
                     ialpha[:] = np.minimum(alpha, ialpha)
                     del ialpha
                     masks.append(inside)
 
                 if held_outside:
                     outside = held_outside.copy()
-                    oalpha = pg.surfarray.pixels_alpha(outside)
+                    oalpha = surf.pixels_alpha(outside)
                     oalpha[:] = np.minimum(255-alpha, oalpha)
                     del oalpha
                     masks.append(outside)
@@ -3185,7 +3187,7 @@ class TimelineArea(LayoutElemBase):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
             surface.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             border = 1 + 2*(pos==movie.pos)
-            pg.draw.rect(surface, OUTLINE, (x, bottom, thumb_width, height), border)
+            surf.rect(surface, OUTLINE, (x, bottom, thumb_width, height), border)
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
                 eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
@@ -3378,13 +3380,13 @@ class LayersArea(LayoutElemBase):
                 if se.color is None:
                     return movie.get_thumbnail(movie.pos, self.width, self.thumbnail_height, transparent_single_layer=layer_pos)
                 image = cache.fetch(CachedLayerThumbnail()).copy()
-                si = pg.Surface((image.get_width(), image.get_height()), pg.SRCALPHA)
-                s = pg.Surface((image.get_width(), image.get_height()), pg.SRCALPHA)
+                si = Surface((image.get_width(), image.get_height()), surf.SRCALPHA)
+                s = Surface((image.get_width(), image.get_height()), surf.SRCALPHA)
                 if not self.color_images:
-                    above_image = pg.Surface((image.get_width(), image.get_height()))
+                    above_image = Surface((image.get_width(), image.get_height()))
                     above_image.set_alpha(128)
                     above_image.fill(LAYERS_ABOVE)
-                    below_image = pg.Surface((image.get_width(), image.get_height()))
+                    below_image = Surface((image.get_width(), image.get_height()))
                     below_image.set_alpha(128)
                     below_image.fill(LAYERS_BELOW)
                     self.color_images = {LAYERS_ABOVE: above_image, LAYERS_BELOW: below_image}
@@ -3418,9 +3420,9 @@ class LayersArea(LayoutElemBase):
             border = 1 + (layer_pos == movie.layer_pos)*2
             image = self.cached_image(layer_pos, layer)
             image_left = (width - image.get_width())/2
-            pg.draw.rect(surface, BACKGROUND, (image_left, blit_bottom, image.get_width(), image.get_height()))
+            surf.rect(surface, BACKGROUND, (image_left, blit_bottom, image.get_width(), image.get_height()))
             surface.blit(image, (image_left, blit_bottom), image.get_rect()) 
-            pg.draw.rect(surface, OUTLINE, (image_left, blit_bottom, image.get_width(), image.get_height()), border)
+            surf.rect(surface, OUTLINE, (image_left, blit_bottom, image.get_width(), image.get_height()), border)
 
             max_border = 3
             if len(movie.frames) > 1 and layer.visible and list(layout.timeline_area().light_table_positions()):
@@ -3538,11 +3540,11 @@ class ProgressBar:
         self.total = total
         self.draw()
     def draw(self):
-        pg.draw.rect(screen, UNUSED, self.outer_rect)
-        pg.draw.rect(screen, BACKGROUND, self.inner_rect)
+        surf.rect(screen, UNUSED, self.outer_rect)
+        surf.rect(screen, BACKGROUND, self.inner_rect)
         left, bottom, full_width, height = self.inner_rect
         done_width = min(full_width, int(full_width * (self.done/max(1,self.total))))
-        pg.draw.rect(screen, PROGRESS, (left, bottom, done_width, height))
+        surf.rect(screen, PROGRESS, (left, bottom, done_width, height))
         text_surface = font.render(self.title, True, UNUSED)
         pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
         screen.blit(text_surface, pos)
@@ -3716,7 +3718,7 @@ class MovieListArea(LayoutElemBase):
             else:
                 self.selected_xrange = (startx, startx + image.get_width())
             border = 1 + selected*2
-            pg.draw.rect(surface, OUTLINE, (startx, 0, image.get_width(), image.get_height()), border)
+            surf.rect(surface, OUTLINE, (startx, 0, image.get_width(), image.get_height()), border)
             leftmost += image.get_width()
             covered += image.get_width()
             pos += 1
@@ -3795,7 +3797,7 @@ class ToolSelectionButton(LayoutElemBase):
         self.tool = tool
     def highlight_selection(self):
         if self.tool is layout.full_tool:
-            pg.draw.rect(screen, SELECTED, self.rect)
+            surf.rect(screen, SELECTED, self.rect)
     def draw(self):
         self.tool.tool.draw(self.rect,self.tool.cursor[1])
     def hit(self,x,y): return self.tool.tool.hit(x,y,self.rect)
@@ -3884,8 +3886,8 @@ class Movie(MovieData):
                 alpha = np.zeros((empty_frame().get_width(), empty_frame().get_height()))
                 for layer in layers:
                     frame = layer.frame(pos)
-                    pen = pg.surfarray.pixels_alpha(frame.surf_by_id('lines'))
-                    color = pg.surfarray.pixels_alpha(frame.surf_by_id('color'))
+                    pen = surf.pixels_alpha(frame.surf_by_id('lines'))
+                    color = surf.pixels_alpha(frame.surf_by_id('color'))
                     # hide the areas colored by this layer, and expose the lines of these layer (the latter, only if it's lit and not held)
                     alpha[:] = np.minimum(255-color, alpha)
                     if lines_lit(layer):
@@ -3897,9 +3899,9 @@ class Movie(MovieData):
                 id2version, computation = CachedMaskAlpha().compute_key()
                 return id2version, ('mask', rgb, transparency, computation)
             def compute_value(_):
-                mask_surface = pg.Surface((empty_frame().get_width(), empty_frame().get_height()), pg.SRCALPHA)
+                mask_surface = Surface((empty_frame().get_width(), empty_frame().get_height()), surf.SRCALPHA)
                 mask_surface.fill(rgb)
-                pg.surfarray.pixels_alpha(mask_surface)[:] = cache.fetch(CachedMaskAlpha())
+                surf.pixels_alpha(mask_surface)[:] = cache.fetch(CachedMaskAlpha())
                 mask_surface.set_alpha(int(transparency*255))
                 return mask_surface
 
@@ -4097,7 +4099,7 @@ class Movie(MovieData):
         return f
 
     def _set_undrawable_layers_grid(self, s, color, x=0, y=0):
-        alpha = pg.surfarray.pixels3d(s)
+        alpha = surf.pixels3d(s)
         color = np.array(color)
         alpha[x::WIDTH*3, y::WIDTH*3, :] = color
         alpha[x+1::WIDTH*3, y::WIDTH*3, :] = color
@@ -4114,7 +4116,7 @@ class Movie(MovieData):
                 return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi, inv_scale, subset)
             def compute_value(_):
                 layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
-                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                s = Surface((layers.get_width(), layers.get_height()), surf.SRCALPHA)
                 s.fill(BACKGROUND)
                 if self.layer_pos == 0:
                     return s.subsurface(subset) if subset is not None else s
@@ -4128,7 +4130,7 @@ class Movie(MovieData):
                 class BelowImage:
                     def compute_key(_): return tuple(), ('below-image', w, h)
                     def compute_value(_):
-                        below_image = pg.Surface((w, h), pg.SRCALPHA)
+                        below_image = Surface((w, h), surf.SRCALPHA)
                         below_image.set_alpha(128)
                         below_image.fill(LAYERS_BELOW)
                         return below_image
@@ -4160,14 +4162,14 @@ class Movie(MovieData):
                     return layers.subsurface(subset) if subset is not None else layers
 
                 layers.set_alpha(128)
-                s = pg.Surface((layers.get_width(), layers.get_height()), pg.SRCALPHA)
+                s = Surface((layers.get_width(), layers.get_height()), surf.SRCALPHA)
                 s.fill(BACKGROUND)
                 da = layout.drawing_area()
                 w, h = da.iwidth+da.lmargin+da.rmargin + 128, da.iheight+da.ymargin*2 + 128 #TODO: what should this really be? 128 is 2x max alignment step but in what space?..
                 class AboveImage:
                     def compute_key(_): return tuple(), ('above-image', w, h)
                     def compute_value(_):
-                        above_image = pg.Surface((w, h), pg.SRCALPHA)
+                        above_image = Surface((w, h), surf.SRCALPHA)
                         above_image.set_alpha(128)
                         above_image.fill(LAYERS_ABOVE)
                         return above_image
@@ -4186,7 +4188,7 @@ class Movie(MovieData):
         return cache.fetch(CachedTopLayers())
 
     def render_and_save_current_frame(self):
-        pg.image.save(self._blit_layers(self.layers, self.pos), os.path.join(self.dir, CURRENT_FRAME_FILE))
+        surf.save(self._blit_layers(self.layers, self.pos), os.path.join(self.dir, CURRENT_FRAME_FILE))
 
     def garbage_collect_layer_dirs(self):
         # we don't remove deleted layers from the disk when they're deleted since if there are a lot
@@ -4514,9 +4516,9 @@ def restore_tool():
 
 def color_image(s, rgba):
     sc = s.copy()
-    pixels = pg.surfarray.pixels3d(sc)
+    pixels = surf.pixels3d(sc)
 
-    alphas = pg.surfarray.pixels_alpha(sc)
+    alphas = surf.pixels_alpha(sc)
     alphas[:] = np.minimum(alphas[:], ((255 - pixels[:,:,0]).astype(np.int32) + rgba[-1]))
 
     for ch in range(3):
@@ -4568,15 +4570,15 @@ class Palette:
 
     def save(self, filename):
         pix = 20
-        s = pg.Surface((self.columns*pix, self.rows*pix), pg.SRCALPHA)
-        rgb = pg.surfarray.pixels3d(s)
-        alpha = pg.surfarray.pixels_alpha(s)
+        s = Surface((self.columns*pix, self.rows*pix), surf.SRCALPHA)
+        rgb = surf.pixels3d(s)
+        alpha = surf.pixels_alpha(s)
         for row in range(self.rows):
             for col in range(self.columns):
                 color = self.colors[self.rows-row-1][col]
                 rgb[col*pix:(col+1)*pix,row*pix:(row+1)*pix] = color[:3]
                 alpha[col*pix:(col+1)*pix,row*pix:(row+1)*pix] = color[-1]
-        pg.image.save(s, filename)
+        surf.save(s, filename)
 
     def bucket(self,color):
         radius = PAINT_BUCKET_WIDTH//2
@@ -4614,7 +4616,7 @@ class PaletteElem(LayoutElemBase):
         col_width = w/palette.columns
         row_height = h/palette.rows
 
-        self.colors_image = pg.Surface((w,h), pg.SRCALPHA)
+        self.colors_image = Surface((w,h), surf.SRCALPHA)
         for row,col in self.row_col_perm:
             scale = 1.2 if row != 0 and row != palette.rows-1 else 1.1
             img = palette.cursors[palette.rows-row-1][col][1]
