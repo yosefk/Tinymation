@@ -2,7 +2,7 @@ import numpy as np
 import sys
 import os
 from PySide6.QtGui import QImage
-os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pygame version
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pg version
 
 on_windows = os.name == 'nt'
 on_linux = sys.platform == 'linux'
@@ -67,7 +67,7 @@ def fit_to_resolution(surface):
         return pg.transform.smoothscale(surface, (w, h))
 
 def new_frame():
-    frame = pygame.Surface((res.IWIDTH, res.IHEIGHT), pygame.SRCALPHA)
+    frame = pg.Surface((res.IWIDTH, res.IHEIGHT), pg.SRCALPHA)
     frame.fill(BACKGROUND)
     pg.surfarray.pixels_alpha(frame)[:] = 0
     return frame
@@ -139,9 +139,9 @@ class Frame:
         if not self.empty():
             return
         self.color = new_frame()
-        self.lines = pg.Surface((self.color.get_width(), self.color.get_height()), pygame.SRCALPHA)
+        self.lines = pg.Surface((self.color.get_width(), self.color.get_height()), pg.SRCALPHA)
         self.lines.fill(PEN)
-        pygame.surfarray.pixels_alpha(self.lines)[:] = 0
+        pg.surfarray.pixels_alpha(self.lines)[:] = 0
 
     def get_content(self): return self.color.copy(), self.lines.copy()
     def set_content(self, content):
@@ -204,7 +204,7 @@ class Frame:
             fnames = []
             for surf_id in self.surf_ids():
                 fname_png, fname_bmp = self.filenames_png_bmp(surf_id)
-                pygame.image.save(self.surf_by_id(surf_id), fname_bmp)
+                pg.image.save(self.surf_by_id(surf_id), fname_bmp)
                 fnames += [fname_bmp, fname_png]
             self.compression_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'compress-and-remove']+fnames)
             self.dirty = False
@@ -240,7 +240,7 @@ _large_empty_surface = None
 def large_empty_surface(width, height):
     global _large_empty_surface
     if _large_empty_surface is None or _large_empty_surface.get_width() < width or _large_empty_surface.get_height() < height:
-        _large_empty_surface = pygame.Surface((width*2, height*2), pg.SRCALPHA)
+        _large_empty_surface = pg.Surface((width*2, height*2), pg.SRCALPHA)
 
     return _large_empty_surface.subsurface(0, 0, width, height)
 
@@ -398,7 +398,7 @@ class MovieData:
             if not width: width=res.IWIDTH
             if not height: height=res.IHEIGHT
         if not roi: roi = (0, 0, res.IWIDTH, res.IHEIGHT)
-        s = pygame.Surface((width if width else round(roi[2]*inv_scale), height if height else round(roi[3]*inv_scale)), pygame.SRCALPHA)
+        s = pg.Surface((width if width else round(roi[2]*inv_scale), height if height else round(roi[3]*inv_scale)), pg.SRCALPHA)
         if not transparent:
             s.fill(BACKGROUND)
         surfaces = []
@@ -486,7 +486,7 @@ def export(clipdir):
                 frame.blit(transparent_frame, (0,0))
 
                 check_if_interrupted()
-                pixels = transpose_xy(pygame.surfarray.pixels3d(frame))
+                pixels = transpose_xy(pg.surfarray.pixels3d(frame))
                 check_if_interrupted()
 
                 # append each frame twice at MP4 to get a standard 24 fps frame rate
@@ -628,7 +628,7 @@ import math
 import io
 import shutil
 
-pg = pygame
+pg = pg
 pg.init()
 
 from PySide6.QtWidgets import QApplication, QWidget, QFileDialog, QLineEdit, QVBoxLayout, QPushButton, QHBoxLayout, QDialog, QMessageBox, QColorDialog
@@ -707,17 +707,17 @@ def pgsurf2qtimage(src, dst):
     oattached[:] = iattached[:]
 
 
-#screen = pygame.display.set_mode((800, 350*2), pygame.RESIZABLE)
-#screen = pygame.display.set_mode((350, 800), pygame.RESIZABLE)
-#screen = pygame.display.set_mode((1200, 350), pygame.RESIZABLE)
-#screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-screen = pg.Surface((1920, 1200), pg.SRCALPHA)#pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+#screen = pg.display.set_mode((800, 350*2), pg.RESIZABLE)
+#screen = pg.display.set_mode((350, 800), pg.RESIZABLE)
+#screen = pg.display.set_mode((1200, 350), pg.RESIZABLE)
+#screen = pg.display.set_mode((0, 0), pg.FULLSCREEN)
+screen = pg.Surface((1920, 1200), pg.SRCALPHA)#pg.display.set_mode((0, 0), pg.FULLSCREEN)
 
 screen.fill(BACKGROUND)
-#pygame.display.flip()
-#pygame.display.set_caption("Tinymation")
+#pg.display.flip()
+#pg.display.set_caption("Tinymation")
 
-font = pygame.font.Font(size=screen.get_height()//15)
+font = pg.font.Font(size=screen.get_height()//15)
 
 FADING_RATE = 12
 UNDRAWABLE = (220, 215, 190)
@@ -2183,8 +2183,8 @@ class FlashlightTool(Button):
         try_to_patch = ctrl_is_pressed()
         frame = movie.edit_curr_frame() if try_to_patch else movie.curr_frame()
 
-        color = pygame.surfarray.pixels3d(frame.surf_by_id('color'))
-        lines = pygame.surfarray.pixels_alpha(frame.surf_by_id('lines'))
+        color = pg.surfarray.pixels3d(frame.surf_by_id('color'))
+        lines = pg.surfarray.pixels_alpha(frame.surf_by_id('lines'))
         if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1] or lines[x,y] == 255:
             return
 
@@ -2304,10 +2304,10 @@ class Layout:
                 except:
                     import traceback
                     traceback.print_exc()
-                    pygame.draw.rect(screen, (255,0,0), elem.rect, 3, 3)
+                    pg.draw.rect(screen, (255,0,0), elem.rect, 3, 3)
                     continue
                 if elem.draw_border:
-                    pygame.draw.rect(screen, OUTLINE, elem.rect, 1, 1)
+                    pg.draw.rect(screen, OUTLINE, elem.rect, 1, 1)
 
     def draw_upon_zoom(self):
         cache.lock() # the chance to need to redraw with the same intermediate zoom/pan is low
@@ -2331,7 +2331,7 @@ class Layout:
                 if y+h >= movie_list.rect[1]:
                     movie_list.redraw_last()
 
-    # note that pygame seems to miss mousemove events with a Wacom pen when it's not pressed.
+    # note that pg seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
     def on_event(self,event):
         if event.type == PLAYBACK_TIMER_EVENT:
@@ -2352,7 +2352,7 @@ class Layout:
         if event.type == HISTORY_TIMER_EVENT:
             self.tool.on_history_timer()
 
-        if event.type not in [pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION]:
+        if event.type not in [pg.MOUSEBUTTONDOWN, pg.MOUSEBUTTONUP, pg.MOUSEMOTION]:
             return
 
         self.pressure = getattr(event, 'pressure', 1)
@@ -2383,7 +2383,7 @@ class Layout:
             return
 
     def _dispatch_event(self, elem, event, x, y):
-        if event.type == pygame.MOUSEBUTTONDOWN:
+        if event.type == pg.MOUSEBUTTONDOWN:
             change = tool_change
             self.is_pressed = True
             self.focus_elem = elem
@@ -2392,7 +2392,7 @@ class Layout:
                 self.focus_elem.on_mouse_down(x,y)
             if change == tool_change and self.new_delete_tool():
                 self.restore_tool_on_mouse_up = True
-        elif event.type == pygame.MOUSEBUTTONUP:
+        elif event.type == pg.MOUSEBUTTONUP:
             self.is_pressed = False
             if self.restore_tool_on_mouse_up:
                 restore_tool()
@@ -2401,7 +2401,7 @@ class Layout:
             if self.focus_elem:
                 trace.class_context(self.focus_elem)
                 self.focus_elem.on_mouse_up(x,y)
-        elif event.type == pygame.MOUSEMOTION and self.is_pressed:
+        elif event.type == pg.MOUSEMOTION and self.is_pressed:
             if self.focus_elem:
                 trace.class_context(self.focus_elem)
                 self.focus_elem.on_mouse_move(x,y)
@@ -2706,10 +2706,10 @@ class DrawingArea(LayoutElemBase):
         l,b,w,h = margin_area
         r = l+w
         t = b+h
-        pygame.gfxdraw.box(self.subsurface, (0, 0, l, height), margin_color)
-        pygame.gfxdraw.box(self.subsurface, (r, 0, width-r, height), margin_color)
-        pygame.gfxdraw.box(self.subsurface, (l, 0, r-l, b), margin_color)
-        pygame.gfxdraw.box(self.subsurface, (l, t, r-l, height-t), margin_color)
+        pg.gfxdraw.box(self.subsurface, (0, 0, l, height), margin_color)
+        pg.gfxdraw.box(self.subsurface, (r, 0, width-r, height), margin_color)
+        pg.gfxdraw.box(self.subsurface, (l, 0, r-l, b), margin_color)
+        pg.gfxdraw.box(self.subsurface, (l, t, r-l, height-t), margin_color)
 
     def draw_region(self, frame_region):
         trace.stop()
@@ -2812,10 +2812,10 @@ class DrawingArea(LayoutElemBase):
         self.subsurface.blit(self.zoom_surface, (start_x, start_y))
         end_x = start_x + self.zoom_surface.get_width()
         end_y = start_y + self.zoom_surface.get_height()
-        pygame.gfxdraw.box(self.subsurface, (0, 0, self.subsurface.get_width(), start_y), MARGIN)
-        pygame.gfxdraw.box(self.subsurface, (0, end_y, self.subsurface.get_width(), self.subsurface.get_height()), MARGIN)
-        pygame.gfxdraw.box(self.subsurface, (0, start_y, start_x, end_y-start_y), MARGIN)
-        pygame.gfxdraw.box(self.subsurface, (end_x, start_y, self.subsurface.get_width(), end_y-start_y), MARGIN)
+        pg.gfxdraw.box(self.subsurface, (0, 0, self.subsurface.get_width(), start_y), MARGIN)
+        pg.gfxdraw.box(self.subsurface, (0, end_y, self.subsurface.get_width(), self.subsurface.get_height()), MARGIN)
+        pg.gfxdraw.box(self.subsurface, (0, start_y, start_x, end_y-start_y), MARGIN)
+        pg.gfxdraw.box(self.subsurface, (end_x, start_y, self.subsurface.get_width(), end_y-start_y), MARGIN)
         self.subsurface.set_clip(None)
 
     def clear_fading_mask(self):
@@ -3185,7 +3185,7 @@ class TimelineArea(LayoutElemBase):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
             surface.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             border = 1 + 2*(pos==movie.pos)
-            pygame.draw.rect(surface, OUTLINE, (x, bottom, thumb_width, height), border)
+            pg.draw.rect(surface, OUTLINE, (x, bottom, thumb_width, height), border)
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
                 eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
@@ -3418,9 +3418,9 @@ class LayersArea(LayoutElemBase):
             border = 1 + (layer_pos == movie.layer_pos)*2
             image = self.cached_image(layer_pos, layer)
             image_left = (width - image.get_width())/2
-            pygame.draw.rect(surface, BACKGROUND, (image_left, blit_bottom, image.get_width(), image.get_height()))
+            pg.draw.rect(surface, BACKGROUND, (image_left, blit_bottom, image.get_width(), image.get_height()))
             surface.blit(image, (image_left, blit_bottom), image.get_rect()) 
-            pygame.draw.rect(surface, OUTLINE, (image_left, blit_bottom, image.get_width(), image.get_height()), border)
+            pg.draw.rect(surface, OUTLINE, (image_left, blit_bottom, image.get_width(), image.get_height()), border)
 
             max_border = 3
             if len(movie.frames) > 1 and layer.visible and list(layout.timeline_area().light_table_positions()):
@@ -3716,7 +3716,7 @@ class MovieListArea(LayoutElemBase):
             else:
                 self.selected_xrange = (startx, startx + image.get_width())
             border = 1 + selected*2
-            pygame.draw.rect(surface, OUTLINE, (startx, 0, image.get_width(), image.get_height()), border)
+            pg.draw.rect(surface, OUTLINE, (startx, 0, image.get_width(), image.get_height()), border)
             leftmost += image.get_width()
             covered += image.get_width()
             pos += 1
@@ -3884,8 +3884,8 @@ class Movie(MovieData):
                 alpha = np.zeros((empty_frame().get_width(), empty_frame().get_height()))
                 for layer in layers:
                     frame = layer.frame(pos)
-                    pen = pygame.surfarray.pixels_alpha(frame.surf_by_id('lines'))
-                    color = pygame.surfarray.pixels_alpha(frame.surf_by_id('color'))
+                    pen = pg.surfarray.pixels_alpha(frame.surf_by_id('lines'))
+                    color = pg.surfarray.pixels_alpha(frame.surf_by_id('color'))
                     # hide the areas colored by this layer, and expose the lines of these layer (the latter, only if it's lit and not held)
                     alpha[:] = np.minimum(255-color, alpha)
                     if lines_lit(layer):
@@ -3897,7 +3897,7 @@ class Movie(MovieData):
                 id2version, computation = CachedMaskAlpha().compute_key()
                 return id2version, ('mask', rgb, transparency, computation)
             def compute_value(_):
-                mask_surface = pygame.Surface((empty_frame().get_width(), empty_frame().get_height()), pygame.SRCALPHA)
+                mask_surface = pg.Surface((empty_frame().get_width(), empty_frame().get_height()), pg.SRCALPHA)
                 mask_surface.fill(rgb)
                 pg.surfarray.pixels_alpha(mask_surface)[:] = cache.fetch(CachedMaskAlpha())
                 mask_surface.set_alpha(int(transparency*255))
@@ -4940,11 +4940,11 @@ timer_events = [
 ]
 
 interesting_events = [
-    pygame.KEYDOWN,
-    pygame.KEYUP,
-    pygame.MOUSEMOTION,
-    pygame.MOUSEBUTTONDOWN,
-    pygame.MOUSEBUTTONUP,
+    pg.KEYDOWN,
+    pg.KEYUP,
+    pg.MOUSEMOTION,
+    pg.MOUSEBUTTONDOWN,
+    pg.MOUSEBUTTONUP,
 ] + timer_events
 
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
@@ -5171,7 +5171,7 @@ def process_keydown_event(event):
         print('Ctrl-A pressed -','enabling' if keyboard_shortcuts_enabled else 'disabling','keyboard shortcuts')
 
 #layout.draw()
-#pygame.display.flip()
+#pg.display.flip()
 
 UNDER_TEST = os.getenv('TINYTEST') is not None
 
@@ -5409,7 +5409,7 @@ signal.signal(signal.SIGINT, signal_handler)
 QTimer.singleShot(0, widget.start_loading)
 status = app.exec()
 dump_and_clear_profiling_data()
-pygame.quit()
+pg.quit()
 
 delete_lock_file()
 
