@@ -16,5 +16,6 @@
     fitpack_splev;
     fitpack_parcur;
     smooth_polyline;
+    blit_rgba8888;
   local: *;
 };

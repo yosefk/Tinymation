@@ -16,4 +16,5 @@ EXPORTS
     fitpack_splev @14
     fitpack_parcur @15
     smooth_polyline @16
+    blit_rgba8888 @17
 

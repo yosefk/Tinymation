@@ -66,7 +66,7 @@ def fit_to_resolution(surface):
     elif w == res.IHEIGHT and h == res.IWIDTH:
         return surf.rotate(surface, 90 * (1 if w>h else -1)) 
     else:
-        return surf.smoothscale(surface, (w, h))
+        assert False, f'only supporting {res.IWIDTH}x{res.IHEIGHT} or {res.IHEIGHT}x{res.IWIDTH} images, got {w}x{h}'
 
 def new_frame():
     frame = Surface((res.IWIDTH, res.IHEIGHT), surf.SRCALPHA)
@@ -785,9 +785,8 @@ def make_color_int(rgba, is_bgr):
     else:
         return r | (g<<8) | (b<<16) | (a<<24)
 
-import numpy.ctypeslib as npct
 import ctypes as ct
-tinylib = npct.load_library('tinylib','.')
+tinylib = surf.tinylib
 
 #Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double smoothDist, int dry, int erase, int softLines,
 #                        unsigned char* image, int width, int height, int xstride, int ystride, const int* paintWithinRegion)
@@ -884,7 +883,7 @@ def minmax(v, minv, maxv):
     return min(maxv,max(minv,v))
 
 def surf2cursor(surface, hotx, hoty):
-  image = QImage(QSize(surface.get_width(), surface.get_height()), QImage.Format_ARGB32)
+  image = QImage(QSize(surface.get_width(), surface.get_height()), QImage.Format_RGBA8888)
   pgsurf2qtimage(surface, image)
   pixmap = QPixmap.fromImage(image)
   return QCursor(pixmap, hotX=hotx, hotY=hoty)
@@ -3545,9 +3544,11 @@ class ProgressBar:
         left, bottom, full_width, height = self.inner_rect
         done_width = min(full_width, int(full_width * (self.done/max(1,self.total))))
         surf.rect(screen, PROGRESS, (left, bottom, done_width, height))
-        text_surface = font.render(self.title, True, UNUSED)
-        pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
-        screen.blit(text_surface, pos)
+
+        # FIXME
+#        text_surface = font.render(self.title, True, UNUSED)
+#        pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
+#        screen.blit(text_surface, pos)
 
         widget.redrawScreen()
         QCoreApplication.processEvents()
@@ -4953,7 +4954,7 @@ keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to a
 # upon random banging on the keyboard
 
 def set_clipboard_image(surface):
-  image = QImage(QSize(surface.get_width(), surface.get_height()), QImage.Format_ARGB32)
+  image = QImage(QSize(surface.get_width(), surface.get_height()), QImage.Format_RGBA8888)
   pgsurf2qtimage(surface, image)
   QApplication.clipboard().setPixmap(QPixmap.fromImage(image))
 
@@ -5239,7 +5240,7 @@ class TinymationWidget(QWidget):
         self.setGeometry(scr)
         
         # Create backing store QImage with the scr size
-        self.image = QImage(scr.size(), QImage.Format.Format_RGB32)
+        self.image = QImage(scr.size(), QImage.Format.Format_RGBA8888)
         self.sz = scr.size()
         self.image.fill(Qt.black)
         pgsurf2qtimage(screen, self.image)
@@ -5414,6 +5415,8 @@ dump_and_clear_profiling_data()
 pg.quit()
 
 delete_lock_file()
+
+surf.stat()
 
 sys.exit(status)
 
