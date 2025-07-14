@@ -24,7 +24,7 @@ totns = 0
 import time
 
 class Surface:
-    def __init__(self, size_or_data, srcalpha=None, alpha=255, clip=None):
+    def __init__(self, size_or_data, srcalpha=None, alpha=255):
         if type(size_or_data) is tuple:
             w, h = size_or_data
             w, h = round(w), round(h)
@@ -42,7 +42,6 @@ class Surface:
         # the couple of cases where we use RGB pygame surfaces should work as RGBA, too.
         # eventually we'll probably want 16b RGBA surfaces for blitting multiple transparent layers
         # without a non-transparent background
-        self._clip = (0, 0, w, h) if clip is None else clip
         self._alpha = alpha
 
     def get_width(self):
@@ -57,8 +56,7 @@ class Surface:
     def fill(self, color):
         if len(color) == 3:
             color = tuple(color) + (255,)
-        x, y, w, h = self._clip
-        self._a[x:x+w,y:y+h] = np.array(color)
+        self._a[:,:] = np.array(color)
 
     def _ptr_to(self, x, y):
         base = self._a.ctypes.data_as(ct.c_void_p)
@@ -93,7 +91,7 @@ class Surface:
             self.blit(*args)
 
     def copy(self):
-        return Surface(strides_preserving_copy(self._a), alpha=self._alpha, clip=self._clip)
+        return Surface(strides_preserving_copy(self._a), alpha=self._alpha)
 
     def subsurface(self, *args):
         assert len(args) in [1, 4]
@@ -101,7 +99,6 @@ class Surface:
             x,y,w,h = [round(i) for i in args[0]]
         else:
             x,y,w,h = [round(i) for i in args]
-        assert self._clip == self.get_rect()
         return Surface(self._a[x:x+w,y:y+h,:], alpha=self._alpha)
 
     def set_alpha(self, alpha):
@@ -114,9 +111,6 @@ class Surface:
     def get_at(self, pos):
         x,y = pos
         return tuple([int(c) for c in self._a[x,y]])
-
-    def set_clip(self, rect):
-        self._clip = rect
 
 def load(fname):
     img = QImage(fname)
@@ -157,10 +151,9 @@ def pixels3d(surface):
 def pixels_alpha(surface):
     return surface._a[:,:,3]
 
-# FIXME 
 def box(surface, rect, color):
-    pass
-#    return pg.gfxdraw.box(surface.surface, rect, color)
+    assert len(color)==3
+    surface.subsurface(rect).fill(color)
 
 def rect(surface, color, rect, *rest):
     pass

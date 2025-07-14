@@ -724,6 +724,7 @@ font = pg.font.Font(size=screen.get_height()//15)
 FADING_RATE = 12
 UNDRAWABLE = (220, 215, 190)
 MARGIN = (220-80, 215-80, 190-80, 192)
+MARGIN_BLENDED = [int((ch*MARGIN[-1] + ch2*(255-MARGIN[-1]))/255) for ch,ch2 in zip(MARGIN[:3], BACKGROUND)]
 SELECTED = (220-80, 215-80, 190-80)
 UNUSED = SELECTED
 OUTLINE = (220-105, 215-105, 190-105)
@@ -2484,6 +2485,8 @@ class DrawingArea(LayoutElemBase):
         w, h = ((self.iwidth+self.lmargin+self.rmargin + self.iheight+self.ymargin*2)//2,)*2
         self.zoom_surface = Surface((w,h ), surf.SRCALPHA)
         self.zoom_surface.fill(([(a+b)//2 for a,b in zip(MARGIN[:3], BACKGROUND[:3])]))
+        self.margin_surface = Surface((self.subsurface.get_width(), self.subsurface.get_height()), surf.SRCALPHA)
+        self.margin_surface.fill(MARGIN)
         rgb = surf.pixels3d(self.zoom_surface)
         alpha = surf.pixels_alpha(self.zoom_surface)
         yv, xv = np.meshgrid(np.arange(h), np.arange(w))
@@ -2693,10 +2696,10 @@ class DrawingArea(LayoutElemBase):
 
         eps = 0.019
         if self.zoom > 1 + eps:
+            self.draw_margin_where_needed(margin_area, MARGIN_BLENDED)
             self.draw_zoom_surface()
-            self.draw_margin_where_needed(margin_area, MARGIN)
         else:
-            margin_color = UNDRAWABLE if layout.is_playing else MARGIN
+            margin_color = UNDRAWABLE if layout.is_playing else MARGIN_BLENDED
             self.draw_margin_where_needed(margin_area, margin_color)
 
         if layout.is_playing:
@@ -2806,18 +2809,34 @@ class DrawingArea(LayoutElemBase):
 
     def should_draw_zoom_surface(self): return self.zoom > 1.015
     def draw_zoom_surface(self, region=None):
+        surface = self.subsurface
+        sx, sy = 0, 0
         if region is not None:
-            self.subsurface.set_clip(region)
+            surface = surface.subsurface(region)
+            sx, sy = -region[0], -region[1]
         start_x = int(self.zoom_center[0] - self.zoom_surface.get_width()/2)
         start_y = int(self.zoom_center[1] - self.zoom_surface.get_height()/2)
-        self.subsurface.blit(self.zoom_surface, (start_x, start_y))
+        surface.blit(self.zoom_surface, (sx+start_x, sy+start_y))
         end_x = start_x + self.zoom_surface.get_width()
         end_y = start_y + self.zoom_surface.get_height()
-        surf.box(self.subsurface, (0, 0, self.subsurface.get_width(), start_y), MARGIN)
-        surf.box(self.subsurface, (0, end_y, self.subsurface.get_width(), self.subsurface.get_height()), MARGIN)
-        surf.box(self.subsurface, (0, start_y, start_x, end_y-start_y), MARGIN)
-        surf.box(self.subsurface, (end_x, start_y, self.subsurface.get_width(), end_y-start_y), MARGIN)
-        self.subsurface.set_clip(None)
+
+        def box(x,y,w,h):
+            if x<0:
+                w += x
+                x = 0
+            if y<0:
+                h += y
+                y = 0
+            if w<=0 or h<=0:
+                return
+            w = min(w,self.margin_surface.get_width())
+            h = min(h,self.margin_surface.get_height())
+            surface.blit(self.margin_surface.subsurface((0,0,w,h)), (x,y))
+
+        box(sx, sy, self.subsurface.get_width(), start_y)
+        box(sx, sy+end_y, self.subsurface.get_width(), self.subsurface.get_height())
+        box(sx, sy+start_y, start_x, end_y-start_y)
+        box(sx+end_x, sy+start_y, self.subsurface.get_width(), end_y-start_y)
 
     def clear_fading_mask(self):
         global last_skeleton
