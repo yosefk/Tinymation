@@ -60,20 +60,25 @@ class Surface:
         x, y, w, h = self._clip
         self._a[x:x+w,y:y+h] = np.array(color)
 
+    def _ptr_to(self, x, y):
+        base = self._a.ctypes.data_as(ct.c_void_p)
+        return ct.c_void_p(base.value + y * self._a.strides[1] + x * self._a.strides[0])
+
     def blit(background, foreground, xy=(0,0), rect=None):
         assert rect is None or rect == foreground.get_rect() # whatever rect does in pygame, tinymation never really used it
         x, y = xy
         x, y = round(x), round(y)
         xw = min(x + foreground.get_width(), background.get_width())
         yh = min(y + foreground.get_height(), background.get_height())
+
+        fg_x_oft = max(0, -x)
+        fg_y_oft = max(0, -y)
         x = max(x, 0)
         y = max(y, 0)
 
         start = time.time_ns()
 
-        bg_base = background._a.ctypes.data_as(ct.c_void_p)
-        bg_base = ct.c_void_p(bg_base.value + y * background._a.strides[1] + x * background._a.strides[0])
-        tinylib.blit_rgba8888(bg_base, foreground._a.ctypes.data_as(ct.c_void_p),
+        tinylib.blit_rgba8888(background._ptr_to(x,y), foreground._ptr_to(fg_x_oft, fg_y_oft),
                               background._a.strides[1], foreground._a.strides[1],
                               xw - x, yh - y,
                               background.get_alpha(), foreground.get_alpha())

@@ -1,7 +1,3 @@
-#include <cstdint>
-#include <algorithm>
-
-#if NO_ISPC
 
 //"standard" alpha blending for 8b images
 //
@@ -29,10 +25,13 @@
 //  promise high performance except for premultiplied alpha)
 
 static inline int round8b(int val) { return (val+(1<<7))>>8; }
+static inline int round16b(int val) { return (val+(1<<15))>>16; }
 
-extern "C" void blit_rgba8888(uint8_t* __restrict bg_base, const uint8_t* __restrict fg_base,
-                              int bg_stride, int fg_stride, int width, int height,
-                              int bg_alpha, int fg_alpha)
+#define uint8_t uint8
+
+export void blit_rgba8888(uniform uint32 bg_base[], const uniform uint32 fg_base[],
+                          uniform int bg_stride, uniform int fg_stride, uniform int width, uniform int height,
+                          uniform int bg_alpha, uniform int fg_alpha)
 {
     //we use >>8 instead of /255 and since 255 is a common "global layer transparency" value,
     //we prefer for it to have exactly no effect instead of almost no effect on the output:
@@ -43,9 +42,9 @@ extern "C" void blit_rgba8888(uint8_t* __restrict bg_base, const uint8_t* __rest
         fg_alpha = 256;
     }
 
-    for(int y=0; y<height; ++y) {
-        uint8_t* __restrict bg = bg_base + bg_stride*y;
-        const uint8_t* __restrict fg = fg_base + fg_stride*y;
+    for(uniform int y=0; y<height; ++y) {
+        uniform uint32* bg = bg_base + (bg_stride*y>>2);
+        const uint32* uniform fg = fg_base + (fg_stride*y>>2);
 
         //this loop doesn't auto-vectorize under g++ for 2 reasons:
         //* it is worried about read/write data dependencies despite __restrict
@@ -53,23 +52,53 @@ extern "C" void blit_rgba8888(uint8_t* __restrict bg_base, const uint8_t* __rest
         //* it doesn't like the division, and an inverse LUT is met with
         //  "not suitable for gather load" (?!).
 
-        for(int x=0; x<width*4; x+=4) {
-            int ab = round8b(bg[x+3] * bg_alpha);
-            int af = round8b(fg[x+3] * fg_alpha);
+        foreach(x=0 ... width) {
+            /*
+            uint32 bgpix = bg[x];
+            uint32 fgpix = fg[x];
+            uint8 ab = round8b((bgpix >> 24) * bg_alpha);
+            uint8 af = round8b((fgpix >> 24) * fg_alpha);
+            uint16 ao16 = round8b((af<<8) + ab*(256 - af));
+
+            uint32 opix = (ao16>255 ? 255 : ao16) << 24;
+
+            uint16 ao = ao16 == 0 ? 1 : ao16;
+            float finv = 1.0f / ao;
+            for(int c=0; c<3*8; c+=8) {
+                uint8 cb = (bgpix >> c) & 0xff;
+                uint8 cf = (fgpix >> c) & 0xff;
+                int co = round8b((int)((float)((af*cf<<8) + (256-af)*ab*cb) * finv));
+
+                uint8 co8 = co>255 ? 255 : co;
+
+                opix |= co8 << c;
+            }
+
+            bg[x] = opix;
+            */
+
+            uint32 bgpix = bg[x];
+            uint32 fgpix = fg[x];
+            int ab = round8b((bgpix>>24) * bg_alpha);
+            int af = round8b((fgpix>>24) * fg_alpha);
             int ao = round8b((af<<8) + ab*(256 - af));
             
-            bg[x+3] = std::min(255, ao);
+            uint32 opix = (ao>255 ? 255 : ao)<<24;
 
             ao = ao == 0 ? 1 : ao;
+            float finv = 1.0f / ao;
+//            int inv = finv * 65536.f;
             for(int c=0; c<3; ++c) {
-                int cb = bg[x+c];
-                int cf = fg[x+c];
-                int co = std::min(255, round8b(((af*cf<<8) + (256-af)*ab*cb) / ao));
+                int cb = (bgpix >> c*8) & 0xff;
+                int cf = (fgpix >> c*8) & 0xff;
+                int co = round8b((int)((float)((af*cf<<8) + (256-af)*ab*cb) * finv));
 
-                bg[x+c] = co;
+                co = co>255 ? 255 : co;
+
+                opix |= co << c*8;
             }
+
+            bg[x] = opix;
         }
     }
 }
-
-#endif
