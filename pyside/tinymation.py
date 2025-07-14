@@ -696,7 +696,7 @@ def delete_lock_file():
 create_lock_file()
 
 def pgsurf2qtimage(src, dst):
-    iptr, istride, iwidth, iheight, ibgr = color_c_params(surf.pixels3d(src))
+    iptr, istride, iwidth, iheight = color_c_params(surf.pixels3d(src))
     ibuffer = ct.cast(iptr, ct.POINTER(ct.c_uint8 * (iheight * istride * 4))).contents
     iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
 
@@ -761,16 +761,9 @@ def color_c_params(rgb):
     assert depth == 3
     xstride, ystride, zstride = rgb.strides
     oft = 0
-    bgr = 0
-    if zstride == -1: # BGR image - walk back 2 bytes to get to the first blue pixel...
-        # (many functions don't care about which channel is which and it's better to not
-        # have to pass another stride argument to them)
-        oft = -2
-        zstride = 1
-        bgr = 1
     assert xstride == 4 and zstride == 1, f'xstride={xstride}, ystride={ystride}, zstride={zstride}'
     ptr = ct.c_void_p(arr_base_ptr(rgb).value + oft)
-    return ptr, ystride, width, height, bgr
+    return ptr, ystride, width, height
 
 def greyscale_c_params(grey, is_alpha=True, expected_xstride=1):
     width, height = grey.shape
@@ -817,19 +810,12 @@ tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ct.c_void_p]*3 + [ct.c_
 tinylib.fitpack_parcur.argtypes = [ct.c_void_p]*2 + [ct.c_int]*3 + [ct.c_double] + [ct.c_void_p]*3
 
 def rgba_array(surface):
-    ptr, ystride, width, height, bgr = color_c_params(surf.pixels3d(surface))
-    buffer = ct.cast(ptr, ct.POINTER(ct.c_uint8 * (height * ystride * 4))).contents
-    return np.ndarray((width,height,4), dtype=np.uint8, buffer=buffer, strides=(4, ystride, 1)), bgr
-
-# these are simple functions to test the assumptions regarding Surface numpy array layout
-def meshgrid_color(rgb): tinylib.meshgrid_color(*color_c_params(rgb))
-def meshgrid_alpha(alpha): tinylib.meshgrid_alpha(*greyscale_c_params(alpha))
+    return surface._a
 
 import cv2
 def cv2_resize_surface(src, dst, inv_scale=None, best_quality=False):
-    iptr, istride, iwidth, iheight, ibgr = color_c_params(surf.pixels3d(src))
-    optr, ostride, owidth, oheight, obgr = color_c_params(surf.pixels3d(dst))
-    assert ibgr == obgr
+    iptr, istride, iwidth, iheight = color_c_params(surf.pixels3d(src))
+    optr, ostride, owidth, oheight = color_c_params(surf.pixels3d(dst))
 
     ibuffer = ct.cast(iptr, ct.POINTER(ct.c_uint8 * (iheight * istride * 4))).contents
 
@@ -1061,7 +1047,7 @@ class HistoryItem(HistoryItemBase):
         if self.optimized:
             frame = frame.subsurface(self._subsurface_bbox())
         
-        rgba_array(frame)[0][:] = rgba_array(self.saved_surface)[0]
+        rgba_array(frame)[:] = rgba_array(self.saved_surface)
 
     def optimize(self, bbox=None):
         if self.optimized:
@@ -1070,7 +1056,7 @@ class HistoryItem(HistoryItemBase):
         if bbox:
             self.minx, self.miny, self.maxx, self.maxy = bbox
         else:
-            mask = np.any(rgba_array(self.saved_surface)[0] != rgba_array(self.curr_surface())[0], axis=2)
+            mask = np.any(rgba_array(self.saved_surface) != rgba_array(self.curr_surface()), axis=2)
             brect = bounding_rectangle_of_a_boolean_mask(mask)
 
             if brect is None: # this can happen eg when drawing lines on an already-filled-with-lines area
@@ -1231,7 +1217,7 @@ class PenTool(Button):
         flood_code = 2
 
         color = surf.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
-        color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color)
+        color_ptr, color_stride, color_width, color_height = color_c_params(color)
         assert color_width == width and color_height == height
         # the RGB values of transparent colors can actually matter in some (stupid) contexts - pasting into
         # some apps with no transparency support exposes these RGB values...
@@ -1514,8 +1500,8 @@ class PenLineShiftSmoothTool(Button):
 
         self.history_item = HistoryItem('lines')
 
-        self.rgba_lines = rgba_array(self.lines)[0]
-        self.rgba_frame_without_line = rgba_array(self.frame_without_line)[0]
+        self.rgba_lines = rgba_array(self.lines)
+        self.rgba_frame_without_line = rgba_array(self.frame_without_line)
 
     def on_mouse_up(self, x, y):
         if self.editable_pen_line is None:
@@ -1660,7 +1646,7 @@ def flood_fill_color_based_on_lines(color_rgba, lines, x, y, bucket_color, bbox_
     if bbox_callback:
         bbox_retval = bbox_callback(bbox_retval)
 
-    color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color_rgba)
+    color_ptr, color_stride, color_width, color_height = color_c_params(color_rgba)
     assert color_width == width and color_height == height
     new_color_value = make_color_int(bucket_color, bgr)
     tinylib.fill_color_based_on_mask(color_ptr, mask_ptr, color_stride, mask_stride, width, height, region, new_color_value, flood_code)
@@ -1674,7 +1660,7 @@ def flood_fill_color_based_on_mask_many_seeds(color_rgba, pen_mask, xs, ys, buck
     mask_ptr, mask_stride, width, height = greyscale_c_params(pen_mask, is_alpha=False)
     flood_code = 2
 
-    color_ptr, color_stride, color_width, color_height, bgr = color_c_params(color_rgba)
+    color_ptr, color_stride, color_width, color_height = color_c_params(color_rgba)
     assert color_width == width and color_height == height
     new_color_value = make_color_int(bucket_color, bgr)
 
@@ -4154,10 +4140,10 @@ class Movie(MovieData):
                         below_image.set_alpha(128)
                         below_image.fill(LAYERS_BELOW)
                         return below_image
-                rgba = np.copy(rgba_array(layers)[0]) # funnily enough, this is much faster than calling array_alpha()
+                rgba = np.copy(rgba_array(layers)) # funnily enough, this is much faster than calling array_alpha()
                 # to save a copy of just the alpha pixels [those we really need]...
                 layers.blit(cache.fetch(BelowImage()), (0,0))
-                rgba_array(layers)[0][:,:,3] = rgba[:,:,3]
+                rgba_array(layers)[:,:,3] = rgba[:,:,3]
                 if subset is not None:
                     s = s.subsurface(subset)
                     layers = layers.subsurface(subset)
@@ -4196,11 +4182,11 @@ class Movie(MovieData):
                 if subset is not None:
                     s = s.subsurface(subset)
                     layers = layers.subsurface(subset)
-                rgba = np.copy(rgba_array(layers)[0])
+                rgba = np.copy(rgba_array(layers))
                 layers.blit(cache.fetch(AboveImage()), (0,0))
                 self._set_undrawable_layers_grid(layers, (255,0,0), x=WIDTH*3//2, y=WIDTH**3//2)
                 s.blit(layers, (0,0))
-                rgba_array(s)[0][:,:,3] = rgba[:,:,3]
+                rgba_array(s)[:,:,3] = rgba[:,:,3]
                 s.set_alpha(192)
 
                 return s
