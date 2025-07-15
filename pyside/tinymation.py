@@ -1419,7 +1419,6 @@ class PenTool(Button):
 
             if self.short_term_bbox[-1] >= 0:
                 layout.drawing_area().draw_region(self.short_term_bbox)
-                widget.redrawScreen()
             
         self.prev_drawn = (x,y) 
 
@@ -1776,7 +1775,6 @@ class PaintBucketTool(Button):
             self.bboxes.append(bbox)
 
             layout.drawing_area().draw_region(bbox)
-            widget.redrawScreen()
 
         PaintBucketTool.last_color = self.color
         
@@ -2248,6 +2246,7 @@ class Layout:
         self.mode = ANIMATION_LAYOUT
         self.pressure = 1
         self.event_time = 0
+        self.update_roi = None
 
     def aspect_ratio(self): return self.width/self.height
 
@@ -2305,7 +2304,8 @@ class Layout:
             self.timeline_area().redraw_last()
 
     def restore_roi(self, roi):
-        if self.drawing_area().vertical_movie_on_horizontal_screen:
+        da = self.drawing_area()
+        if da.vertical_movie_on_horizontal_screen:
             # we might have painted on top of the timeline or the movie area
             x,y,w,h = roi
             movie_list = self.movie_list_area()
@@ -2315,6 +2315,8 @@ class Layout:
                     timeline.redraw_last()
                 if y+h >= movie_list.rect[1]:
                     movie_list.redraw_last()
+
+        self.update_roi = [roi[0]+da.rect[0], roi[1]+da.rect[1], roi[2], roi[3]]
 
     # note that pg seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
@@ -3812,6 +3814,8 @@ class ToolSelectionButton(LayoutElemBase):
             if self.tool.tool.modify():
                 set_tool(self.tool)
                 self.tool.tool.button_surface = None # update from the new icon
+        self.redraw = True
+    def on_mouse_move(self,x,y): self.redraw = False
 
 class TogglePlaybackButton(Button):
     def __init__(self, play_icon, pause_icon):
@@ -5229,6 +5233,25 @@ if UNDER_TEST:
 
         widget.tabletEvent(event)
 
+# Define the Windows MSG structure for ctypes
+class MSG(ct.Structure):
+    _fields_ = [
+        ('hwnd', ct.wintypes.HWND),
+        ('message', ct.wintypes.UINT),
+        ('wParam', ct.wintypes.WPARAM),
+        ('lParam', ct.wintypes.LPARAM),
+        ('time', ct.wintypes.DWORD),
+        ('pt', ct.wintypes.POINT),
+    ]
+
+# Windows message and flag constants
+WM_TABLET_QUERYSYSTEMGESTURESTATUS = 0x02CC
+
+TABLET_DISABLE_PRESSANDHOLD = 0x00000001  # Core flag to disable press-and-hold
+TABLET_DISABLE_PENTAPFEEDBACK = 0x00000008
+TABLET_DISABLE_PENBARRELFEEDBACK = 0x00000010
+TABLET_DISABLE_FLICKS = 0x00010000
+
 class TinymationWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -5254,9 +5277,6 @@ class TinymationWidget(QWidget):
 
         mem_view = self.image.bits()
         self.address = ct.c_void_p(ct.addressof(ct.c_byte.from_buffer(mem_view))).value + 1
-
-        self.rect = np.zeros(4, dtype=np.int32)
-        self.region = arr_base_ptr(self.rect)
 
         self.timers = []
         # we save the current frame every 15 seconds
@@ -5296,13 +5316,18 @@ class TinymationWidget(QWidget):
         e.type = event
         with trace.start({PLAYBACK_TIMER_EVENT:'playback-timer', SAVING_TIMER_EVENT:'saving-timer', FADING_TIMER_EVENT: 'fading-timer'}[event]):
             layout.on_event(e)
-            self.redrawLayoutIfNeeded(e)
-            self.redrawScreen()
+            if self.redrawLayoutIfNeeded(e):
+                self.redrawScreen()
 
     def redrawScreen(self):
         # TODO: optimize this away (we should work with a Qt image directly)
         pgsurf2qtimage(screen, self.image)
-        self.update()
+
+        if layout and layout.update_roi is not None:
+            self.repaint(*layout.update_roi)
+            layout.update_roi = None
+        else:
+            self.update()
 
     def redrawLayoutIfNeeded(self, event=None):
         if event is None or (layout.is_playing and event.type == PLAYBACK_TIMER_EVENT) or layout.drawing_area().redraw_fading_mask or event.type not in timer_events and not movie_list.opening:
@@ -5310,12 +5335,12 @@ class TinymationWidget(QWidget):
             layout.drawing_area().redraw_fading_mask = False
             if not layout.is_playing:
                cache.collect_garbage()
+            return True
 
     def paintEvent(self, event):
         with trace.start('paint'):
             painter = QPainter(self)
-            region = event.region()
-            rect = region.boundingRect()
+            rect = event.rect()
             painter.drawImage(rect, self.image, rect)
             painter.end()
             event.accept()
@@ -5330,8 +5355,8 @@ class TinymationWidget(QWidget):
             e.pos = (pos.x(), pos.y())
             e.subpixel = False
             layout.on_event(e)
-            self.redrawLayoutIfNeeded(event)
-            self.redrawScreen()
+            if self.redrawLayoutIfNeeded(event):
+                self.redrawScreen()
             event.accept()
 
     def mousePressEvent(self, event): self.mouseEvent(event, pg.MOUSEBUTTONDOWN)
@@ -5354,13 +5379,9 @@ class TinymationWidget(QWidget):
             e.pressure = event.pressure()
             e.time = event.timestamp()
             layout.on_event(e)
-            self.redrawLayoutIfNeeded(event)
-            self.redrawScreen()
+            if self.redrawLayoutIfNeeded(event):
+                self.redrawScreen()
             event.accept()
-
-    def update_region(self):
-        xmin, ymin, xmax, ymax = self.rect
-        self.update(xmin, ymin, xmax, ymax)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -5376,13 +5397,25 @@ class TinymationWidget(QWidget):
 
         with trace.start('key-down'):
             process_keydown_event(event)
-            self.redrawLayoutIfNeeded(event)
-            self.redrawScreen()
+            if self.redrawLayoutIfNeeded(event):
+                self.redrawScreen()
             event.accept()
 
     def keyReleaseEvent(self, event):
         with trace.start('key-up'):
             process_keyup_event(event)
+
+    # on Windows, this is necessary to disable touch "gestures" such as expanding and then disappearing circles
+    # adding a delay to the input
+    def nativeEvent(self, eventType, message):
+        if eventType == b"windows_generic_MSG":
+            # Cast the message pointer to MSG structure
+            msg = MSG.from_address(int(message))
+            if msg.message == WM_TABLET_QUERYSYSTEMGESTURESTATUS:
+                # Return the disable flag(s); you can bitwise-OR multiple if needed
+                return True, TABLET_DISABLE_PRESSANDHOLD | TABLET_DISABLE_PENTAPFEEDBACK | TABLET_DISABLE_PENBARRELFEEDBACK
+        # Fall back to default handling for other events
+        return super().nativeEvent(eventType, message)
 
     def shutdown(self, export_on_exit=True):
         if UNDER_TEST:

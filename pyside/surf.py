@@ -43,6 +43,7 @@ class Surface:
         # eventually we'll probably want 16b RGBA surfaces for blitting multiple transparent layers
         # without a non-transparent background
         self._alpha = alpha
+        self._base = None
 
     def get_width(self):
         return self._a.shape[0]
@@ -59,8 +60,9 @@ class Surface:
         self._a[:,:] = np.array(color)
 
     def _ptr_to(self, x, y):
-        base = self._a.ctypes.data_as(ct.c_void_p)
-        return ct.c_void_p(base.value + y * self._a.strides[1] + x * self._a.strides[0])
+        if self._base is None:
+            self._base = self._a.ctypes.data_as(ct.c_void_p)
+        return ct.c_void_p(self._base.value + y * self._a.strides[1] + x * self._a.strides[0])
 
     def blit(background, foreground, xy=(0,0), rect=None):
         assert rect is None or rect == foreground.get_rect() # whatever rect does in pygame, tinymation never really used it
