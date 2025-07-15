@@ -107,7 +107,8 @@ class Surface:
         if y < 0:
             h += y
             y = 0
-        assert w>=0 and h>=0
+        w = max(w, 0)
+        h = max(h, 0)
         return Surface(self._a[x:x+w,y:y+h,:], alpha=self._alpha, base=self._ptr_to(x,y))
 
     def set_alpha(self, alpha):

@@ -2,7 +2,6 @@ import numpy as np
 import sys
 import os
 from PySide6.QtGui import QImage
-os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide" # don't print pg version
 
 on_windows = os.name == 'nt'
 on_linux = sys.platform == 'linux'
@@ -42,8 +41,6 @@ import json
 
 import res
 
-import pygame
-pg = pygame
 import surf
 from surf import Surface
 
@@ -630,9 +627,6 @@ import math
 import io
 import shutil
 
-pg = pg
-pg.init()
-
 from PySide6.QtWidgets import QApplication, QWidget, QFileDialog, QLineEdit, QVBoxLayout, QPushButton, QHBoxLayout, QDialog, QMessageBox, QColorDialog
 from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor, QPixmap
 from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication, QEventLoop, QSize
@@ -705,7 +699,7 @@ screen.fill(BACKGROUND)
 #pg.display.flip()
 #pg.display.set_caption("Tinymation")
 
-font = pg.font.Font(size=screen.get_height()//15)
+#font = pg.font.Font(size=screen.get_height()//15)
 
 FADING_RATE = 12
 UNDRAWABLE = (220, 215, 190)
@@ -2327,13 +2321,13 @@ class Layout:
         if event.type == HISTORY_TIMER_EVENT:
             self.tool.on_history_timer()
 
-        if event.type not in [pg.MOUSEBUTTONDOWN, pg.MOUSEBUTTONUP, pg.MOUSEMOTION]:
+        if event.type not in [MOUSEBUTTONDOWN, MOUSEBUTTONUP, MOUSEMOTION]:
             return
 
         self.pressure = getattr(event, 'pressure', 1)
         self.event_time = getattr(event, 'time', 1)
 
-        if event.type in [pg.MOUSEMOTION, pg.MOUSEBUTTONUP] and not self.is_pressed:
+        if event.type in [MOUSEMOTION, MOUSEBUTTONUP] and not self.is_pressed:
             return # this guards against processing mouse-up with a button pressed which isn't button 0,
             # as well as, hopefully, against various mysterious occurences observed in the wild where
             # we eg are drawing a line even though we aren't actually trying
@@ -2358,7 +2352,7 @@ class Layout:
             return
 
     def _dispatch_event(self, elem, event, x, y):
-        if event.type == pg.MOUSEBUTTONDOWN:
+        if event.type == MOUSEBUTTONDOWN:
             change = tool_change
             self.is_pressed = True
             self.focus_elem = elem
@@ -2367,7 +2361,7 @@ class Layout:
                 self.focus_elem.on_mouse_down(x,y)
             if change == tool_change and self.new_delete_tool():
                 self.restore_tool_on_mouse_up = True
-        elif event.type == pg.MOUSEBUTTONUP:
+        elif event.type == MOUSEBUTTONUP:
             self.is_pressed = False
             if self.restore_tool_on_mouse_up:
                 restore_tool()
@@ -2376,7 +2370,7 @@ class Layout:
             if self.focus_elem:
                 trace.class_context(self.focus_elem)
                 self.focus_elem.on_mouse_up(x,y)
-        elif event.type == pg.MOUSEMOTION and self.is_pressed:
+        elif event.type == MOUSEMOTION and self.is_pressed:
             if self.focus_elem:
                 trace.class_context(self.focus_elem)
                 self.focus_elem.on_mouse_move(x,y)
@@ -4924,6 +4918,10 @@ def user_event():
     user_event_offset += 1
     return user_event_offset
 
+MOUSEBUTTONDOWN = user_event()
+MOUSEMOTION = user_event()
+MOUSEBUTTONUP = user_event()
+
 PLAYBACK_TIMER_EVENT = user_event()
 SAVING_TIMER_EVENT = user_event() 
 FADING_TIMER_EVENT = user_event()
@@ -4935,14 +4933,6 @@ timer_events = [
     FADING_TIMER_EVENT,
     HISTORY_TIMER_EVENT,
 ]
-
-interesting_events = [
-    pg.KEYDOWN,
-    pg.KEYUP,
-    pg.MOUSEMOTION,
-    pg.MOUSEBUTTONDOWN,
-    pg.MOUSEBUTTONUP,
-] + timer_events
 
 keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard
@@ -5323,7 +5313,7 @@ class TinymationWidget(QWidget):
             event.accept()
 
     def mouseEvent(self, event, type):
-        with trace.start({pg.MOUSEBUTTONDOWN:'mouse-down',pg.MOUSEMOTION:'mouse-move',pg.MOUSEBUTTONUP:'mouse-up'}[type]):
+        with trace.start({MOUSEBUTTONDOWN:'mouse-down',MOUSEMOTION:'mouse-move',MOUSEBUTTONUP:'mouse-up'}[type]):
             class Event:
                 pass
             e = Event()
@@ -5336,16 +5326,16 @@ class TinymationWidget(QWidget):
                 self.redrawScreen()
             event.accept()
 
-    def mousePressEvent(self, event): self.mouseEvent(event, pg.MOUSEBUTTONDOWN)
-    def mouseMoveEvent(self, event): self.mouseEvent(event, pg.MOUSEMOTION)
-    def mouseReleaseEvent(self, event): self.mouseEvent(event, pg.MOUSEBUTTONUP)
+    def mousePressEvent(self, event): self.mouseEvent(event, MOUSEBUTTONDOWN)
+    def mouseMoveEvent(self, event): self.mouseEvent(event, MOUSEMOTION)
+    def mouseReleaseEvent(self, event): self.mouseEvent(event, MOUSEBUTTONUP)
 
     def tabletEvent(self, event):
         class Event:
             pass
         e = Event()
-        e.type = {QEvent.TabletPress: pg.MOUSEBUTTONDOWN, QEvent.TabletMove: pg.MOUSEMOTION, QEvent.TabletRelease: pg.MOUSEBUTTONUP}.get(event.type())
-        with trace.start({pg.MOUSEBUTTONDOWN:'stylus-down',pg.MOUSEMOTION:'stylus-move',pg.MOUSEBUTTONUP:'stylus-up'}[e.type]):
+        e.type = {QEvent.TabletPress: MOUSEBUTTONDOWN, QEvent.TabletMove: MOUSEMOTION, QEvent.TabletRelease: MOUSEBUTTONUP}.get(event.type())
+        with trace.start({MOUSEBUTTONDOWN:'stylus-down',MOUSEMOTION:'stylus-move',MOUSEBUTTONUP:'stylus-up'}[e.type]):
             pos = event.position()
             # there seems to be a disagreement in "where the center of the pixel is" - at integer coordinates 0,1,2...
             # or at 0.5, 1.5, 2.5... between the tablet events and the coordinate system of xy2frame/frame2xy. I didn't give
@@ -5424,7 +5414,6 @@ signal.signal(signal.SIGINT, signal_handler)
 QTimer.singleShot(0, widget.start_loading)
 status = app.exec()
 dump_and_clear_profiling_data()
-pg.quit()
 
 delete_lock_file()
 
