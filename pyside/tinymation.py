@@ -695,20 +695,6 @@ def delete_lock_file():
 
 create_lock_file()
 
-def pgsurf2qtimage(src, dst):
-    iptr, istride, iwidth, iheight = color_c_params(surf.pixels3d(src))
-    ibuffer = ct.cast(iptr, ct.POINTER(ct.c_uint8 * (iheight * istride * 4))).contents
-    iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
-
-    mem_view = dst.bits()
-    optr = ct.addressof(ct.c_byte.from_buffer(mem_view))
-    owidth, oheight, ostride = iwidth, iheight, istride # FIXME
-    obuffer = ct.cast(optr, ct.POINTER(ct.c_uint8 * (oheight * ostride * 4))).contents
-
-    oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer, strides=(ostride, 4, 1))
-    oattached[:] = iattached[:]
-
-
 #screen = pg.display.set_mode((800, 350*2), pg.RESIZABLE)
 #screen = pg.display.set_mode((350, 800), pg.RESIZABLE)
 #screen = pg.display.set_mode((1200, 350), pg.RESIZABLE)
@@ -867,8 +853,7 @@ def minmax(v, minv, maxv):
     return min(maxv,max(minv,v))
 
 def surf2cursor(surface, hotx, hoty):
-  image = QImage(QSize(surface.get_width(), surface.get_height()), QImage.Format_RGBA8888)
-  pgsurf2qtimage(surface, image)
+  image = surface.qimage()
   pixmap = QPixmap.fromImage(image)
   return QCursor(pixmap, hotX=hotx, hotY=hoty)
 
@@ -2305,7 +2290,7 @@ class Layout:
 
     def restore_roi(self, roi):
         da = self.drawing_area()
-        if da.vertical_movie_on_horizontal_screen:
+        if da.vertical_movie_on_horizontal_screen and roi is not None:
             # we might have painted on top of the timeline or the movie area
             x,y,w,h = roi
             movie_list = self.movie_list_area()
@@ -2316,7 +2301,10 @@ class Layout:
                 if y+h >= movie_list.rect[1]:
                     movie_list.redraw_last()
 
-        self.update_roi = [roi[0]+da.rect[0], roi[1]+da.rect[1], roi[2], roi[3]]
+        if roi is None:
+            self.update_roi = (0, 0, 0, 0)
+        else:
+            self.update_roi = (roi[0]+da.rect[0], roi[1]+da.rect[1], roi[2], roi[3])
 
     # note that pg seems to miss mousemove events with a Wacom pen when it's not pressed.
     # (not sure if entirely consistently.) no such issue with a regular mouse
@@ -4960,9 +4948,7 @@ keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to a
 # upon random banging on the keyboard
 
 def set_clipboard_image(surface):
-  image = QImage(QSize(surface.get_width(), surface.get_height()), QImage.Format_RGBA8888)
-  pgsurf2qtimage(surface, image)
-  QApplication.clipboard().setPixmap(QPixmap.fromImage(image))
+  QApplication.clipboard().setPixmap(QPixmap.fromImage(surface.qimage()))
 
 cut_frame_content = None
 
@@ -5265,18 +5251,11 @@ class TinymationWidget(QWidget):
         self.setGeometry(scr)
         
         # Create backing store QImage with the scr size
-        self.image = QImage(scr.size(), QImage.Format.Format_RGBA8888)
-        self.sz = scr.size()
-        self.image.fill(Qt.black)
-        pgsurf2qtimage(screen, self.image)
-
+        self.image = screen.qimage_unsafe()
         self.showFullScreen()
         
         # Enable tablet tracking
         #self.setAttribute(Qt.WidgetAttribute.WA_TabletTracking)
-
-        mem_view = self.image.bits()
-        self.address = ct.c_void_p(ct.addressof(ct.c_byte.from_buffer(mem_view))).value + 1
 
         self.timers = []
         # we save the current frame every 15 seconds
@@ -5320,11 +5299,9 @@ class TinymationWidget(QWidget):
                 self.redrawScreen()
 
     def redrawScreen(self):
-        # TODO: optimize this away (we should work with a Qt image directly)
-        pgsurf2qtimage(screen, self.image)
-
         if layout and layout.update_roi is not None:
-            self.repaint(*layout.update_roi)
+            if layout.update_roi[2] > 0 and layout.update_roi[3] > 0:
+                self.repaint(*layout.update_roi)
             layout.update_roi = None
         else:
             self.update()

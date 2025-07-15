@@ -24,7 +24,7 @@ totns = 0
 import time
 
 class Surface:
-    def __init__(self, size_or_data, srcalpha=None, alpha=255):
+    def __init__(self, size_or_data, srcalpha=None, alpha=255, base=None):
         if type(size_or_data) is tuple:
             w, h = size_or_data
             w, h = round(w), round(h)
@@ -43,7 +43,7 @@ class Surface:
         # eventually we'll probably want 16b RGBA surfaces for blitting multiple transparent layers
         # without a non-transparent background
         self._alpha = alpha
-        self._base = None
+        self._base = base
 
     def get_width(self):
         return self._a.shape[0]
@@ -101,7 +101,14 @@ class Surface:
             x,y,w,h = [round(i) for i in args[0]]
         else:
             x,y,w,h = [round(i) for i in args]
-        return Surface(self._a[x:x+w,y:y+h,:], alpha=self._alpha)
+        if x < 0:
+            w += x
+            x = 0
+        if y < 0:
+            h += y
+            y = 0
+        assert w>=0 and h>=0
+        return Surface(self._a[x:x+w,y:y+h,:], alpha=self._alpha, base=self._ptr_to(x,y))
 
     def set_alpha(self, alpha):
         assert alpha >= 0 and alpha < 256
@@ -113,6 +120,16 @@ class Surface:
     def get_at(self, pos):
         x,y = pos
         return tuple([int(c) for c in self._a[x,y]])
+
+    def qimage_unsafe(self):
+        '''this QImage is aliased to the array - don't use after freeing the array/surface object'''
+        w, h, _ = self._a.shape
+        bytes_per_line = self._a.strides[1]
+        # without the cast, if we just pass ptr_to(0,0), we get garbage pixel data, I wonder what's happening there
+        ibuffer = ct.cast(self._ptr_to(0,0), ct.POINTER(ct.c_uint8 * (w * bytes_per_line * 4))).contents
+        return QImage(ibuffer, w, h, bytes_per_line, QImage.Format_RGBA8888)
+
+    def qimage(self): return self.qimage_unsafe().copy()
 
 def load(fname):
     img = QImage(fname)
