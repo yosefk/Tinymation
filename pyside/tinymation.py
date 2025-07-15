@@ -772,12 +772,9 @@ def greyscale_c_params(grey, is_alpha=True, expected_xstride=1):
     ptr = arr_base_ptr(grey)
     return ptr, ystride, width, height
 
-def make_color_int(rgba, is_bgr):
+def make_color_int(rgba):
     r,g,b,a = rgba
-    if is_bgr:
-        return b | (g<<8) | (r<<16) | (a<<24)
-    else:
-        return r | (g<<8) | (b<<16) | (a<<24)
+    return r | (g<<8) | (b<<16) | (a<<24)
 
 import ctypes as ct
 tinylib = surf.tinylib
@@ -1222,7 +1219,7 @@ class PenTool(Button):
         # the RGB values of transparent colors can actually matter in some (stupid) contexts - pasting into
         # some apps with no transparency support exposes these RGB values...
         # TODO: make sure we fill with BACKGROUND in all flows
-        new_color_value = make_color_int(self.bucket_color if self.bucket_color else BACKGROUND+(0,), bgr)
+        new_color_value = make_color_int(self.bucket_color if self.bucket_color else BACKGROUND+(0,))
 
         tinylib.brush_flood_fill_color_based_on_mask(self.brush, color_ptr, mask_ptr, color_stride, mask_stride, 0, flood_code, new_color_value)
 
@@ -1557,7 +1554,7 @@ class PenLineShiftSmoothTool(Button):
         simplified_new_points = simplify_polyline(list(new_points[first_diff:last_diff]),1)
         changed_old_points = list(old_points[first_diff:last_diff])
 
-        new_points = np.asfortranarray(np.concat((old_points[:first_diff], np.array(simplified_new_points), old_points[last_diff:])))
+        new_points = np.asfortranarray(np.concatenate((old_points[:first_diff], np.array(simplified_new_points), old_points[last_diff:])))
 
         affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), WIDTH*4)
 
@@ -1648,7 +1645,7 @@ def flood_fill_color_based_on_lines(color_rgba, lines, x, y, bucket_color, bbox_
 
     color_ptr, color_stride, color_width, color_height = color_c_params(color_rgba)
     assert color_width == width and color_height == height
-    new_color_value = make_color_int(bucket_color, bgr)
+    new_color_value = make_color_int(bucket_color)
     tinylib.fill_color_based_on_mask(color_ptr, mask_ptr, color_stride, mask_stride, width, height, region, new_color_value, flood_code)
 
     del pen_mask
@@ -1662,7 +1659,7 @@ def flood_fill_color_based_on_mask_many_seeds(color_rgba, pen_mask, xs, ys, buck
 
     color_ptr, color_stride, color_width, color_height = color_c_params(color_rgba)
     assert color_width == width and color_height == height
-    new_color_value = make_color_int(bucket_color, bgr)
+    new_color_value = make_color_int(bucket_color)
 
     rect = np.zeros(4, dtype=np.int32)
     region = arr_base_ptr(rect)

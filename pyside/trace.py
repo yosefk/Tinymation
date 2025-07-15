@@ -134,7 +134,8 @@ class Trace:
                 f.write(f'{data.total*1000:.2f} {event} {start}\n')
         for event, data in self.event2data.items():
             # prints "Loading finish", apparently from C code, despite verbose=0
-            data.tracer.save(os.path.join(dir, event+'.json'), verbose=0)
+            if data.tracer is not None:
+                data.tracer.save(os.path.join(dir, event+'.json'), verbose=0)
 
 trace = Trace()
 
