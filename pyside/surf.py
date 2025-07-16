@@ -13,7 +13,6 @@ tinylib.blit_rgba8888_inplace.argtypes = [ct.c_void_p]*2 + [ct.c_int]*6
 tinylib.blit_rgba8888.argtypes = [ct.c_void_p]*3 + [ct.c_int]*7
 tinylib.fill_32b.argtypes = [ct.c_void_p] + [ct.c_int]*3 + [ct.c_uint]
 
-SRCALPHA = 'srcalpha'
 COLOR_UNINIT = 'uninit'
 
 def strides_preserving_copy(a):
@@ -57,7 +56,7 @@ fill_stat = stat('Surface.fill','pixel')
 # from the typical (and pygame's) "width, height, channels" convention as it is, because our "non-standard"
 # (for numpy) strides hurt numpy ops throughput.
 class Surface:
-    def __init__(self, size_or_data, srcalpha=None, alpha=255, base=None, color=None):
+    def __init__(self, size_or_data, alpha=255, base=None, color=None):
         self._alpha = alpha
         self._base = base
         if type(size_or_data) is tuple:
@@ -74,7 +73,6 @@ class Surface:
             assert size_or_data.strides[0] == 4
             assert size_or_data.strides[1] >= w * 4
             assert size_or_data.strides[2] == 1
-        assert srcalpha in [None, SRCALPHA]
 
     def get_width(self):
         return self._a.shape[0]

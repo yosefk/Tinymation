@@ -66,7 +66,7 @@ def fit_to_resolution(surface):
         assert False, f'only supporting {res.IWIDTH}x{res.IHEIGHT} or {res.IHEIGHT}x{res.IWIDTH} images, got {w}x{h}'
 
 def new_frame():
-    return Surface((res.IWIDTH, res.IHEIGHT), surf.SRCALPHA, color=BACKGROUND + (0,))
+    return Surface((res.IWIDTH, res.IHEIGHT), color=BACKGROUND + (0,))
 
 def load_image(fname):
     if not os.path.dirname(fname) and not os.path.exists(fname):
@@ -126,7 +126,7 @@ class Frame:
         if not self.empty():
             return
         self.color = new_frame()
-        self.lines = Surface((self.color.get_width(), self.color.get_height()), surf.SRCALPHA, color=PEN)
+        self.lines = Surface((self.color.get_width(), self.color.get_height()), color=PEN)
         surf.pixels_alpha(self.lines)[:] = 0
 
     def get_content(self): return self.color.copy(), self.lines.copy()
@@ -227,7 +227,7 @@ _large_empty_surface = None
 def large_empty_surface(width, height):
     global _large_empty_surface
     if _large_empty_surface is None or _large_empty_surface.get_width() < width or _large_empty_surface.get_height() < height:
-        _large_empty_surface = Surface((width*2, height*2), surf.SRCALPHA)
+        _large_empty_surface = Surface((width*2, height*2))
 
     return _large_empty_surface.subsurface(0, 0, width, height)
 
@@ -385,7 +385,7 @@ class MovieData:
             if not width: width=res.IWIDTH
             if not height: height=res.IHEIGHT
         if not roi: roi = (0, 0, res.IWIDTH, res.IHEIGHT)
-        s = Surface((width if width else round(roi[2]*inv_scale), height if height else round(roi[3]*inv_scale)), surf.SRCALPHA, color=None if transparent else BACKGROUND)
+        s = Surface((width if width else round(roi[2]*inv_scale), height if height else round(roi[3]*inv_scale)), color=None if transparent else BACKGROUND)
         surfaces = []
         for layer in layers:
             if not layer.visible and not include_invisible:
@@ -466,7 +466,7 @@ def export(clipdir):
 
                 frame = movie._blit_layers(movie.layers, i)
                 transparent_frame = movie._blit_layers(movie.layers, i, transparent=True)
-                frame = Surface((res.IWIDTH, res.IHEIGHT), surf.SRCALPHA, color=BACKGROUND)
+                frame = Surface((res.IWIDTH, res.IHEIGHT), color=BACKGROUND)
                 frame.blit(transparent_frame, (0,0))
 
                 check_if_interrupted()
@@ -678,7 +678,7 @@ create_lock_file()
 #screen = pg.display.set_mode((350, 800), pg.RESIZABLE)
 #screen = pg.display.set_mode((1200, 350), pg.RESIZABLE)
 #screen = pg.display.set_mode((0, 0), pg.FULLSCREEN)
-screen = Surface((1920, 1200), surf.SRCALPHA, color=BACKGROUND)#pg.display.set_mode((0, 0), pg.FULLSCREEN)
+screen = Surface((1920, 1200), color=BACKGROUND)#pg.display.set_mode((0, 0), pg.FULLSCREEN)
 #pg.display.flip()
 #pg.display.set_caption("Tinymation")
 
@@ -819,7 +819,7 @@ def scale_image(surface, width=None, height=None, inv_scale=None, best_quality=F
     if not best_quality and width < surface.get_width()//2 and height < surface.get_height()//2:
         return scale_image(scale_image(surface, surface.get_width()//2, surface.get_height()//2), width, height)
 
-    ret = Surface((width, height), surf.SRCALPHA, color=surf.COLOR_UNINIT)
+    ret = Surface((width, height), color=surf.COLOR_UNINIT)
     cv2_resize_surface(surface, ret, inv_scale, best_quality)
     ret.set_alpha(surface.get_alpha())
     #ret = surf.smoothscale(surface, (width, height))
@@ -855,7 +855,7 @@ def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=19
 def add_circle(image, radius, offset=(0,1), color=(255,0,0,128), outline_color=(0,0,0,128)):
     new_width = max(image.get_width(), radius + round(image.get_width()*(1-offset[0])))
     new_height = max(image.get_height(), radius + round(image.get_height()*offset[1]))
-    result = Surface((new_width, new_height), surf.SRCALPHA)
+    result = Surface((new_width, new_height))
     xoffset = round(offset[0]*image.get_width())
     yoffset = round(offset[1]*image.get_height())
     surf.filled_circle(result, radius, yoffset, radius, outline_color)
@@ -886,7 +886,7 @@ zoom_cursor = (load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZ
 finger_cursor = load_cursor('finger.png', hot_spot=(0.85, 0.17))
 
 # for locked screen
-empty_cursor = surf2cursor(Surface((10,10), surf.SRCALPHA), 0, 0)
+empty_cursor = surf2cursor(Surface((10,10)), 0, 0)
 
 # set_cursor can fail on some machines so we don't count on it to work.
 # we set it early on to "give a sign of life" while the window is black;
@@ -1132,7 +1132,7 @@ def curr_layer_locked():
         reason_image = locked_image if movie.curr_layer().locked else invisible_image
         tw, th = scale_and_preserve_aspect_ratio(reason_image.get_width(), reason_image.get_height(), 3*da.iwidth/4, 3*da.iheight/4)
         reason_image = scale_image(reason_image, tw, th, best_quality=True)
-        fading_mask = Surface((da.iwidth, da.iheight), surf.SRCALPHA) #new_frame()
+        fading_mask = Surface((da.iwidth, da.iheight)) #new_frame()
         fading_mask.blit(reason_image, ((fading_mask.get_width()-reason_image.get_width())//2, (fading_mask.get_height()-reason_image.get_height())//2))
         fading_mask.set_alpha(192)
         da.set_fading_mask(fading_mask, prescaled_fading_mask=True)
@@ -1912,7 +1912,7 @@ def skeletonize_color_based_on_lines(color, lines, x, y):
     v = 1
     outer = [255*o for o in colorsys.hsv_to_rgb(h,s,v)]
 
-    fading_mask = Surface((flood_mask.shape[0], flood_mask.shape[1]), surf.SRCALPHA)
+    fading_mask = Surface((flood_mask.shape[0], flood_mask.shape[1]))
     fm = surf.pixels3d(fading_mask)
     for ch in range(3):
          fm[skx,sky,ch] = outer[ch]*(1-skeleton) + inner[ch]*skeleton
@@ -2435,8 +2435,8 @@ class DrawingArea(LayoutElemBase):
             self.rmargin = xmargin
 
         w, h = ((self.iwidth+self.lmargin+self.rmargin + self.iheight+self.ymargin*2)//2,)*2
-        self.zoom_surface = Surface((w,h ), surf.SRCALPHA, color=([(a+b)//2 for a,b in zip(MARGIN[:3], BACKGROUND[:3])]))
-        self.margin_surface = Surface((self.subsurface.get_width(), self.subsurface.get_height()), surf.SRCALPHA, color=MARGIN)
+        self.zoom_surface = Surface((w,h ), color=([(a+b)//2 for a,b in zip(MARGIN[:3], BACKGROUND[:3])]))
+        self.margin_surface = Surface((self.subsurface.get_width(), self.subsurface.get_height()), color=MARGIN)
         rgb = surf.pixels3d(self.zoom_surface)
         alpha = surf.pixels_alpha(self.zoom_surface)
         yv, xv = np.meshgrid(np.arange(h), np.arange(w))
@@ -2840,10 +2840,10 @@ class DrawingArea(LayoutElemBase):
 class ScrollIndicator:
     def __init__(self, w, h, vertical=False):
         self.vertical = vertical
-        self.surface = Surface((w, h), surf.SRCALPHA)
+        self.surface = Surface((w, h))
         scroll_size = (w*2, int(w*2)) if vertical else (int(h*2), h*2)
-        self.scroll_left = Surface(scroll_size, surf.SRCALPHA)
-        self.scroll_right = Surface(scroll_size, surf.SRCALPHA)
+        self.scroll_left = Surface(scroll_size)
+        self.scroll_right = Surface(scroll_size)
 
         rgb_left = surf.pixels3d(self.scroll_left)
         rgb_right = surf.pixels3d(self.scroll_right)
@@ -3348,8 +3348,8 @@ class LayersArea(LayoutElemBase):
                 if se.color is None:
                     return movie.get_thumbnail(movie.pos, self.width, self.thumbnail_height, transparent_single_layer=layer_pos)
                 image = cache.fetch(CachedLayerThumbnail()).copy()
-                si = Surface((image.get_width(), image.get_height()), surf.SRCALPHA, color=BACKGROUND)
-                s = Surface((image.get_width(), image.get_height()), surf.SRCALPHA)
+                si = Surface((image.get_width(), image.get_height()), color=BACKGROUND)
+                s = Surface((image.get_width(), image.get_height()))
                 if not self.color_images:
                     above_image = Surface((image.get_width(), image.get_height()), color=LAYERS_ABOVE)
                     above_image.set_alpha(128)
@@ -3868,7 +3868,7 @@ class Movie(MovieData):
                 id2version, computation = CachedMaskAlpha().compute_key()
                 return id2version, ('mask', rgb, transparency, computation)
             def compute_value(_):
-                mask_surface = Surface((empty_frame().get_width(), empty_frame().get_height()), surf.SRCALPHA, color=rgb)
+                mask_surface = Surface((empty_frame().get_width(), empty_frame().get_height()), color=rgb)
                 surf.pixels_alpha(mask_surface)[:] = cache.fetch(CachedMaskAlpha())
                 mask_surface.set_alpha(int(transparency*255))
                 return mask_surface
@@ -4084,7 +4084,7 @@ class Movie(MovieData):
                 return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi, inv_scale, subset)
             def compute_value(_):
                 layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
-                s = Surface((layers.get_width(), layers.get_height()), surf.SRCALPHA, color=BACKGROUND)
+                s = Surface((layers.get_width(), layers.get_height()), color=BACKGROUND)
                 if self.layer_pos == 0:
                     return s.subsurface(subset) if subset is not None else s
                 if not highlight:
@@ -4097,7 +4097,7 @@ class Movie(MovieData):
                 class BelowImage:
                     def compute_key(_): return tuple(), ('below-image', w, h)
                     def compute_value(_):
-                        below_image = Surface((w, h), surf.SRCALPHA, color=LAYERS_BELOW)
+                        below_image = Surface((w, h), color=LAYERS_BELOW)
                         below_image.set_alpha(128)
                         return below_image
                 rgba = np.copy(rgba_array(layers)) # funnily enough, this is much faster than calling array_alpha()
@@ -4128,13 +4128,13 @@ class Movie(MovieData):
                     return layers.subsurface(subset) if subset is not None else layers
 
                 layers.set_alpha(128)
-                s = Surface((layers.get_width(), layers.get_height()), surf.SRCALPHA, color=BACKGROUND)
+                s = Surface((layers.get_width(), layers.get_height()), color=BACKGROUND)
                 da = layout.drawing_area()
                 w, h = da.iwidth+da.lmargin+da.rmargin + 128, da.iheight+da.ymargin*2 + 128 #TODO: what should this really be? 128 is 2x max alignment step but in what space?..
                 class AboveImage:
                     def compute_key(_): return tuple(), ('above-image', w, h)
                     def compute_value(_):
-                        above_image = Surface((w, h), surf.SRCALPHA, color=LAYERS_ABOVE)
+                        above_image = Surface((w, h), color=LAYERS_ABOVE)
                         above_image.set_alpha(128)
                         return above_image
                 if subset is not None:
@@ -4534,7 +4534,7 @@ class Palette:
 
     def save(self, filename):
         pix = 20
-        s = Surface((self.columns*pix, self.rows*pix), surf.SRCALPHA)
+        s = Surface((self.columns*pix, self.rows*pix))
         rgb = surf.pixels3d(s)
         alpha = surf.pixels_alpha(s)
         for row in range(self.rows):
@@ -4580,7 +4580,7 @@ class PaletteElem(LayoutElemBase):
         col_width = w/palette.columns
         row_height = h/palette.rows
 
-        self.colors_image = Surface((w,h), surf.SRCALPHA)
+        self.colors_image = Surface((w,h))
         for row,col in self.row_col_perm:
             scale = 1.2 if row != 0 and row != palette.rows-1 else 1.1
             img = palette.cursors[palette.rows-row-1][col][1]
