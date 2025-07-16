@@ -12,6 +12,10 @@ class EventData:
         self.tracer = None
         self.start = 0
         self.total = 0
+        self.sum_total = 0
+        self.sum_calls = 0
+    def average(self):
+        return self.sum_total / self.sum_calls
 
 class Trace:
     '''collect trace data per event type in start()/stop(); save the
@@ -70,8 +74,10 @@ class Trace:
             return
         self.tracer.stop()
         total = time.time() - self.start_time
-        if total > self.event2data.setdefault(self._event, EventData()).total:
-            data = self.event2data[self._event]
+        data = self.event2data.setdefault(self._event, EventData())
+        data.sum_total += total
+        data.sum_calls += 1
+        if total > data.total:
             data.start = self.start_time
             data.total = total
             if data.tracer is not None:
@@ -131,7 +137,7 @@ class Trace:
         with open(os.path.join(dir, 'slowest.txt'), 'w') as f:
             for event, data in reversed(sorted(self.event2data.items(), key=lambda t: t[1].total)):
                 start = time.strftime('%H:%M:%S', time.localtime(data.start))
-                f.write(f'{data.total*1000:.2f} {event} {start}\n')
+                f.write(f'{data.total*1000:.2f} {event} {start} {data.average()*1000:.2f}\n')
         for event, data in self.event2data.items():
             # prints "Loading finish", apparently from C code, despite verbose=0
             if data.tracer is not None:
