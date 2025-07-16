@@ -11,6 +11,9 @@ import time
 #                              int bg_alpha, int fg_alpha)
 tinylib.blit_rgba8888_inplace.argtypes = [ct.c_void_p]*2 + [ct.c_int]*6
 tinylib.blit_rgba8888.argtypes = [ct.c_void_p]*3 + [ct.c_int]*7
+#export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int height,
+#                                 uniform int r, uniform int g, uniform int b, uniform int a)
+tinylib.blend_rgb_copy_alpha.argtypes = [ct.c_void_p] + [ct.c_int]*7
 tinylib.fill_32b.argtypes = [ct.c_void_p] + [ct.c_int]*3 + [ct.c_uint]
 
 COLOR_UNINIT = 'uninit'
@@ -50,6 +53,7 @@ def show_stats():
 
 blit_stat = stat('Surface.blit','pixel')
 fill_stat = stat('Surface.fill','pixel')
+blend_stat = stat('Surface.blend','pixel')
 
 # if the code were written from scratch, rather than adapted from a pygame.Surface-based implementation,
 # it might have made sense to stick with the numpy "height, width, channels" convention, different
@@ -98,6 +102,12 @@ class Surface:
         tinylib.fill_32b(self._ptr_to(0,0), self.get_width(), self.get_height(), self.bytes_per_line(), rgba)
 
         fill_stat.stop(self.get_width()*self.get_height())
+
+    def blend(self, color):
+        assert len(color) == 4
+        blend_stat.start()
+        tinylib.blend_rgb_copy_alpha(self._ptr_to(0,0), self.bytes_per_line(), self.get_width(), self.get_height(), *color)
+        blend_stat.stop(self.get_width()*self.get_height())
 
     def _ptr_to(self, x, y):
         if self._base is None:

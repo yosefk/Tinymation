@@ -66,6 +66,30 @@ export void blit_rgba8888(uniform uint32 bg_base[], const uniform uint32 fg_base
     BLIT_BODY(out_base, out_stride)
 }
 
+//blend between the RGB values of the input array with the given RGB value (giving it the weight a
+//and the input RGB values the weight 255-a), and copy the alpha as is from the input to the output
+export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int height,
+                                 uniform int r, uniform int g, uniform int b, uniform int a)
+{
+    for(uniform int y=0; y<height; ++y) {
+        uniform uint32* row = base + (stride*y>>2);
+ 
+        foreach(x=0 ... width) {
+            uint32 pix = row[x];
+            int ai = pix >> 24;
+
+            int ri = pix & 0xff;
+            int gi = (pix >> 8) & 0xff;
+            int bi = (pix >> 16) & 0xff;
+
+            int ro = round8b(r * a + ri * (255-a));
+            int go = round8b(g * a + gi * (255-a));
+            int bo = round8b(b * a + bi * (255-a));
+
+            row[x] = ro | (go<<8) | (bo<<16) | (ai<<24);
+        }
+    }
+}
 
 void fill_row(uniform uint32 base[], uniform int len, uniform uint32 value)
 {

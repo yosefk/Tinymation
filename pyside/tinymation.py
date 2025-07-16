@@ -4074,80 +4074,65 @@ class Movie(MovieData):
         alpha[x::WIDTH*3, y+1::WIDTH*3, :] = color
         alpha[x+1::WIDTH*3, y+1::WIDTH*3, :] = color
 
-    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None, subset=None):
+    def curr_bottom_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None, subset=None, transparent=False):
         if not width and not inv_scale: width=res.IWIDTH
         if not height and not inv_scale: height=res.IHEIGHT
         if not roi: roi=(0, 0, res.IWIDTH, res.IHEIGHT)
 
         class CachedBottomLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), ('blit-bottom-layers' if not highlight else 'bottom-layers-highlighted', width, height, roi, inv_scale, subset)
+                if transparent:
+                    kind = 'transparent-layers'
+                else:
+                    kind = 'blit-bottom-layers' if not highlight else 'bottom-layers-highlighted'
+                return self._visible_layers_id2version(self.layers[:self.layer_pos], pos), (kind, width, height, roi, inv_scale, subset)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
+                if transparent:
+                    return self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
+                layers = self.curr_bottom_layers_surface(pos, highlight, transparent=True)
+                layers = scale_image(layers.subsurface(roi), width, height, inv_scale)
+                layers = layers.subsurface(subset) if subset is not None else layers
+
                 s = Surface((layers.get_width(), layers.get_height()), color=BACKGROUND)
                 if self.layer_pos == 0:
-                    return s.subsurface(subset) if subset is not None else s
+                    return s
                 if not highlight:
-                    s.blit(layers, (0, 0))
-                    return s.subsurface(subset) if subset is not None else s
+                    s.blit(layers)
+                    return s
 
-                layers.set_alpha(128)
-                da = layout.drawing_area()
-                w, h = da.iwidth+da.lmargin+da.rmargin+128, da.iheight+da.ymargin*2+128
-                class BelowImage:
-                    def compute_key(_): return tuple(), ('below-image', w, h)
-                    def compute_value(_):
-                        below_image = Surface((w, h), color=LAYERS_BELOW)
-                        below_image.set_alpha(128)
-                        return below_image
-                rgba = np.copy(rgba_array(layers)) # funnily enough, this is much faster than calling array_alpha()
-                # to save a copy of just the alpha pixels [those we really need]...
-                layers.blit(cache.fetch(BelowImage()), (0,0))
-                rgba_array(layers)[:,:,3] = rgba[:,:,3]
-                if subset is not None:
-                    s = s.subsurface(subset)
-                    layers = layers.subsurface(subset)
+                layers.blend(LAYERS_BELOW + (128,))
                 self._set_undrawable_layers_grid(layers, (0,0,255))
-                s.blit(layers, (0,0))
-
+                s.blit(layers)
                 return s
 
         return cache.fetch(CachedBottomLayers())
 
-    def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None, subset=None):
+    def curr_top_layers_surface(self, pos, highlight, width=None, height=None, roi=None, inv_scale=None, subset=None, transparent=False):
         if not width and not inv_scale: width=res.IWIDTH
         if not height and not inv_scale: height=res.IHEIGHT
         if not roi: roi=(0, 0, res.IWIDTH, res.IHEIGHT)
 
         class CachedTopLayers:
             def compute_key(_):
-                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), ('blit-top-layers' if not highlight else 'top-layers-highlighted', width, height, roi, inv_scale, subset)
+                if transparent:
+                    kind = 'transparent-layers'
+                else:
+                    kind = 'blit-top-layers' if not highlight else 'top-layers-highlighted'
+                return self._visible_layers_id2version(self.layers[self.layer_pos+1:], pos), (kind, width, height, roi, inv_scale, subset)
             def compute_value(_):
-                layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
+                if transparent:
+                    return self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
+                layers = self.curr_top_layers_surface(pos, highlight, transparent=True)
+                layers = scale_image(layers.subsurface(roi), width, height, inv_scale)
+                layers = layers.subsurface(subset) if subset is not None else layers
+
                 if not highlight or self.layer_pos == len(self.layers)-1:
-                    return layers.subsurface(subset) if subset is not None else layers
+                    return layers
 
-                layers.set_alpha(128)
-                s = Surface((layers.get_width(), layers.get_height()), color=BACKGROUND)
-                da = layout.drawing_area()
-                w, h = da.iwidth+da.lmargin+da.rmargin + 128, da.iheight+da.ymargin*2 + 128 #TODO: what should this really be? 128 is 2x max alignment step but in what space?..
-                class AboveImage:
-                    def compute_key(_): return tuple(), ('above-image', w, h)
-                    def compute_value(_):
-                        above_image = Surface((w, h), color=LAYERS_ABOVE)
-                        above_image.set_alpha(128)
-                        return above_image
-                if subset is not None:
-                    s = s.subsurface(subset)
-                    layers = layers.subsurface(subset)
-                rgba = np.copy(rgba_array(layers))
-                layers.blit(cache.fetch(AboveImage()), (0,0))
+                layers.blend(LAYERS_ABOVE + (128,))
+                layers.set_alpha(192)
                 self._set_undrawable_layers_grid(layers, (255,0,0), x=WIDTH*3//2, y=WIDTH**3//2)
-                s.blit(layers, (0,0))
-                rgba_array(s)[:,:,3] = rgba[:,:,3]
-                s.set_alpha(192)
-
-                return s
+                return layers
 
         return cache.fetch(CachedTopLayers())
 

@@ -18,6 +18,7 @@
     smooth_polyline;
     blit_rgba8888;
     blit_rgba8888_inplace;
+    blend_rgb_copy_alpha;
     fill_32b;
   local: *;
 };

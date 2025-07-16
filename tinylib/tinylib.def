@@ -18,4 +18,5 @@ EXPORTS
     smooth_polyline @16
     blit_rgba8888 @17
     blit_rgba8888_inplace @18
-	fill_32b @19
+    blend_rgb_copy_alpha @19
+	fill_32b @20
