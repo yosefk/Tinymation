@@ -799,7 +799,7 @@ def cv2_resize_surface(src, dst, inv_scale=None, best_quality=False):
     else:
         cv2.resize(iattached, (owidth,oheight), oattached, interpolation=method)
 
-def scale_image(surface, width=None, height=None, inv_scale=None, best_quality=False):
+def scaled_image_size(iwidth, iheight, width=None, height=None, inv_scale=None):
     assert width or height or inv_scale
 
     if inv_scale is not None:
@@ -808,13 +808,18 @@ def scale_image(surface, width=None, height=None, inv_scale=None, best_quality=F
         #                 saturate_cast<int>(ssize.height*inv_scale_y));
         # from fast_math.hpp:
         # template<> inline int saturate_cast<int>(double v)           { return cvRound(v); }
-        width = round(surface.get_width() * inv_scale)
-        height = round(surface.get_height() * inv_scale)
+        width = round(iwidth * inv_scale)
+        height = round(iheight * inv_scale)
         
     if not height:
-        height = int(surface.get_height() * width / surface.get_width())
+        height = int(iheight * width / iwidth)
     if not width:
-        width = int(surface.get_width() * height / surface.get_height())
+        width = int(iwidth * height / iheight)
+
+    return width, height
+
+def scale_image(surface, width=None, height=None, inv_scale=None, best_quality=False):
+    width, height = scaled_image_size(surface.get_width(), surface.get_height(), width, height, inv_scale)
 
     if not best_quality and width < surface.get_width()//2 and height < surface.get_height()//2:
         return scale_image(scale_image(surface, surface.get_width()//2, surface.get_height()//2), width, height)
@@ -4078,8 +4083,18 @@ class Movie(MovieData):
             def compute_value(_):
                 if transparent:
                     return self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
-                layers = self.curr_bottom_layers_surface(pos, highlight, transparent=True)
-                layers = scale_image(layers.subsurface(roi), width, height, inv_scale)
+
+                swidth, sheight = scaled_image_size(res.IWIDTH, res.IHEIGHT, width, height, inv_scale)
+                if swidth*sheight < (res.IWIDTH*res.IHEIGHT)*0.1:
+                    # for small thumbnails, faster to blit scaled layers since we have cached scaled thumbnails per layer which remain valid
+                    # while scrolling the timeline or area list
+                    layers = self._blit_layers(self.layers[:self.layer_pos], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
+                else:
+                    # for large surfaces / drawing area, faster to blit in full resolution first and cache the result, so that when the zoom
+                    # changes, we only need to scale the ROI.
+                    layers = self.curr_bottom_layers_surface(pos, highlight, transparent=True)
+                    layers = scale_image(layers.subsurface(roi), width, height, inv_scale)
+
                 layers = layers.subsurface(subset) if subset is not None else layers
 
                 s = Surface((layers.get_width(), layers.get_height()), color=BACKGROUND)
@@ -4111,8 +4126,14 @@ class Movie(MovieData):
             def compute_value(_):
                 if transparent:
                     return self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
-                layers = self.curr_top_layers_surface(pos, highlight, transparent=True)
-                layers = scale_image(layers.subsurface(roi), width, height, inv_scale)
+
+                swidth, sheight = scaled_image_size(res.IWIDTH, res.IHEIGHT, width, height, inv_scale)
+                if swidth*sheight < (res.IWIDTH*res.IHEIGHT)*0.1:
+                    layers = self._blit_layers(self.layers[self.layer_pos+1:], pos, transparent=True, width=width, height=height, roi=roi, inv_scale=inv_scale)
+                else:
+                    layers = self.curr_top_layers_surface(pos, highlight, transparent=True)
+                    layers = scale_image(layers.subsurface(roi), width, height, inv_scale)
+
                 layers = layers.subsurface(subset) if subset is not None else layers
 
                 if not highlight or self.layer_pos == len(self.layers)-1:
