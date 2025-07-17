@@ -280,8 +280,10 @@ def pixels_alpha(surface):
     return surface._a[:,:,3]
 
 def box(surface, rect, color):
-    assert len(color)==3
-    surface.subsurface(rect).fill(color)
+    if len(color) == 3:
+        surface.subsurface(rect).fill(color)
+    else:
+        surface.subsurface(rect).blend(color)
 
 def rect(surface, color, rect, *rest):
     pass

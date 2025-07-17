@@ -2436,7 +2436,6 @@ class DrawingArea(LayoutElemBase):
 
         w, h = ((self.iwidth+self.lmargin+self.rmargin + self.iheight+self.ymargin*2)//2,)*2
         self.zoom_surface = Surface((w,h ), color=([(a+b)//2 for a,b in zip(MARGIN[:3], BACKGROUND[:3])]))
-        self.margin_surface = Surface((self.subsurface.get_width(), self.subsurface.get_height()), color=MARGIN)
         rgb = surf.pixels3d(self.zoom_surface)
         alpha = surf.pixels_alpha(self.zoom_surface)
         yv, xv = np.meshgrid(np.arange(h), np.arange(w))
@@ -2771,17 +2770,7 @@ class DrawingArea(LayoutElemBase):
         end_y = start_y + self.zoom_surface.get_height()
 
         def box(x,y,w,h):
-            if x<0:
-                w += x
-                x = 0
-            if y<0:
-                h += y
-                y = 0
-            if w<=0 or h<=0:
-                return
-            w = min(w,self.margin_surface.get_width())
-            h = min(h,self.margin_surface.get_height())
-            surface.blit(self.margin_surface.subsurface((0,0,w,h)), (x,y))
+            surf.box(surface, (x,y,w,h), MARGIN)
 
         box(sx, sy, self.subsurface.get_width(), start_y)
         box(sx, sy+end_y, self.subsurface.get_width(), self.subsurface.get_height())
