@@ -180,7 +180,10 @@ class Frame:
         if self.layer_id:
             fname = os.path.join(f'layer-{self.layer_id}', fname)
         fname = os.path.join(self.dir, fname)
-        return fname+'png', fname+'bmp'
+        return fname+'png', fname+'tif' # "BMP" means "uncompressed format"; this worked with pygame
+        # but Qt works with TIFF but omits the alpha channel with a .bmp file. Since these files aren't kept
+        # around for long, we really don't care what format they are except that they're written out quickly -
+        # it's about 10x faster than writing a compressed PNG
     def wait_for_compression_to_finish(self):
         if self.compression_subprocess:
             self.compression_subprocess.wait()
@@ -607,7 +610,6 @@ print('>>> STARTING',format_now())
 
 
 import subprocess
-import pygame.gfxdraw
 import math
 import io
 import shutil
@@ -863,8 +865,8 @@ def add_circle(image, radius, offset=(0,1), color=(255,0,0,128), outline_color=(
     result = Surface((new_width, new_height))
     xoffset = round(offset[0]*image.get_width())
     yoffset = round(offset[1]*image.get_height())
+    radius -= .5
     surf.filled_circle(result, radius, yoffset, radius, outline_color)
-    surf.filled_circle(result, radius, yoffset, radius-WIDTH+1, (0,0,0,0))
     surf.filled_circle(result, radius, yoffset, radius-WIDTH+1, color)
     result.blit(image, (radius-xoffset, 0))
     return result, (radius, yoffset)
@@ -1137,7 +1139,7 @@ def curr_layer_locked():
         reason_image = locked_image if movie.curr_layer().locked else invisible_image
         tw, th = scale_and_preserve_aspect_ratio(reason_image.get_width(), reason_image.get_height(), 3*da.iwidth/4, 3*da.iheight/4)
         reason_image = scale_image(reason_image, tw, th, best_quality=True)
-        fading_mask = Surface((da.iwidth, da.iheight)) #new_frame()
+        fading_mask = Surface(da.subsurface.get_size()) #new_frame()
         fading_mask.blit(reason_image, ((fading_mask.get_width()-reason_image.get_width())//2, (fading_mask.get_height()-reason_image.get_height())//2))
         fading_mask.set_alpha(192)
         da.set_fading_mask(fading_mask, prescaled_fading_mask=True)
@@ -4870,16 +4872,6 @@ class History:
         self.redo = []
         self.suggestions = None
 
-def clear_history():
-    history.clear()
-    fading_mask = new_frame()
-    text_surface = font.render("Current Clip's\nUndo/Redo History\nDeleted!", True, (255, 0, 0), (255, 255, 255))
-    fading_mask.blit(text_surface, ((fading_mask.get_width()-text_surface.get_width())/2, (fading_mask.get_height()-text_surface.get_height())/2))
-    fading_mask.set_alpha(255)
-    drawing_area = layout.drawing_area()
-    drawing_area.set_fading_mask(fading_mask)
-    drawing_area.fade_per_frame = 255/(FADING_RATE*10)
-
 escape = False
 
 user_event_offset = 0
@@ -5045,11 +5037,6 @@ def process_keydown_event(event):
     # isn't a drawing change)
     if event.key() == Qt.Key_Z and ctrl:
         history.undo_item(drawing_changes_only=False)
-        return
-
-    # Ctrl+Shift+Delete
-    if event.key() == Qt.Key_Delete and ctrl and shift:
-        clear_history()
         return
 
     # Ctrl-E: export

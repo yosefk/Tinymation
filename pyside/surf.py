@@ -63,6 +63,9 @@ blit_stat = stat('Surface.blit','pixel')
 blits_stat = stat('Surface.blits','pixel')
 fill_stat = stat('Surface.fill','pixel')
 blend_stat = stat('Surface.blend','pixel')
+load_stat = stat('surf.load','pixel')
+png_save_stat = stat('surf.save(png)','pixel')
+uncompressed_save_stat = stat('surf.save(uncompressed)','pixel')
 
 # if the code were written from scratch, rather than adapted from a pygame.Surface-based implementation,
 # it might have made sense to stick with the numpy "height, width, channels" convention, different
@@ -95,6 +98,9 @@ class Surface:
 
     def get_rect(self):
         return (0, 0, self.get_width(), self.get_height())
+
+    def get_size(self):
+        return self._a.shape[:2]
 
     def bytes_per_line(self):
         return self._a.strides[1]
@@ -172,8 +178,9 @@ class Surface:
 
         if not foregrounds:
             return
-        for foreground in foregrounds:
-            assert foreground.get_rect() == foregrounds[0].get_rect()
+        sizes = [fg.get_size() for fg in foregrounds]
+        for size in sizes:
+            assert size == sizes[0], sizes
 
         bgx, bgy, fgx, fgy, blitw, blith = background._blit_args(foregrounds[0], xy)
         surfaces_to_blit = (SurfaceToBlit * (len(foregrounds) + 1))()
@@ -203,12 +210,17 @@ class Surface:
     def empty_like(self):
         return Surface((self.get_width(), self.get_height()), alpha=self._alpha, color=COLOR_UNINIT)
 
-    def subsurface(self, *args):
+    def subsurface(self, *args, clip=False):
         assert len(args) in [1, 4]
         if len(args) == 1:
             x,y,w,h = [round(i) for i in args[0]]
         else:
             x,y,w,h = [round(i) for i in args]
+
+        if not clip:
+            if x < 0 or y < 0 or x+w > self.get_width() or y+h > self.get_height():
+                raise ValueError("subsurface rectangle outside surface area")
+
         if x < 0:
             w += x
             x = 0
@@ -241,6 +253,9 @@ class Surface:
     def qimage(self): return self.qimage_unsafe().copy()
 
 def load(fname):
+
+    load_stat.start()
+
     img = QImage(fname)
     
     if img.isNull():
@@ -262,12 +277,18 @@ def load(fname):
     ptr = img.bits()
     arr = np.ndarray((width, height, 4), buffer=ptr, strides=(4, width*4, 1), dtype=np.uint8)
 
-    return Surface(strides_preserving_copy(arr))
+    ret = Surface(strides_preserving_copy(arr))
+
+    load_stat.stop(width*height)
+
+    return ret
 
 def save(surface, filename):
+    ext = filename.split('.')[-1]
+    stat = png_save_stat if ext=='png' else uncompressed_save_stat
+    stat.start()
     surface.qimage_unsafe().save(filename)
-
-#    return pg.image.save(surface.surface, filename)
+    stat.stop(surface.get_width() * surface.get_height())
 
 def rotate(surface, angle):
     return surface # FIXME
@@ -280,16 +301,48 @@ def pixels_alpha(surface):
     return surface._a[:,:,3]
 
 def box(surface, rect, color):
+    sub = surface.subsurface(rect, clip=True)
     if len(color) == 3:
-        surface.subsurface(rect).fill(color)
+        sub.fill(color)
     else:
-        surface.subsurface(rect).blend(color)
+        sub.blend(color)
 
-def rect(surface, color, rect, *rest):
-    pass
-#    return pg.draw.rect(surface.surface, color, rect, *rest)
+def rect(surface, color, rect, width=0, border_radius=0):
+    if width == 0:
+        box(surface, rect, color)
+    else:
+        x,y,w,h = rect
+        box(surface, (x,y,width,h), color)
+        box(surface, (x,y,w,width), color)
+        box(surface, (x+w-width,y,width,h), color)
+        box(surface, (x,y+h-width,w,width), color)
 
-def filled_circle(surface, x, y, radius, color):
-    pass
-#    return pg.gfxdraw.filled_circle(surface.surface, x, y, radius, color)
+def filled_circle(surface, cx, cy, radius, color):
+    '''a very inefficient filled_circle, needn't do better atm since this is only done for cursors at init time'''
+    # Create output RGBA array, initialized to transparent (0, 0, 0, 0)
+    tmp_surf = Surface(surface.get_size())
+    img = tmp_surf._a
+    width = surface.get_width()
+    height = surface.get_height()
+    
+    # Create meshgrid for pixel coordinates
+    x, y = np.meshgrid(np.arange(width), np.arange(height), indexing='ij')
+    
+    # Calculate distance from each pixel to the center
+    distance = np.sqrt((x - cx)**2 + (y - cy)**2)
+    
+    # Anti-aliasing: smooth transition over a 1-pixel boundary
+    # Fully opaque inside (distance <= radius - 0.5)
+    # Linearly interpolated alpha between radius - 0.5 and radius + 0.5
+    # Transparent outside (distance > radius + 0.5)
+    alpha = np.clip(0.5 - (distance - radius), 0, 1)
+    
+    # Set color where alpha > 0
+    mask = alpha > 0
+    for i in range(3):  # Set RGB channels
+        img[mask, i] = color[i]
+    img[mask, 3] = alpha[mask] * color[3]  # Alpha channel, scaled by input alpha
+
+    surface.blit(tmp_surf)
+    
 
