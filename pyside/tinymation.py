@@ -396,7 +396,7 @@ class MovieData:
                 surfaces.append(f.surf_by_id('lines'))
             else:
                 surfaces.append(movie.get_thumbnail(pos, width, height, transparent_single_layer=self.layers.index(layer), roi=roi, inv_scale=inv_scale))
-        s.blits([(surface, (0, 0), (0, 0, s.get_width(), s.get_height())) for surface in surfaces])
+        s.blits(surfaces)
         return s
 
 
@@ -2640,7 +2640,7 @@ class DrawingArea(LayoutElemBase):
             if self.fading_mask:
                 surfaces.append(self.scaled_fading_mask())
 
-        self.subsurface.blits([(surface, starting_point) for surface in surfaces])
+        self.subsurface.blits(surfaces, starting_point)
 
         margin_area = (starting_point[0], starting_point[1], scaled_roi_subset[2], scaled_roi_subset[3])
 
@@ -3051,7 +3051,7 @@ class TimelineArea(LayoutElemBase):
                     for m in masks[1:]:
                         alphas.append(m.get_alpha())
                         m.set_alpha(255) # TODO: this assumes the same transparency in all masks - might want to change
-                    mask.blits([(m, (0, 0)) for m in masks[1:]])
+                    mask.blits(masks[1:])
                     for m,a in zip(masks[1:],alphas):
                         m.set_alpha(a)
                     return mask

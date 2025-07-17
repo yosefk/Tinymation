@@ -9,12 +9,20 @@ import time
 #extern "C" void blit_rgba8888(uint8_t* __restrict bg_base, const uint8_t* __restrict fg_base,
 #                              int bg_stride, int fg_stride, int width, int height,
 #                              int bg_alpha, int fg_alpha)
+tinylib.blits_rgba8888_inplace.argtypes = [ct.c_void_p] + [ct.c_int]*3
 tinylib.blit_rgba8888_inplace.argtypes = [ct.c_void_p]*2 + [ct.c_int]*6
 tinylib.blit_rgba8888.argtypes = [ct.c_void_p]*3 + [ct.c_int]*7
 #export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int height,
 #                                 uniform int r, uniform int g, uniform int b, uniform int a)
 tinylib.blend_rgb_copy_alpha.argtypes = [ct.c_void_p] + [ct.c_int]*7
 tinylib.fill_32b.argtypes = [ct.c_void_p] + [ct.c_int]*3 + [ct.c_uint]
+
+class SurfaceToBlit(ct.Structure):
+    _fields_ = [
+        ('base', ct.c_void_p),
+        ('stride', ct.c_int),
+        ('alpha', ct.c_int),
+    ]
 
 COLOR_UNINIT = 'uninit'
 
@@ -52,6 +60,7 @@ def show_stats():
         s.show()
 
 blit_stat = stat('Surface.blit','pixel')
+blits_stat = stat('Surface.blits','pixel')
 fill_stat = stat('Surface.fill','pixel')
 blend_stat = stat('Surface.blend','pixel')
 
@@ -114,8 +123,7 @@ class Surface:
             self._base = self._a.ctypes.data_as(ct.c_void_p)
         return ct.c_void_p(self._base.value + y * self.bytes_per_line() + x * 4)
 
-    def blit(background, foreground, xy=(0,0), rect=None, into=None):
-        assert rect is None or rect == foreground.get_rect() # whatever rect does in pygame, tinymation never really used it
+    def _blit_args(background, foreground, xy):
         x, y = xy
         x, y = round(x), round(y)
         xw = min(x + foreground.get_width(), background.get_width())
@@ -126,26 +134,68 @@ class Surface:
         x = max(x, 0)
         y = max(y, 0)
 
-        # FIXME: add assertions on sizes!!
+        blitw = xw - x
+        blith = yh - y
+        assert x + blitw <= background.get_width()
+        assert y + blith <= background.get_height()
+        assert fg_x_oft + blitw <= foreground.get_width()
+        assert fg_y_oft + blith <= foreground.get_height()
+
+        return x, y, fg_x_oft, fg_y_oft, blitw, blith
+
+    def blit(background, foreground, xy=(0,0), rect=None, into=None):
+        assert rect is None or rect == foreground.get_rect() # whatever rect does in pygame, tinymation never really used it
+
+        bgx, bgy, fgx, fgy, blitw, blith = background._blit_args(foreground, xy)
 
         blit_stat.start()
 
         if into is None: 
-            tinylib.blit_rgba8888_inplace(background._ptr_to(x,y), foreground._ptr_to(fg_x_oft, fg_y_oft),
+            tinylib.blit_rgba8888_inplace(background._ptr_to(bgx, bgy), foreground._ptr_to(fgx, fgy),
                                           background.bytes_per_line(), foreground.bytes_per_line(),
-                                          xw - x, yh - y,
+                                          blitw, blith,
                                           background.get_alpha(), foreground.get_alpha())
         else:
-            tinylib.blit_rgba8888(background._ptr_to(x,y), foreground._ptr_to(fg_x_oft, fg_y_oft), into._ptr_to(x,y),
+            tinylib.blit_rgba8888(background._ptr_to(bgx, bgy), foreground._ptr_to(fgx, fgy), into._ptr_to(bgx, bgy),
                                   background.bytes_per_line(), foreground.bytes_per_line(), into.bytes_per_line(),
-                                  xw - x, yh - y,
+                                  blitw, blith,
                                   background.get_alpha(), foreground.get_alpha())
 
-        blit_stat.stop((xw-x)*(yh-y))
+        blit_stat.stop(blitw*blith)
 
-    def blits(self, blit_sequence):
-        for args in blit_sequence:
-            self.blit(*args)
+    def blits(background, foregrounds, xy=(0,0)):
+        '''logically equivalent to, but faster than (2x-ish thanks to less cache spills):
+
+        for fg in foregrounds:
+            background.blit(fg, xy)
+        '''
+
+        if not foregrounds:
+            return
+        for foreground in foregrounds:
+            assert foreground.get_rect() == foregrounds[0].get_rect()
+
+        bgx, bgy, fgx, fgy, blitw, blith = background._blit_args(foregrounds[0], xy)
+        surfaces_to_blit = (SurfaceToBlit * (len(foregrounds) + 1))()
+        
+        bg = surfaces_to_blit[0]
+        bg.base = background._ptr_to(bgx, bgy)
+        bg.stride = background.bytes_per_line()
+        bg.alpha = background._alpha
+
+        i = 1
+        for foreground in foregrounds:
+            fg = surfaces_to_blit[i]
+            fg.base = foreground._ptr_to(fgx, fgy)
+            fg.stride = foreground.bytes_per_line()
+            fg.alpha = foreground._alpha
+            i += 1
+
+        blits_stat.start()
+
+        tinylib.blits_rgba8888_inplace(surfaces_to_blit, len(surfaces_to_blit), blitw, blith)
+
+        blits_stat.stop(blitw * blith * len(foregrounds))
 
     def copy(self):
         return Surface(strides_preserving_copy(self._a), alpha=self._alpha)

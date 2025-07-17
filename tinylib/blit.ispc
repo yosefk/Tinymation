@@ -66,6 +66,32 @@ export void blit_rgba8888(uniform uint32 bg_base[], const uniform uint32 fg_base
     BLIT_BODY(out_base, out_stride)
 }
 
+struct SurfaceToBlit
+{
+    uniform uint32* base;
+    uniform int stride;
+    uniform int alpha;
+};
+
+export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int n, uniform int width, uniform int height)
+{
+    //assuming a 16K L1 d-cache, we can fit 2 rows of 1920 pixels into the cache;
+    //one from the background and one from one of the foregrounds.
+    //so we iterate over all the ys, and blit all the foreground rows onto the background row,
+    //in the hope to avoid evicting the background and then having to read it again for every foreground.
+    for(uniform int y=0; y<height; ++y) {
+	uniform SurfaceToBlit& bg = surfaces[0];
+	uniform uint32* uniform bg_base = bg.base + (bg.stride * y >> 2);
+    	for(uniform int i=1; i<n; ++i) {
+	    uniform SurfaceToBlit& fg = surfaces[i];
+	    //the for SurfaceToBlit& as opposed to SurfaceToBlit* to satisfy "uniform/
+	    //varying" type reqs is peculiar
+            uniform uint32* uniform fg_base = fg.base + (fg.stride * y >> 2);
+	    blit_rgba8888_inplace(bg_base, fg_base, 0, 0, width, 1, bg.alpha, fg.alpha);
+	}
+    }
+}
+
 //blend between the RGB values of the input array with the given RGB value (giving it the weight a
 //and the input RGB values the weight 255-a), and copy the alpha as is from the input to the output
 export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int height,
