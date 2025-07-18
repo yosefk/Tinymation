@@ -21,6 +21,7 @@
     blits_rgba8888_inplace;
     blend_rgb_copy_alpha;
     blit_layers_mask;
+    blit_combined_mask;
     fill_32b;
   local: *;
 };

@@ -21,4 +21,5 @@ EXPORTS
     blits_rgba8888_inplace @19
     blend_rgb_copy_alpha @20
     blit_layers_mask @21
-	fill_32b @22
+    blit_combined_mask @22
+	fill_32b @23

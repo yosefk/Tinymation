@@ -783,6 +783,17 @@ class LayerParamsForMask(ct.Structure):
 #                             uniform uint8 mask_base[], uniform int mask_stride, uniform int width, uniform int height)
 tinylib.blit_layers_mask.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*3
 
+class MaskAlphaParams(ct.Structure):
+    _fields_ = [
+        ('base', ct.c_void_p),
+        ('stride', ct.c_int),
+        ('rgb', ct.c_uint32),
+    ]
+
+#export void blit_combined_mask(uniform MaskAlphaParams mask_alphas[], uniform int n,
+#                               uniform uint32 mask_base[], uniform int mask_stride, uniform int width, uniform int height)
+tinylib.blit_combined_mask.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*3
+
 def rgba_array(surface):
     return surface._a
 
@@ -3074,6 +3085,18 @@ class TimelineArea(LayoutElemBase):
                     mask.set_alpha(orig_alpha)
                     return mask
 
+        def combine_mask_alphas(mask_alphas):
+            mask_params = (MaskAlphaParams * len(mask_alphas))()
+            for params, (alpha, rgb) in zip(mask_params, mask_alphas):
+                assert alpha.shape == (res.IWIDTH, res.IHEIGHT)
+                params.base = arr_base_ptr(alpha)
+                params.stride = alpha.strides[1]
+                params.rgb = rgb[0] | (rgb[1]<<8) | (rgb[2]<<16);
+
+            combined_mask = Surface((res.IWIDTH, res.IHEIGHT), color=surf.COLOR_UNINIT, alpha=int(.3*255))
+            tinylib.blit_combined_mask(mask_params, len(mask_params), combined_mask.base_ptr(), combined_mask.bytes_per_line(), res.IWIDTH, res.IHEIGHT)
+            return combined_mask
+
         class CachedCombinedMask:
             def __init__(s, light_table_positions, skip_layer=None, lowest_layer_pos=None):
                 s.light_table_positions = light_table_positions
@@ -3092,8 +3115,8 @@ class TimelineArea(LayoutElemBase):
             def compute_value(s):
                 masks = []
                 for pos, color, transparency in s.light_table_positions:
-                    masks.append(movie.get_mask(pos, color, transparency, lowest_layer_pos=s.lowest_layer_pos, skip_layer=s.skip_layer))
-                return combine_masks(masks)
+                    masks.append((movie.get_mask(pos, color, transparency, lowest_layer_pos=s.lowest_layer_pos, skip_layer=s.skip_layer), color))
+                return combine_mask_alphas(masks)
 
         rest_mask = CachedCombinedMask(rest_positions)
         held_mask_outside = CachedCombinedMask(held_positions, skip_layer=movie.layer_pos)
@@ -3884,6 +3907,10 @@ class Movie(MovieData):
                 alpha = np.ndarray((res.IWIDTH, res.IHEIGHT), strides=(1, res.IWIDTH), dtype=np.uint8)
                 tinylib.blit_layers_mask(layer_params, len(layer_params), arr_base_ptr(alpha), alpha.strides[1], alpha.shape[0], alpha.shape[1])
                 return alpha
+
+        if key:
+            return CachedMaskAlpha().compute_key()
+        return cache.fetch(CachedMaskAlpha())
 
         class CachedMask:
             def compute_key(_):

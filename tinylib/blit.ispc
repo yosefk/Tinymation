@@ -169,6 +169,57 @@ export void blit_layers_mask(uniform LayerParamsForMask layers[], uniform int n,
     }
 }
 
+struct MaskAlphaParams
+{
+    uint8* base;
+    int stride;
+    uint32 rgb; //the high byte should be 0
+};
+
+export void blit_combined_mask(uniform MaskAlphaParams mask_alphas[], uniform int n,
+                               uniform uint32 mask_base[], uniform int mask_stride, uniform int width, uniform int height)
+{
+    for(uniform int y=0; y<height; ++y) {
+        uniform uint32* mask_row = mask_base + (mask_stride * y >> 2);
+
+	for(uniform int i=0; i<n; ++i) {
+	    uniform MaskAlphaParams& mask_alpha = mask_alphas[i];
+	    uint8* alpha = mask_alpha.base + mask_alpha.stride * y;
+	    uint32 rgb = mask_alpha.rgb;
+	    int r = rgb & 0xff;
+	    int g = (rgb >> 8) & 0xff;
+	    int b = (rgb >> 16) & 0xff;
+	    if(i == 0) { //fill the row with the RGB value, and copy the alpha value from mask_alphas
+	        foreach(x=0 ... width) {
+		    int fg_alpha = alpha[x];
+		    mask_row[x] = rgb | (fg_alpha << 24);
+		}
+	    }
+	    else { //in fully transparent mask pixels, put the new rgb color and copy the alpha.
+	        //in not entirely transparent mask pixels, blend the new rgb color with the existing
+		//color (weighed by the mask alpha - closer to the new color where it's less transparent)
+	        //and take the maximum of the alpha 
+	        foreach(x=0 ... width) {
+		    uint32 pix = mask_row[x];
+		    int fg_alpha = alpha[x];
+
+                    int ri = pix & 0xff;
+                    int gi = (pix >> 8) & 0xff;
+                    int bi = (pix >> 16) & 0xff;
+		    int ai = pix >> 24;
+
+	            int ro = round8b(r * fg_alpha + ri * (255-fg_alpha));
+                    int go = round8b(g * fg_alpha + gi * (255-fg_alpha));
+                    int bo = round8b(b * fg_alpha + bi * (255-fg_alpha));
+		    int ao = ai > fg_alpha ? ai : fg_alpha;
+
+                    mask_row[x] = ro | (go<<8) | (bo<<16) | (ao<<24);
+                }
+	    }
+	}
+    }
+}
+
 void fill_row(uniform uint32 base[], uniform int len, uniform uint32 value)
 {
     foreach(x=0 ... len) {
