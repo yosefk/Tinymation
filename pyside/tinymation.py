@@ -771,6 +771,18 @@ tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ct.c_void_p]*3 + [ct.c_
 
 tinylib.fitpack_parcur.argtypes = [ct.c_void_p]*2 + [ct.c_int]*3 + [ct.c_double] + [ct.c_void_p]*3
 
+class LayerParamsForMask(ct.Structure):
+    _fields_ = [
+        ('lines_base', ct.c_void_p),
+        ('color_base', ct.c_void_p),
+        ('lines_stride', ct.c_int),
+        ('color_stride', ct.c_int),
+        ('lines_lit', ct.c_int),
+    ]
+#export void blit_layers_mask(uniform LayerParamsForMask layers[], uniform int n,
+#                             uniform uint8 mask_base[], uniform int mask_stride, uniform int width, uniform int height)
+tinylib.blit_layers_mask.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*3
+
 def rgba_array(surface):
     return surface._a
 
@@ -3050,6 +3062,8 @@ class TimelineArea(LayoutElemBase):
                     return masks[0]
                 else:
                     mask = masks[0].copy()
+                    orig_alpha = mask.get_alpha()
+                    mask.set_alpha(255)
                     alphas = []
                     for m in masks[1:]:
                         alphas.append(m.get_alpha())
@@ -3057,6 +3071,7 @@ class TimelineArea(LayoutElemBase):
                     mask.blits(masks[1:])
                     for m,a in zip(masks[1:],alphas):
                         m.set_alpha(a)
+                    mask.set_alpha(orig_alpha)
                     return mask
 
         class CachedCombinedMask:
@@ -3855,15 +3870,19 @@ class Movie(MovieData):
                 lines = tuple([lines_lit(layer) for layer in layers])
                 return tuple([frame.cache_id_version() for frame in frames if not frame.empty()]), ('mask-alpha', lines)
             def compute_value(_):
-                alpha = np.zeros((empty_frame().get_width(), empty_frame().get_height()))
-                for layer in layers:
+                layer_params = (LayerParamsForMask * len(layers))()
+                for params, layer in zip(layer_params, layers):
                     frame = layer.frame(pos)
-                    pen = surf.pixels_alpha(frame.surf_by_id('lines'))
-                    color = surf.pixels_alpha(frame.surf_by_id('color'))
-                    # hide the areas colored by this layer, and expose the lines of these layer (the latter, only if it's lit and not held)
-                    alpha[:] = np.minimum(255-color, alpha)
-                    if lines_lit(layer):
-                        alpha[:] = np.maximum(pen, alpha)
+                    lines = frame.surf_by_id('lines')
+                    color = frame.surf_by_id('color')
+                    params.color_base = color.base_ptr()
+                    params.color_stride = color.bytes_per_line()
+                    params.lines_base = lines.base_ptr()
+                    params.lines_stride = lines.bytes_per_line()
+                    params.lines_lit = lines_lit(layer)
+
+                alpha = np.ndarray((res.IWIDTH, res.IHEIGHT), strides=(1, res.IWIDTH), dtype=np.uint8)
+                tinylib.blit_layers_mask(layer_params, len(layer_params), arr_base_ptr(alpha), alpha.strides[1], alpha.shape[0], alpha.shape[1])
                 return alpha
 
         class CachedMask:

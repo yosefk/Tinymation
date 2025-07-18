@@ -114,20 +114,23 @@ class Surface:
         #self._a[:,:] = np.array(color) 
 
         rgba = color[0] | (color[1]<<8) | (color[2]<<16) | (color[3]<<24)
-        tinylib.fill_32b(self._ptr_to(0,0), self.get_width(), self.get_height(), self.bytes_per_line(), rgba)
+        tinylib.fill_32b(self.base_ptr(), self.get_width(), self.get_height(), self.bytes_per_line(), rgba)
 
         fill_stat.stop(self.get_width()*self.get_height())
 
     def blend(self, color):
         assert len(color) == 4
         blend_stat.start()
-        tinylib.blend_rgb_copy_alpha(self._ptr_to(0,0), self.bytes_per_line(), self.get_width(), self.get_height(), *color)
+        tinylib.blend_rgb_copy_alpha(self.base_ptr(), self.bytes_per_line(), self.get_width(), self.get_height(), *color)
         blend_stat.stop(self.get_width()*self.get_height())
 
-    def _ptr_to(self, x, y):
+    def base_ptr(self):
         if self._base is None:
             self._base = self._a.ctypes.data_as(ct.c_void_p)
-        return ct.c_void_p(self._base.value + y * self.bytes_per_line() + x * 4)
+        return self._base.value
+
+    def _ptr_to(self, x, y):
+        return ct.c_void_p(self.base_ptr() + y * self.bytes_per_line() + x * 4)
 
     def _blit_args(background, foreground, xy):
         x, y = xy
@@ -247,7 +250,7 @@ class Surface:
         w, h, _ = self._a.shape
         bytes_per_line = self.bytes_per_line()
         # without the cast, if we just pass ptr_to(0,0), we get garbage pixel data, I wonder what's happening there
-        ibuffer = ct.cast(self._ptr_to(0,0), ct.POINTER(ct.c_uint8 * (w * bytes_per_line * 4))).contents
+        ibuffer = ct.cast(self.base_ptr(), ct.POINTER(ct.c_uint8 * (w * bytes_per_line * 4))).contents
         return QImage(ibuffer, w, h, bytes_per_line, QImage.Format_RGBA8888)
 
     def qimage(self): return self.qimage_unsafe().copy()

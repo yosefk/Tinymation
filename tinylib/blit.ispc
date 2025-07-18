@@ -68,9 +68,9 @@ export void blit_rgba8888(uniform uint32 bg_base[], const uniform uint32 fg_base
 
 struct SurfaceToBlit
 {
-    uniform uint32* base;
-    uniform int stride;
-    uniform int alpha;
+    uint32* base;
+    int stride;
+    int alpha;
 };
 
 export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int n, uniform int width, uniform int height)
@@ -114,6 +114,58 @@ export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uni
 
             row[x] = ro | (go<<8) | (bo<<16) | (ai<<24);
         }
+    }
+}
+
+struct LayerParamsForMask
+{
+    uint32* lines_base;
+    uint32* color_base;
+    int lines_stride;
+    int color_stride;
+    int lines_lit; //boolean - if the lines are on the light table, we add them to the mask, otherwise
+    //we only remove the parts of lower layers covered by this layer's color surface from the mask
+    //note that ispc doesn't like null pointers being passed to it, allegedly or we could set line_base to 0
+    //instead of having a flag
+};
+
+export void blit_layers_mask(uniform LayerParamsForMask layers[], uniform int n,
+                             uniform uint8 mask_base[], uniform int mask_stride, uniform int width, uniform int height)
+{
+    for(uniform int y=0; y<height; ++y) {
+        uniform uint8* mask_row = mask_base + mask_stride * y;
+
+	foreach(x=0 ... width) {
+	    mask_row[x] = 0;
+	}
+	for(uniform int i=0; i<n; ++i) {
+	    uniform LayerParamsForMask& layer = layers[i];
+	    uniform uint32* lines_row = layer.lines_base + (layer.lines_stride * y >> 2);
+	    uniform uint32* color_row = layer.color_base + (layer.color_stride * y >> 2);
+	    uniform int lines_lit = layer.lines_lit;
+	    if(lines_lit) {
+	        foreach(x=0 ... width) {
+                    uint8 color_alpha = color_row[x] >> 24;
+		    uint8 lines_alpha = lines_row[x] >> 24;
+                    //we only have 2 "color" notions for lines computation: transparent (<255) and opaque (255);
+                    //"no color" is the same as "transparent" for this purpose. we could handle transparency in
+                    //a less binary way but it seems that if you have a fish behind a semi-transparent tank, you don't
+                    //benefit from the fish's lines being less pronounced on the light table relatively to it being
+                    //in a fully transparent tank. you do benefit from a fish's tail hidden behind some water plant
+                    //not appearing (remaining hidden) on the light table
+		    uint8 mask_alpha = mask_row[x] * (int)(color_alpha < 255);
+		    mask_alpha = mask_alpha < lines_alpha ? lines_alpha : mask_alpha;
+		    mask_row[x] = mask_alpha;
+                }
+            }
+	    else {
+	        foreach(x=0 ... width) {
+                    uint8 color_alpha = color_row[x] >> 24;
+		    uint8 mask_alpha = mask_row[x] * (int)(color_alpha < 255);
+		    mask_row[x] = mask_alpha;
+                }
+	    }
+	}
     }
 }
 
