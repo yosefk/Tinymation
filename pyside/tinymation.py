@@ -1139,10 +1139,14 @@ def curr_layer_locked():
         reason_image = locked_image if movie.curr_layer().locked else invisible_image
         tw, th = scale_and_preserve_aspect_ratio(reason_image.get_width(), reason_image.get_height(), 3*da.iwidth/4, 3*da.iheight/4)
         reason_image = scale_image(reason_image, tw, th, best_quality=True)
-        fading_mask = Surface(da.subsurface.get_size()) #new_frame()
+        # make the surface big enough to have pixels for subsurface() whatever starting_point is in DrawingArea.draw
+        full_fading_mask = Surface((da.subsurface.get_width() + da.lmargin + da.rmargin, da.subsurface.get_height() + da.ymargin*2)) #new_frame()
+        fading_mask = full_fading_mask.subsurface((0, 0, da.iwidth+da.lmargin*2, da.iheight+da.ymargin*2)) # this is lmargin*2 instead of lmargin+rmargin deliberately
+        # - for vertical layouts we draw within the left side of the drawing area which is not partially covered with timeline and layers area;
+        # blits() wouldn't work for us to draw the entire surface if we veered into the right margin area
         fading_mask.blit(reason_image, ((fading_mask.get_width()-reason_image.get_width())//2, (fading_mask.get_height()-reason_image.get_height())//2))
-        fading_mask.set_alpha(192)
-        da.set_fading_mask(fading_mask, prescaled_fading_mask=True)
+        full_fading_mask.set_alpha(192)
+        da.set_fading_mask(full_fading_mask, prescaled_fading_mask=True)
         da.fade_per_frame = 192/(FADING_RATE*7)
     return effectively_locked
 
@@ -2644,7 +2648,10 @@ class DrawingArea(LayoutElemBase):
                 surfaces.append(mask)
 
             if self.fading_mask:
-                surfaces.append(self.scaled_fading_mask())
+                fading = self.scaled_fading_mask()
+                if self.prescaled_fading_mask:
+                    fading = fading.subsurface(max(0, starting_point[0]), max(0, starting_point[1]), surfaces[0].get_width(), surfaces[0].get_height())
+                surfaces.append(fading)
 
         self.subsurface.blits(surfaces, starting_point)
 

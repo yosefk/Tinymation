@@ -219,7 +219,7 @@ class Surface:
 
         if not clip:
             if x < 0 or y < 0 or x+w > self.get_width() or y+h > self.get_height():
-                raise ValueError("subsurface rectangle outside surface area")
+                raise ValueError(f"subsurface rectangle ({x},{y},{w},{h}) outside surface area ({self.get_size()})")
 
         if x < 0:
             w += x
