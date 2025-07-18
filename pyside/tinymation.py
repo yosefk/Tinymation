@@ -3107,15 +3107,17 @@ class TimelineArea(LayoutElemBase):
                 id2version = []
                 computation = []
                 for pos, color, transparency in s.light_table_positions:
-                    i2v, c = movie.get_mask(pos, color, transparency, key=True, lowest_layer_pos=s.lowest_layer_pos, skip_layer=s.skip_layer)
+                    i2v, c = movie.get_mask(pos, key=True, lowest_layer_pos=s.lowest_layer_pos, skip_layer=s.skip_layer)
                     id2version += i2v
-                    computation.append(c)
+                    computation.append(('colored-mask',c,color,transparency))
                 return tuple(id2version), ('combined-mask', tuple(computation))
                 
             def compute_value(s):
                 masks = []
+                # ATM there's no way to set per-mask transparency from the UI and no code in blit_combined_mask to support it,
+                # but both could be added
                 for pos, color, transparency in s.light_table_positions:
-                    masks.append((movie.get_mask(pos, color, transparency, lowest_layer_pos=s.lowest_layer_pos, skip_layer=s.skip_layer), color))
+                    masks.append((movie.get_mask(pos, lowest_layer_pos=s.lowest_layer_pos, skip_layer=s.skip_layer), color))
                 return combine_mask_alphas(masks)
 
         rest_mask = CachedCombinedMask(rest_positions)
@@ -3878,7 +3880,7 @@ class Movie(MovieData):
     def frame(self, pos):
         return self.layers[self.layer_pos].frame(pos)
 
-    def get_mask(self, pos, rgb, transparency, key=False, lowest_layer_pos=None, skip_layer=None):
+    def get_mask(self, pos, key=False, lowest_layer_pos=None, skip_layer=None):
         # ignore invisible layers
         if lowest_layer_pos is None:
             lowest_layer_pos = 0
@@ -3911,20 +3913,6 @@ class Movie(MovieData):
         if key:
             return CachedMaskAlpha().compute_key()
         return cache.fetch(CachedMaskAlpha())
-
-        class CachedMask:
-            def compute_key(_):
-                id2version, computation = CachedMaskAlpha().compute_key()
-                return id2version, ('mask', rgb, transparency, computation)
-            def compute_value(_):
-                mask_surface = Surface((empty_frame().get_width(), empty_frame().get_height()), color=rgb)
-                surf.pixels_alpha(mask_surface)[:] = cache.fetch(CachedMaskAlpha())
-                mask_surface.set_alpha(int(transparency*255))
-                return mask_surface
-
-        if key:
-            return CachedMask().compute_key()
-        return cache.fetch(CachedMask())
 
     def _visible_layers_id2version(self, layers, pos, include_invisible=False):
         frames = [layer.frame(pos) for layer in layers if layer.visible or include_invisible]
