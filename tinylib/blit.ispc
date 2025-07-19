@@ -130,9 +130,9 @@ struct LayerParamsForMask
 };
 
 export void blit_layers_mask(uniform LayerParamsForMask layers[], uniform int n,
-                             uniform uint8 mask_base[], uniform int mask_stride, uniform int width, uniform int height)
+                             uniform uint8 mask_base[], uniform int mask_stride, uniform int width, uniform int start_y, uniform int finish_y)
 {
-    for(uniform int y=0; y<height; ++y) {
+    for(uniform int y=start_y; y<finish_y; ++y) {
         uniform uint8* mask_row = mask_base + mask_stride * y;
 
 	foreach(x=0 ... width) {
@@ -177,9 +177,9 @@ struct MaskAlphaParams
 };
 
 export void blit_combined_mask(uniform MaskAlphaParams mask_alphas[], uniform int n,
-                               uniform uint32 mask_base[], uniform int mask_stride, uniform int width, uniform int height)
+                               uniform uint32 mask_base[], uniform int mask_stride, uniform int width, uniform int start_y, uniform int finish_y)
 {
-    for(uniform int y=0; y<height; ++y) {
+    for(uniform int y=start_y; y<finish_y; ++y) {
         uniform uint32* mask_row = mask_base + (mask_stride * y >> 2);
 
 	for(uniform int i=0; i<n; ++i) {
@@ -197,20 +197,22 @@ export void blit_combined_mask(uniform MaskAlphaParams mask_alphas[], uniform in
 	    }
 	    else { //in fully transparent mask pixels, put the new rgb color and copy the alpha.
 	        //in not entirely transparent mask pixels, blend the new rgb color with the existing
-		//color (weighed by the mask alpha - closer to the new color where it's less transparent)
-	        //and take the maximum of the alpha 
+		//color (weighed by the mask alpha - closer to the new color where it's less transparent,
+	        //"50/50" where it's completely opaque) and take the maximum of the alpha 
 	        foreach(x=0 ... width) {
 		    uint32 pix = mask_row[x];
-		    int fg_alpha = alpha[x];
 
                     int ri = pix & 0xff;
                     int gi = (pix >> 8) & 0xff;
                     int bi = (pix >> 16) & 0xff;
 		    int ai = pix >> 24;
 
-	            int ro = round8b(r * fg_alpha + ri * (255-fg_alpha));
-                    int go = round8b(g * fg_alpha + gi * (255-fg_alpha));
-                    int bo = round8b(b * fg_alpha + bi * (255-fg_alpha));
+		    int fg_alpha = alpha[x];
+		    int fg_weight = (ai == 0) ? 255 : (fg_alpha >> 1);
+
+	            int ro = round8b(r * fg_weight + ri * (255-fg_weight));
+                    int go = round8b(g * fg_weight + gi * (255-fg_weight));
+                    int bo = round8b(b * fg_weight + bi * (255-fg_weight));
 		    int ao = ai > fg_alpha ? ai : fg_alpha;
 
                     mask_row[x] = ro | (go<<8) | (bo<<16) | (ao<<24);

@@ -23,5 +23,7 @@
     blit_layers_mask;
     blit_combined_mask;
     fill_32b;
+    parallel_set_num_threads;
+    parallel_for_grain;
   local: *;
 };

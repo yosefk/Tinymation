@@ -50,7 +50,7 @@ class Stat:
             print(f'{self.op}: {self.ns / self.things} ns/{self.what}')
 
 stats = []
-def stat(op, what):
+def stat(op, what='pixel'):
     s = Stat(op, what)
     stats.append(s)
     return s
@@ -59,13 +59,15 @@ def show_stats():
     for s in stats:
         s.show()
 
-blit_stat = stat('Surface.blit','pixel')
-blits_stat = stat('Surface.blits','pixel')
-fill_stat = stat('Surface.fill','pixel')
-blend_stat = stat('Surface.blend','pixel')
-load_stat = stat('surf.load','pixel')
-png_save_stat = stat('surf.save(png)','pixel')
-uncompressed_save_stat = stat('surf.save(uncompressed)','pixel')
+blit_stat = stat('Surface.blit')
+blits_stat = stat('Surface.blits')
+fill_stat = stat('Surface.fill')
+blend_stat = stat('Surface.blend')
+load_stat = stat('surf.load')
+png_save_stat = stat('surf.save(png)')
+uncompressed_save_stat = stat('surf.save(uncompressed)')
+get_mask_stat = stat('get_mask')
+combine_mask_alphas_stat = stat('combine_mask_alphas')
 
 # if the code were written from scratch, rather than adapted from a pygame.Surface-based implementation,
 # it might have made sense to stick with the numpy "height, width, channels" convention, different

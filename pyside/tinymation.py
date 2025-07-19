@@ -8,6 +8,9 @@ on_linux = sys.platform == 'linux'
 
 ASSETS = 'assets'
 
+import tbb # for tinylib.parallel_for_grain
+WORKERS = min(os.cpu_count(), 8)
+
 # a hack for pyinstaller - when we spawn a subprocess in python, we pass sys.executable
 # and sys.argv[0] as the command line and python then hides its own executable from the sys.argv
 # of the subprocess, but this doesn't happen with a pyinstaller produced executables
@@ -780,8 +783,8 @@ class LayerParamsForMask(ct.Structure):
         ('lines_lit', ct.c_int),
     ]
 #export void blit_layers_mask(uniform LayerParamsForMask layers[], uniform int n,
-#                             uniform uint8 mask_base[], uniform int mask_stride, uniform int width, uniform int height)
-tinylib.blit_layers_mask.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*3
+#                             uniform uint8 mask_base[], uniform int mask_stride, uniform int width, uniform int start_y, uniform int finish_y)
+tinylib.blit_layers_mask.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*4
 
 class MaskAlphaParams(ct.Structure):
     _fields_ = [
@@ -791,8 +794,15 @@ class MaskAlphaParams(ct.Structure):
     ]
 
 #export void blit_combined_mask(uniform MaskAlphaParams mask_alphas[], uniform int n,
-#                               uniform uint32 mask_base[], uniform int mask_stride, uniform int width, uniform int height)
-tinylib.blit_combined_mask.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*3
+#                               uniform uint32 mask_base[], uniform int mask_stride, uniform int width, uniform int start_y, uniform int finish_y)
+tinylib.blit_combined_mask.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*4
+
+RangeFunc = ct.CFUNCTYPE(None, ct.c_int, ct.c_int)
+tinylib.parallel_for_grain.argtypes = [RangeFunc] + [ct.c_int]*3
+
+tinylib.parallel_set_num_threads.argtypes = [ct.c_int]
+
+tinylib.parallel_set_num_threads(WORKERS)
 
 def rgba_array(surface):
     return surface._a
@@ -3094,7 +3104,16 @@ class TimelineArea(LayoutElemBase):
                 params.rgb = rgb[0] | (rgb[1]<<8) | (rgb[2]<<16);
 
             combined_mask = Surface((res.IWIDTH, res.IHEIGHT), color=surf.COLOR_UNINIT, alpha=int(.3*255))
-            tinylib.blit_combined_mask(mask_params, len(mask_params), combined_mask.base_ptr(), combined_mask.bytes_per_line(), res.IWIDTH, res.IHEIGHT)
+
+            surf.combine_mask_alphas_stat.start()
+
+            @RangeFunc
+            def blit_tile(start_y, finish_y):
+                tinylib.blit_combined_mask(mask_params, len(mask_params), combined_mask.base_ptr(), combined_mask.bytes_per_line(), res.IWIDTH, start_y, finish_y)
+            tinylib.parallel_for_grain(blit_tile, 0, res.IHEIGHT, res.IHEIGHT//WORKERS)
+
+            surf.combine_mask_alphas_stat.stop(res.IHEIGHT*res.IWIDTH*len(mask_alphas))
+            
             return combined_mask
 
         class CachedCombinedMask:
@@ -3907,7 +3926,16 @@ class Movie(MovieData):
                     params.lines_lit = lines_lit(layer)
 
                 alpha = np.ndarray((res.IWIDTH, res.IHEIGHT), strides=(1, res.IWIDTH), dtype=np.uint8)
-                tinylib.blit_layers_mask(layer_params, len(layer_params), arr_base_ptr(alpha), alpha.strides[1], alpha.shape[0], alpha.shape[1])
+                alpha_base = arr_base_ptr(alpha)
+
+                surf.get_mask_stat.start()
+
+                @RangeFunc
+                def blit_tile(start_y,finish_y):
+                    tinylib.blit_layers_mask(layer_params, len(layer_params), alpha_base, alpha.strides[1], alpha.shape[0], start_y, finish_y)
+                tinylib.parallel_for_grain(blit_tile, 0, res.IHEIGHT, res.IHEIGHT//WORKERS)
+
+                surf.get_mask_stat.stop(res.IWIDTH*res.IHEIGHT*len(layer_params))
                 return alpha
 
         if key:
