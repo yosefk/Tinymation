@@ -30,14 +30,14 @@ tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ct.c_void_p]*3 + [ct.c_
 tinylib.fitpack_parcur.argtypes = [ct.c_void_p]*2 + [ct.c_int]*3 + [ct.c_double] + [ct.c_void_p]*3
 
 #extern "C" void blit_rgba8888(uint8_t* __restrict bg_base, const uint8_t* __restrict fg_base,
-#                              int bg_stride, int fg_stride, int width, int height,
+#                              int bg_stride, int fg_stride, int width, int start_y, int finish_y,
 #                              int bg_alpha, int fg_alpha)
 tinylib.blits_rgba8888_inplace.argtypes = [ct.c_void_p] + [ct.c_int]*3
-tinylib.blit_rgba8888_inplace.argtypes = [ct.c_void_p]*2 + [ct.c_int]*6
-tinylib.blit_rgba8888.argtypes = [ct.c_void_p]*3 + [ct.c_int]*7
-#export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int height,
+tinylib.blit_rgba8888_inplace.argtypes = [ct.c_void_p]*2 + [ct.c_int]*7
+tinylib.blit_rgba8888.argtypes = [ct.c_void_p]*3 + [ct.c_int]*8
+#export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int start_y, uniform int finish_y,
 #                                 uniform int r, uniform int g, uniform int b, uniform int a)
-tinylib.blend_rgb_copy_alpha.argtypes = [ct.c_void_p] + [ct.c_int]*7
+tinylib.blend_rgb_copy_alpha.argtypes = [ct.c_void_p] + [ct.c_int]*8
 
 class SurfaceToBlit(ct.Structure):
     _fields_ = [
@@ -69,7 +69,7 @@ class MaskAlphaParams(ct.Structure):
 #                               uniform uint32 mask_base[], uniform int mask_stride, uniform int width, uniform int start_y, uniform int finish_y)
 tinylib.blit_combined_mask.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*4
 
-tinylib.fill_32b.argtypes = [ct.c_void_p] + [ct.c_int]*3 + [ct.c_uint]
+tinylib.fill_32b.argtypes = [ct.c_void_p] + [ct.c_int]*4 + [ct.c_uint]
 
 RangeFunc = ct.CFUNCTYPE(None, ct.c_int, ct.c_int)
 tinylib.parallel_for_grain.argtypes = [RangeFunc] + [ct.c_int]*3

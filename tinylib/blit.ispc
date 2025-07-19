@@ -17,7 +17,7 @@ static inline int round16b(int val) { return (val+(1<<15))>>16; }
         fg_alpha = 256; \
     } \
  \
-    for(uniform int y=0; y<height; ++y) { \
+    for(uniform int y=start_y; y<finish_y; ++y) { \
         uint32* uniform out = out_base + (out_stride*y>>2); \
         uniform uint32* bg = bg_base + (bg_stride*y>>2); \
         const uint32* uniform fg = fg_base + (fg_stride*y>>2); \
@@ -52,7 +52,7 @@ static inline int round16b(int val) { return (val+(1<<15))>>16; }
     }
 
 export void blit_rgba8888_inplace(uniform uint32 bg_base[], const uniform uint32 fg_base[],
-                          uniform int bg_stride, uniform int fg_stride, uniform int width, uniform int height,
+                          uniform int bg_stride, uniform int fg_stride, uniform int width, uniform int start_y, uniform int finish_y,
                           uniform int bg_alpha, uniform int fg_alpha)
 {
     BLIT_BODY(bg_base, bg_stride)
@@ -60,7 +60,7 @@ export void blit_rgba8888_inplace(uniform uint32 bg_base[], const uniform uint32
 
 export void blit_rgba8888(uniform uint32 bg_base[], const uniform uint32 fg_base[], uniform uint32 out_base[],
                           uniform int bg_stride, uniform int fg_stride, uniform int out_stride,
-			  uniform int width, uniform int height,
+			  uniform int width, uniform int start_y, uniform int finish_y,
                           uniform int bg_alpha, uniform int fg_alpha)
 {
     BLIT_BODY(out_base, out_stride)
@@ -73,13 +73,13 @@ struct SurfaceToBlit
     int alpha;
 };
 
-export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int n, uniform int width, uniform int height)
+export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int n, uniform int width, uniform int start_y, uniform int finish_y)
 {
     //assuming a 16K L1 d-cache, we can fit 2 rows of 1920 pixels into the cache;
     //one from the background and one from one of the foregrounds.
     //so we iterate over all the ys, and blit all the foreground rows onto the background row,
     //in the hope to avoid evicting the background and then having to read it again for every foreground.
-    for(uniform int y=0; y<height; ++y) {
+    for(uniform int y=start_y; y<finish_y; ++y) {
 	uniform SurfaceToBlit& bg = surfaces[0];
 	uniform uint32* uniform bg_base = bg.base + (bg.stride * y >> 2);
     	for(uniform int i=1; i<n; ++i) {
@@ -87,17 +87,17 @@ export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int
 	    //the for SurfaceToBlit& as opposed to SurfaceToBlit* to satisfy "uniform/
 	    //varying" type reqs is peculiar
             uniform uint32* uniform fg_base = fg.base + (fg.stride * y >> 2);
-	    blit_rgba8888_inplace(bg_base, fg_base, 0, 0, width, 1, bg.alpha, fg.alpha);
+	    blit_rgba8888_inplace(bg_base, fg_base, 0, 0, width, 0, 1, bg.alpha, fg.alpha);
 	}
     }
 }
 
 //blend between the RGB values of the input array with the given RGB value (giving it the weight a
 //and the input RGB values the weight 255-a), and copy the alpha as is from the input to the output
-export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int height,
+export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int start_y, uniform int finish_y,
                                  uniform int r, uniform int g, uniform int b, uniform int a)
 {
-    for(uniform int y=0; y<height; ++y) {
+    for(uniform int y=start_y; y<finish_y; ++y) {
         uniform uint32* row = base + (stride*y>>2);
  
         foreach(x=0 ... width) {
@@ -229,15 +229,15 @@ void fill_row(uniform uint32 base[], uniform int len, uniform uint32 value)
     }
 }
 
-export void fill_32b(uniform uint32 base[], uniform int width, uniform int height, uniform int bytesPerLine,
+export void fill_32b(uniform uint32 base[], uniform int width, uniform int start_y, uniform int finish_y, uniform int bytesPerLine,
                      uniform uint32 value)
 {
     uniform int stride32 = bytesPerLine >> 2;
     if(stride32 == width) {
-    	fill_row(base, width*height, value);
+    	fill_row(base + start_y*stride32, width*(finish_y - start_y), value);
     }
     else {
-    	for(uniform int y=0; y<height; ++y) {
+    	for(uniform int y=start_y; y<finish_y; ++y) {
 	    fill_row(base+stride32*y, width, value);
 	}
     }

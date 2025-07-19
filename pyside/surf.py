@@ -1,7 +1,7 @@
 import numpy as np
 from PySide6.QtGui import QImage
 import ctypes as ct
-from tinylib_ctypes import tinylib, SurfaceToBlit
+from tinylib_ctypes import tinylib, SurfaceToBlit, RangeFunc
 
 import time
 
@@ -97,15 +97,24 @@ class Surface:
         #self._a[:,:] = np.array(color) 
 
         rgba = color[0] | (color[1]<<8) | (color[2]<<16) | (color[3]<<24)
-        tinylib.fill_32b(self.base_ptr(), self.get_width(), self.get_height(), self.bytes_per_line(), rgba)
 
-        fill_stat.stop(self.get_width()*self.get_height())
+        w, h = self.get_size()
+        @RangeFunc
+        def fill_tile(start_y, finish_y):
+            tinylib.fill_32b(self.base_ptr(), w, start_y, finish_y, self.bytes_per_line(), rgba)
+        tinylib.parallel_for_grain(fill_tile, 0, h, 0 if (w*h > 500000) else h)
+
+        fill_stat.stop(w*h)
 
     def blend(self, color):
         assert len(color) == 4
         blend_stat.start()
-        tinylib.blend_rgb_copy_alpha(self.base_ptr(), self.bytes_per_line(), self.get_width(), self.get_height(), *color)
-        blend_stat.stop(self.get_width()*self.get_height())
+        w,h = self.get_size()
+        @RangeFunc
+        def blend_tile(start_y, finish_y):
+            tinylib.blend_rgb_copy_alpha(self.base_ptr(), self.bytes_per_line(), w, start_y, finish_y, *color)
+        tinylib.parallel_for_grain(blend_tile, 0, h, 0 if (w*h > 500000) else h)
+        blend_stat.stop(w*h)
 
     def base_ptr(self):
         if self._base is None:
@@ -142,16 +151,20 @@ class Surface:
 
         blit_stat.start()
 
-        if into is None: 
-            tinylib.blit_rgba8888_inplace(background._ptr_to(bgx, bgy), foreground._ptr_to(fgx, fgy),
-                                          background.bytes_per_line(), foreground.bytes_per_line(),
-                                          blitw, blith,
-                                          background.get_alpha(), foreground.get_alpha())
-        else:
-            tinylib.blit_rgba8888(background._ptr_to(bgx, bgy), foreground._ptr_to(fgx, fgy), into._ptr_to(bgx, bgy),
-                                  background.bytes_per_line(), foreground.bytes_per_line(), into.bytes_per_line(),
-                                  blitw, blith,
-                                  background.get_alpha(), foreground.get_alpha())
+        @RangeFunc
+        def blit_tile(start_y, finish_y):
+            if into is None: 
+                tinylib.blit_rgba8888_inplace(background._ptr_to(bgx, bgy), foreground._ptr_to(fgx, fgy),
+                                              background.bytes_per_line(), foreground.bytes_per_line(),
+                                              blitw, start_y, finish_y,
+                                              background.get_alpha(), foreground.get_alpha())
+            else:
+                tinylib.blit_rgba8888(background._ptr_to(bgx, bgy), foreground._ptr_to(fgx, fgy), into._ptr_to(bgx, bgy),
+                                      background.bytes_per_line(), foreground.bytes_per_line(), into.bytes_per_line(),
+                                      blitw, start_y, finish_y,
+                                      background.get_alpha(), foreground.get_alpha())
+
+        tinylib.parallel_for_grain(blit_tile, 0, blith, 0 if (blith*blitw > 500000) else blith)
 
         blit_stat.stop(blitw*blith)
 
@@ -186,7 +199,10 @@ class Surface:
 
         blits_stat.start()
 
-        tinylib.blits_rgba8888_inplace(surfaces_to_blit, len(surfaces_to_blit), blitw, blith)
+        @RangeFunc
+        def blit_tile(start_y, finish_y):
+            tinylib.blits_rgba8888_inplace(surfaces_to_blit, len(surfaces_to_blit), blitw, start_y, finish_y)
+        tinylib.parallel_for_grain(blit_tile, 0, blith, 0 if (blitw*blith*len(surfaces_to_blit) > 500000) else blith) 
 
         blits_stat.stop(blitw * blith * len(foregrounds))
 
