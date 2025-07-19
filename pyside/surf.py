@@ -1,28 +1,9 @@
 import numpy as np
 from PySide6.QtGui import QImage
-import numpy.ctypeslib as npct
 import ctypes as ct
-tinylib = npct.load_library('tinylib','.')
+from tinylib_ctypes import tinylib, SurfaceToBlit
 
 import time
-
-#extern "C" void blit_rgba8888(uint8_t* __restrict bg_base, const uint8_t* __restrict fg_base,
-#                              int bg_stride, int fg_stride, int width, int height,
-#                              int bg_alpha, int fg_alpha)
-tinylib.blits_rgba8888_inplace.argtypes = [ct.c_void_p] + [ct.c_int]*3
-tinylib.blit_rgba8888_inplace.argtypes = [ct.c_void_p]*2 + [ct.c_int]*6
-tinylib.blit_rgba8888.argtypes = [ct.c_void_p]*3 + [ct.c_int]*7
-#export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int height,
-#                                 uniform int r, uniform int g, uniform int b, uniform int a)
-tinylib.blend_rgb_copy_alpha.argtypes = [ct.c_void_p] + [ct.c_int]*7
-tinylib.fill_32b.argtypes = [ct.c_void_p] + [ct.c_int]*3 + [ct.c_uint]
-
-class SurfaceToBlit(ct.Structure):
-    _fields_ = [
-        ('base', ct.c_void_p),
-        ('stride', ct.c_int),
-        ('alpha', ct.c_int),
-    ]
 
 COLOR_UNINIT = 'uninit'
 
