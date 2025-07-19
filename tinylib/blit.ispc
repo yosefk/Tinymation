@@ -17,6 +17,10 @@ static inline int round16b(int val) { return (val+(1<<15))>>16; }
         fg_alpha = 256; \
     } \
  \
+    if(width*4 == bg_stride && width*4 == fg_stride && width*4 == out_stride) { \
+        width *= finish_y - start_y; \
+	finish_y = start_y + 1; \
+    } \
     for(uniform int y=start_y; y<finish_y; ++y) { \
         uint32* uniform out = out_base + (out_stride*y>>2); \
         uniform uint32* bg = bg_base + (bg_stride*y>>2); \
@@ -97,6 +101,10 @@ export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int
 export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int start_y, uniform int finish_y,
                                  uniform int r, uniform int g, uniform int b, uniform int a)
 {
+    if(width*4 == stride) {
+        width *= finish_y - start_y;
+	finish_y = start_y + 1;
+    }
     for(uniform int y=start_y; y<finish_y; ++y) {
         uniform uint32* row = base + (stride*y>>2);
  
