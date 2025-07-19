@@ -4765,6 +4765,14 @@ def swap_width_height(from_history=False):
     if not from_history:
         history.append_item(SwapWidthHeightHistoryItem())
 
+def lock_all_layers():
+    items = []
+    for layer in movie.layers:
+        if not layer.locked:
+            layer.toggle_locked()
+            items.append(ToggleHistoryItem(layer.toggle_locked))
+    history.append_item(HistoryItemSet(items))
+
 # The history is "global" for all operations within a movie. In some (rare) animation programs
 # there's a history per frame. One problem with this is how to undo timeline
 # operations like frame deletions or holds (do you have a separate undo function for this?)
@@ -5065,6 +5073,10 @@ def process_keydown_event(event):
     # Ctrl-R: rotate
     if ctrl and event.key() == Qt.Key_R:
         swap_width_height()
+        return
+
+    if ctrl and event.key() == Qt.Key_L:
+        lock_all_layers()
         return
 
     # Ctrl-P: dump profiling data
