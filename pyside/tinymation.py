@@ -467,7 +467,6 @@ def export(clipdir):
                     layer.frame(i).read_pixels()
                     check_if_interrupted()
 
-                frame = movie._blit_layers(movie.layers, i)
                 transparent_frame = movie._blit_layers(movie.layers, i, transparent=True)
                 frame = Surface((res.IWIDTH, res.IHEIGHT), color=BACKGROUND)
                 frame.blit(transparent_frame, (0,0))
@@ -3325,7 +3324,6 @@ class LayersArea(LayoutElemBase):
         self.thumbnail_height = int(self.width * res.IHEIGHT / res.IWIDTH)
 
         self.prevy = None
-        self.color_images = {}
         icon_height = min(int(screen.get_width() * 0.15*0.14), self.thumbnail_height / 2)
         self.eye_open = scale_image(load_image('eye_open.png'), height=icon_height, best_quality=True)
         self.eye_shut = scale_image(load_image('eye_shut.png'), height=icon_height, best_quality=True)
@@ -3351,18 +3349,10 @@ class LayersArea(LayoutElemBase):
                     return movie.get_thumbnail(movie.pos, self.width, self.thumbnail_height, transparent_single_layer=layer_pos)
                 image = cache.fetch(CachedLayerThumbnail()).copy()
                 si = Surface((image.get_width(), image.get_height()), color=BACKGROUND)
-                s = Surface((image.get_width(), image.get_height()))
-                if not self.color_images:
-                    above_image = Surface((image.get_width(), image.get_height()), color=LAYERS_ABOVE)
-                    above_image.set_alpha(128)
-                    below_image = Surface((image.get_width(), image.get_height()), color=LAYERS_BELOW)
-                    below_image.set_alpha(128)
-                    self.color_images = {LAYERS_ABOVE: above_image, LAYERS_BELOW: below_image}
-                si.blit(image, (0,0))
-                si.blit(self.color_images[se.color], (0,0))
-                si.set_alpha(128)
-                s.blit(si, (0,0))
-                return s
+                si.blit(image)
+                si.blend(se.color + (64,))
+                si.set_alpha(128+64)
+                return si
 
         if layer_pos > movie.layer_pos:
             color = LAYERS_ABOVE
@@ -3909,9 +3899,11 @@ class Movie(MovieData):
                         return self.layers[layer_pos].frame(pos).thumbnail(width, height, roi, inv_scale)
 
                     s = self.curr_bottom_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi, inv_scale=inv_scale).copy()
+                    surfaces = []
                     if self.layers[self.layer_pos].visible:
-                        s.blit(self.get_thumbnail(pos, width, height, transparent_single_layer=layer_pos, roi=roi, inv_scale=inv_scale), (0, 0))
-                    s.blit(self.curr_top_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi, inv_scale=inv_scale), (0, 0))
+                        surfaces.append(self.get_thumbnail(pos, width, height, transparent_single_layer=layer_pos, roi=roi, inv_scale=inv_scale))
+                    surfaces.append(self.curr_top_layers_surface(pos, highlight=highlight, width=width, height=height, roi=roi, inv_scale=inv_scale))
+                    s.blits(surfaces)
                     return s
                 else:
                     return scale_image(self.get_thumbnail(pos, w, h, highlight=highlight, transparent_single_layer=transparent_single_layer, roi=roi), width, height)
