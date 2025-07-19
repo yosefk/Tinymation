@@ -1,6 +1,11 @@
 import ctypes as ct
+import tbb # for tinylib.parallel_for_grain
 import numpy.ctypeslib as npct
 tinylib = npct.load_library('tinylib','.')
+
+import os
+WORKERS = min(os.cpu_count(), 8)
+
 
 #Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double smoothDist, int dry, int erase, int softLines,
 #                        unsigned char* image, int width, int height, int xstride, int ystride, const int* paintWithinRegion)
@@ -75,3 +80,5 @@ RangeFunc = ct.CFUNCTYPE(None, ct.c_int, ct.c_int)
 tinylib.parallel_for_grain.argtypes = [RangeFunc] + [ct.c_int]*3
 
 tinylib.parallel_set_num_threads.argtypes = [ct.c_int]
+
+tinylib.parallel_set_num_threads(WORKERS)

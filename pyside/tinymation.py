@@ -8,9 +8,6 @@ on_linux = sys.platform == 'linux'
 
 ASSETS = 'assets'
 
-import tbb # for tinylib.parallel_for_grain
-WORKERS = min(os.cpu_count(), 8)
-
 # a hack for pyinstaller - when we spawn a subprocess in python, we pass sys.executable
 # and sys.argv[0] as the command line and python then hides its own executable from the sys.argv
 # of the subprocess, but this doesn't happen with a pyinstaller produced executables
@@ -746,7 +743,6 @@ def make_color_int(rgba):
 
 from tinylib_ctypes import tinylib, LayerParamsForMask, MaskAlphaParams, RangeFunc
 import ctypes as ct
-tinylib.parallel_set_num_threads(WORKERS)
 
 def rgba_array(surface):
     return surface._a
@@ -3054,7 +3050,7 @@ class TimelineArea(LayoutElemBase):
             @RangeFunc
             def blit_tile(start_y, finish_y):
                 tinylib.blit_combined_mask(mask_params, len(mask_params), combined_mask.base_ptr(), combined_mask.bytes_per_line(), res.IWIDTH, start_y, finish_y)
-            tinylib.parallel_for_grain(blit_tile, 0, res.IHEIGHT, res.IHEIGHT//WORKERS)
+            tinylib.parallel_for_grain(blit_tile, 0, res.IHEIGHT, 0)
 
             surf.combine_mask_alphas_stat.stop(res.IHEIGHT*res.IWIDTH*len(mask_alphas))
             
@@ -3877,7 +3873,7 @@ class Movie(MovieData):
                 @RangeFunc
                 def blit_tile(start_y,finish_y):
                     tinylib.blit_layers_mask(layer_params, len(layer_params), alpha_base, alpha.strides[1], alpha.shape[0], start_y, finish_y)
-                tinylib.parallel_for_grain(blit_tile, 0, res.IHEIGHT, res.IHEIGHT//WORKERS)
+                tinylib.parallel_for_grain(blit_tile, 0, res.IHEIGHT, 0)
 
                 surf.get_mask_stat.stop(res.IWIDTH*res.IHEIGHT*len(layer_params))
                 return alpha
