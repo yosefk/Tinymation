@@ -49,6 +49,7 @@ png_save_stat = stat('surf.save(png)')
 uncompressed_save_stat = stat('surf.save(uncompressed)')
 get_mask_stat = stat('get_mask')
 combine_mask_alphas_stat = stat('combine_mask_alphas')
+held_mask_stat = stat('held_mask')
 
 # if the code were written from scratch, rather than adapted from a pygame.Surface-based implementation,
 # it might have made sense to stick with the numpy "height, width, channels" convention, different

@@ -2610,12 +2610,14 @@ class DrawingArea(LayoutElemBase):
         iscale = 1/self.xscale
 
         surfaces.append(movie.curr_bottom_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale, subset=scaled_roi_subset))
+        scaled_curr_layer = None
         if movie.layers[movie.layer_pos].visible:
-            surfaces.append(movie.get_thumbnail(pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset))
+            scaled_curr_layer = movie.get_thumbnail(pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=iscale).subsurface(scaled_roi_subset)
+            surfaces.append(scaled_curr_layer)
         surfaces.append(movie.curr_top_layers_surface(pos, highlight=highlight, roi=step_aligned_frame_roi, inv_scale=iscale, subset=scaled_roi_subset))
 
         if not layout.is_playing:
-            mask = layout.timeline_area().combined_light_table_mask()
+            mask = layout.timeline_area().combined_light_table_mask(scaled_curr_layer)
             if mask:
                 surfaces.append(mask)
 
@@ -2884,6 +2886,7 @@ class TimelineArea(LayoutElemBase):
     def _calc_factors(self):
         _, _, width, height = self.rect
         factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.15]
+        self.mask_alpha = int(.3*255)
         scale = 1
         mid_scale = 1
         step = 0.5
@@ -2998,7 +3001,7 @@ class TimelineArea(LayoutElemBase):
             transparency = 0.3
             yield (pos, color, transparency)
 
-    def combined_light_table_mask(self):
+    def combined_light_table_mask(self, scaled_curr_layer=None):
         # there are 2 kinds of frame positions: those where the frame of the current layer (at movie.layer_pos) is the same
         # as the frame in the current position (at movie.pos) in that layer due to holds, and those where it's not.
         # for the latter kind, we can combine all their masks produced by movie.get_mask together.
@@ -3035,6 +3038,9 @@ class TimelineArea(LayoutElemBase):
                     return mask
 
         def combine_mask_alphas(mask_alphas):
+            if not mask_alphas:
+                return None
+
             mask_params = (MaskAlphaParams * len(mask_alphas))()
             for params, (alpha, rgb) in zip(mask_params, mask_alphas):
                 assert alpha.shape == (res.IWIDTH, res.IHEIGHT)
@@ -3042,13 +3048,14 @@ class TimelineArea(LayoutElemBase):
                 params.stride = alpha.strides[1]
                 params.rgb = rgb[0] | (rgb[1]<<8) | (rgb[2]<<16);
 
-            combined_mask = Surface((res.IWIDTH, res.IHEIGHT), color=surf.COLOR_UNINIT, alpha=int(.3*255))
+            combined_mask = Surface((res.IWIDTH, res.IHEIGHT), color=surf.COLOR_UNINIT, alpha=self.mask_alpha)
+            mask_base = combined_mask.base_ptr()
 
             surf.combine_mask_alphas_stat.start()
 
             @RangeFunc
             def blit_tile(start_y, finish_y):
-                tinylib.blit_combined_mask(mask_params, len(mask_params), combined_mask.base_ptr(), combined_mask.bytes_per_line(), res.IWIDTH, start_y, finish_y)
+                tinylib.blit_combined_mask(mask_params, len(mask_params), mask_base, combined_mask.bytes_per_line(), res.IWIDTH, start_y, finish_y)
             tinylib.parallel_for_grain(blit_tile, 0, res.IHEIGHT, 0)
 
             surf.combine_mask_alphas_stat.stop(res.IHEIGHT*res.IWIDTH*len(mask_alphas))
@@ -3104,9 +3111,59 @@ class TimelineArea(LayoutElemBase):
                 
                 if held_inside or held_outside:
                     step_aligned_frame_roi, scaled_roi_subset, _ = da.rois()
-                    scaled_layer = movie.get_thumbnail(movie.pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=1/da.xscale).subsurface(scaled_roi_subset)
+                    if scaled_curr_layer:
+                        scaled_layer = scaled_curr_layer
+                    else:
+                        scaled_layer = movie.get_thumbnail(movie.pos, transparent_single_layer=movie.layer_pos, roi=step_aligned_frame_roi, inv_scale=1/da.xscale).subsurface(scaled_roi_subset)
 
                     alpha = surf.pixels_alpha(scaled_layer)
+
+                rest = scaled(rest_mask)
+
+                # if we have 0 or 1 valid mask, no blitting needed
+                all3 = [held_inside, held_outside, rest]
+                valid_count = sum([m is not None for m in all3])
+                if valid_count == 0:
+                    return None
+                if valid_count == 1:
+                    for m in all3:
+                        if all3 is not None:
+                            return m
+
+                for m in all3:
+                    if m is not None:
+                        w, h = m.get_size()
+
+                # we have 2 or more
+                assert held_inside or held_outside
+
+                mask = Surface((w,h), color=surf.COLOR_UNINIT, alpha=self.mask_alpha)
+                mask_base = mask.base_ptr()
+                layer_base = scaled_layer.base_ptr()
+
+                # pointers are assumed to be non-null and unaliased in ISPC. we allow ourselves to passed
+                # aliased pointers as base addresses of unused surfaces...
+                def base(s): return s.base_ptr() if s is not None else mask_base
+                held_inside_base = base(held_inside)
+                held_outside_base = base(held_outside)
+                rest_base = base(rest)
+
+                def stride(s): return s.bytes_per_line() if s is not None else 0
+
+                @RangeFunc
+                def blit_tile(start_y, finish_y):
+                    tmp_row = np.empty(w)
+                    tinylib.blit_held_mask(mask_base, mask.bytes_per_line(),
+                                           layer_base, scaled_layer.bytes_per_line(),
+                                           held_inside_base, stride(held_inside),
+                                           held_outside_base, stride(held_outside),
+                                           rest_base, stride(rest),
+                                           arr_base_ptr(tmp_row), w, start_y, finish_y)
+                surf.held_mask_stat.start()
+                tinylib.parallel_for_grain(blit_tile, 0, h, 0)
+                surf.held_mask_stat.stop(w*h*valid_count)
+                return mask
+
 
                 masks = []
 
@@ -3124,7 +3181,6 @@ class TimelineArea(LayoutElemBase):
                     del oalpha
                     masks.append(outside)
                 
-                rest = scaled(rest_mask)
                 if rest:
                     masks.append(rest)
 

@@ -230,6 +230,65 @@ export void blit_combined_mask(uniform MaskAlphaParams mask_alphas[], uniform in
     }
 }
 
+//curr_layer is used for its alpha channel (held_inside is blit where it's opaque,
+//held_outside is blit where it's transparent)
+export void blit_held_mask(uniform uint32 mask_base[], uniform int mask_stride,
+                           const uniform uint32 curr_layer_base[], uniform int curr_layer_stride,
+			   //each of the following 3 can be invalid - in that case, stride is 0
+		           const uniform uint32 held_inside_base[], uniform int held_inside_stride,
+			   const uniform uint32 held_outside_base[], uniform int held_outside_stride,
+			   const uniform uint32 rest_base[], uniform int rest_stride,
+			   uniform uint32 tmp_row[], //can't call new[], getting a "uniform" type error
+			   uniform int width, uniform int start_y, uniform int finish_y)
+{
+    const uint32 color_bits = 0xffffffU;
+    for(uniform int y=start_y; y<finish_y; ++y) {
+        uniform uint32* uniform mask = mask_base + (mask_stride * y >> 2);
+        const uniform uint32* curr_layer = curr_layer_base + (curr_layer_stride * y >> 2);
+
+	int initialized = 0;
+
+	if(held_inside_stride) {
+	    const uniform uint32* held_inside = held_inside_base + (held_inside_stride * y >> 2);
+	    foreach(x=0 ... width) {
+	        uint32 alpha = curr_layer[x] >> 24;
+	        uint32 inside_pix = held_inside[x];
+		uint32 inside_alpha = inside_pix >> 24;
+	        mask[x] = (inside_pix & color_bits) | ((alpha < inside_alpha ? alpha : inside_alpha) << 24);
+	    }
+	    initialized = 1;
+	}
+	if(held_outside_stride) {
+	    const uniform uint32* held_outside = held_outside_base + (held_outside_stride * y >> 2);
+	    uniform uint32* uniform row = mask;
+	    if(initialized) { //can't use initialized ? mask : row, getting "uniform" type error
+	        row = tmp_row;
+	    }
+	    foreach(x=0 ... width) {
+	        uint32 alpha = 255 - (curr_layer[x] >> 24);
+	        uint32 outside_pix = held_outside[x];
+		uint32 outside_alpha = outside_pix >> 24;
+	        row[x] = (outside_pix & color_bits) | ((alpha < outside_alpha ? alpha : outside_alpha) << 24);
+	    } 	
+	    if(initialized) {
+                blit_rgba8888_inplace(mask, tmp_row, 0, 0, width, 0, 1, 255, 255);
+            }
+	    initialized = 1;
+	}
+	if(rest_stride) {
+            const uniform uint32* uniform rest = rest_base + (rest_stride * y >> 2);
+	    if(initialized) {
+                blit_rgba8888_inplace(mask, rest, 0, 0, width, 0, 1, 255, 255);
+            }
+	    else {
+	        foreach(x=0 ... width) {
+		    mask[x] = rest[x]; 
+		}
+	    }
+	}
+    }
+}
+
 void fill_row(uniform uint32 base[], uniform int len, uniform uint32 value)
 {
     foreach(x=0 ... len) {

@@ -74,6 +74,15 @@ class MaskAlphaParams(ct.Structure):
 #                               uniform uint32 mask_base[], uniform int mask_stride, uniform int width, uniform int start_y, uniform int finish_y)
 tinylib.blit_combined_mask.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*4
 
+#export void blit_held_mask(uniform uint32 mask_base[], uniform int mask_stride,
+#              const uniform uint32 curr_layer_base[], uniform int curr_layer_stride,
+#	           const uniform uint32 held_inside_base[], uniform int held_inside_stride,
+#			   const uniform uint32 held_outside_base[], uniform int held_outside_stride,
+#			   const uniform uint32 rest_base[], uniform int rest_stride,
+#			   uniform uint32 tmp_row[], //can't call new[], getting a "uniform" type error
+#			   uniform int width, uniform int start_y, uniform int finish_y)
+tinylib.blit_held_mask.argtypes = [ct.c_void_p, ct.c_int]*5 + [ct.c_void_p] + [ct.c_int]*3
+
 tinylib.fill_32b.argtypes = [ct.c_void_p] + [ct.c_int]*4 + [ct.c_uint]
 
 RangeFunc = ct.CFUNCTYPE(None, ct.c_int, ct.c_int)

@@ -22,6 +22,7 @@ EXPORTS
     blend_rgb_copy_alpha 
     blit_layers_mask 
     blit_combined_mask 
+    blit_held_mask
 	fill_32b 
 	parallel_set_num_threads 
 	parallel_for_grain 
