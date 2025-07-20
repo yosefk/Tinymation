@@ -8,6 +8,10 @@ on_linux = sys.platform == 'linux'
 
 ASSETS = 'assets'
 
+# for the saving timer
+from concurrent.futures import ThreadPoolExecutor
+executor = ThreadPoolExecutor(max_workers=1)
+
 # a hack for pyinstaller - when we spawn a subprocess in python, we pass sys.executable
 # and sys.argv[0] as the command line and python then hides its own executable from the sys.argv
 # of the subprocess, but this doesn't happen with a pyinstaller produced executables
@@ -104,17 +108,16 @@ class Frame:
 
         cache.update_id(self.cache_id(), self.version)
 
-        self.compression_subprocess = None
+        self.compression_future = None
 
     def mark_as_garbage_in_cache(self):
         cache.delete_id(self.cache_id())
 
     def read_pixels(self):
         for surf_id in self.surf_ids():
-            for fname in self.filenames_png_bmp(surf_id):
-                if os.path.exists(fname):
-                    setattr(self,surf_id,fit_to_resolution(load_image(fname)))
-                    break
+            fname = self.filename(surf_id)
+            if os.path.exists(fname):
+                setattr(self,surf_id,fit_to_resolution(surf.load(fname)))
 
     def del_pixels(self):
         for surf_id in self.surf_ids():
@@ -175,35 +178,31 @@ class Frame:
         # however this produces ugly artifacts where lines & color are eroded and you see through
         # both into the layer below, so we don't do it
 
-    def filenames_png_bmp(self,surface_id):
+    def filename(self,surface_id):
         fname = f'{self.id}-{surface_id}.'
         if self.layer_id:
             fname = os.path.join(f'layer-{self.layer_id}', fname)
         fname = os.path.join(self.dir, fname)
-        return fname+'png', fname+'tif' # "BMP" means "uncompressed format"; this worked with pygame
-        # but Qt works with TIFF but omits the alpha channel with a .bmp file. Since these files aren't kept
-        # around for long, we really don't care what format they are except that they're written out quickly -
-        # it's about 10x faster than writing a compressed PNG
+        return fname+'png'
     def wait_for_compression_to_finish(self):
-        if self.compression_subprocess:
-            self.compression_subprocess.wait()
-        self.compression_subprocess = None
+        if self.compression_future:
+            self.compression_future.result()
+        self.compression_future = None
+    def _save_to_files(self, fnames_and_surfaces):
+        for fname, surface in fnames_and_surfaces:
+            surf.save(surface, fname)
     def save(self):
         if self.dirty:
             self.wait_for_compression_to_finish()
-            fnames = []
-            for surf_id in self.surf_ids():
-                fname_png, fname_bmp = self.filenames_png_bmp(surf_id)
-                surf.save(self.surf_by_id(surf_id), fname_bmp)
-                fnames += [fname_bmp, fname_png]
-            self.compression_subprocess = subprocess.Popen([sys.executable, sys.argv[0], 'compress-and-remove']+fnames)
+            to_save = [(self.filename(surf_id), self.surf_by_id(surf_id).copy()) for surf_id in self.surf_ids()]
+            self.compression_future = executor.submit(self._save_to_files, to_save)
             self.dirty = False
     def delete(self):
         self.wait_for_compression_to_finish()
         for surf_id in self.surf_ids():
-            for fname in self.filenames_png_bmp(surf_id):
-                if os.path.exists(fname):
-                    os.unlink(fname)
+            fname = self.filename(surf_id)
+            if os.path.exists(fname):
+                os.unlink(fname)
 
     def size(self):
         # a frame is 2 RGBA surfaces
@@ -748,30 +747,30 @@ def rgba_array(surface):
 
 import cv2
 def cv2_resize_surface(src, dst, inv_scale=None, best_quality=False):
-    iptr, istride, iwidth, iheight = color_c_params(surf.pixels3d(src))
-    optr, ostride, owidth, oheight = color_c_params(surf.pixels3d(dst))
+    # if we pass the array as is, cv2.resize spends most of the time on converting
+    # it to the layout it expects
+    iattached = src.trans_unsafe()
+    oattached = dst.trans_unsafe()
 
-    ibuffer = ct.cast(iptr, ct.POINTER(ct.c_uint8 * (iheight * istride * 4))).contents
-
-    # reinterpret the array as RGBA height x width (this "transposes" the image and flips R and B channels,
-    # in order to fit the data into the layout cv2 expects)
-    iattached = np.ndarray((iheight,iwidth,4), dtype=np.uint8, buffer=ibuffer, strides=(istride, 4, 1))
-
-    obuffer = ct.cast(optr, ct.POINTER(ct.c_uint8 * (oheight * ostride * 4))).contents
-
-    oattached = np.ndarray((oheight,owidth,4), dtype=np.uint8, buffer=obuffer, strides=(ostride, 4, 1))
+    iwidth, iheight = src.get_size()
+    owidth, oheight = dst.get_size()
 
     if owidth < iwidth/2:
         method = cv2.INTER_AREA
+        stat = surf.scale_inter_area_stat
     elif owidth > iwidth:
         method = cv2.INTER_CUBIC
+        stat = surf.scale_inter_cubic_stat
     else:
         method = cv2.INTER_LINEAR if not best_quality else cv2.INTER_CUBIC
+        stat = surf.scale_inter_linear_stat if not best_quality else surf.scale_inter_cubic_stat
 
+    stat.start()
     if inv_scale is not None:
         cv2.resize(iattached, None, oattached, fx=inv_scale, fy=inv_scale, interpolation=method)
     else:
         cv2.resize(iattached, (owidth,oheight), oattached, interpolation=method)
+    stat.stop(iwidth*iheight if iwidth>owidth else owidth*oheight)
 
 def scaled_image_size(iwidth, iheight, width=None, height=None, inv_scale=None):
     assert width or height or inv_scale
@@ -1569,33 +1568,6 @@ class NewDeleteTool(Button):
         self.frame_func = frame_func
         self.clip_func = clip_func
         self.layer_func = layer_func
-
-def flood_fill_color_based_on_lines(color_rgba, lines, x, y, bucket_color, bbox_callback=None):
-    flood_code = 2
-    global pen_mask
-    pen_mask = lines==255
-
-    rect = np.zeros(4, dtype=np.int32)
-    region = arr_base_ptr(rect)
-    mask_ptr, mask_stride, width, height = greyscale_c_params(pen_mask, is_alpha=False)
-    assert x >= 0 and x < width and y >= 0 and y < height
-    # TODO: if we use OpenCV anyway for resizing, maybe use floodfill from there?..
-    tinylib.flood_fill_mask(mask_ptr, mask_stride, width, height, x, y, flood_code, region, 0)
-    
-    xstart, ystart, xlen, ylen = rect
-    bbox_retval = (xstart, ystart, xstart+xlen-1, ystart+ylen-1)
-    if bbox_callback:
-        bbox_retval = bbox_callback(bbox_retval)
-
-    color_ptr, color_stride, color_width, color_height = color_c_params(color_rgba)
-    assert color_width == width and color_height == height
-    new_color_value = make_color_int(bucket_color)
-    tinylib.fill_color_based_on_mask(color_ptr, mask_ptr, color_stride, mask_stride, width, height, region, new_color_value, flood_code)
-
-    del pen_mask
-    pen_mask = None
-
-    return bbox_retval
 
 def flood_fill_color_based_on_mask_many_seeds(color_rgba, pen_mask, xs, ys, bucket_color):
     mask_ptr, mask_stride, width, height = greyscale_c_params(pen_mask, is_alpha=False)
@@ -3018,25 +2990,6 @@ class TimelineArea(LayoutElemBase):
         held_positions = [(pos,c,t) for pos,c,t in light_table_positions if curr_lit and movie.frame(pos) is curr_frame]
         rest_positions = [(pos,c,t) for pos,c,t in light_table_positions if not (curr_lit and movie.frame(pos) is curr_frame)]
 
-        def combine_masks(masks):
-                if len(masks) == 0:
-                    return None
-                elif len(masks) == 1:
-                    return masks[0]
-                else:
-                    mask = masks[0].copy()
-                    orig_alpha = mask.get_alpha()
-                    mask.set_alpha(255)
-                    alphas = []
-                    for m in masks[1:]:
-                        alphas.append(m.get_alpha())
-                        m.set_alpha(255) # TODO: this assumes the same transparency in all masks - might want to change
-                    mask.blits(masks[1:])
-                    for m,a in zip(masks[1:],alphas):
-                        m.set_alpha(a)
-                    mask.set_alpha(orig_alpha)
-                    return mask
-
         def combine_mask_alphas(mask_alphas):
             if not mask_alphas:
                 return None
@@ -3163,28 +3116,6 @@ class TimelineArea(LayoutElemBase):
                 tinylib.parallel_for_grain(blit_tile, 0, h, 0)
                 surf.held_mask_stat.stop(w*h*valid_count)
                 return mask
-
-
-                masks = []
-
-                if held_inside:
-                    inside = held_inside.copy()
-                    ialpha = surf.pixels_alpha(inside)
-                    ialpha[:] = np.minimum(alpha, ialpha)
-                    del ialpha
-                    masks.append(inside)
-
-                if held_outside:
-                    outside = held_outside.copy()
-                    oalpha = surf.pixels_alpha(outside)
-                    oalpha[:] = np.minimum(255-alpha, oalpha)
-                    del oalpha
-                    masks.append(outside)
-                
-                if rest:
-                    masks.append(rest)
-
-                return combine_masks(masks)
                 
         return cache.fetch(AllPosMask())
 
@@ -5347,6 +5278,7 @@ class TinymationWidget(QWidget):
             pos = event.position()
             e.pos = (pos.x(), pos.y())
             e.subpixel = False
+            e.time = event.timestamp()
             layout.on_event(e)
             if self.redrawLayoutIfNeeded(event):
                 self.redrawScreen()

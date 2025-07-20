@@ -21,14 +21,14 @@ class Stat:
         self.things = 0
         self.calls = 0
     def start(self):
-        self.start_ns = time.time_ns()
+        self.start_ns = time.perf_counter_ns()
     def stop(self, things):
-        self.ns += time.time_ns() - self.start_ns
+        self.ns += time.perf_counter_ns() - self.start_ns
         self.things += things
         self.calls += 1
     def show(self):
         if self.things:
-            print(f'{self.op}: {self.ns / self.things} ns/{self.what}')
+            print(f'{self.op}: {self.ns / self.things} ns/{self.what} ({self.calls} calls)')
 
 stats = []
 def stat(op, what='pixel'):
@@ -43,6 +43,7 @@ def show_stats():
 blit_stat = stat('Surface.blit')
 blits_stat = stat('Surface.blits')
 fill_stat = stat('Surface.fill')
+copy_stat = stat('Surface.copy')
 blend_stat = stat('Surface.blend')
 load_stat = stat('surf.load')
 png_save_stat = stat('surf.save(png)')
@@ -50,6 +51,9 @@ uncompressed_save_stat = stat('surf.save(uncompressed)')
 get_mask_stat = stat('get_mask')
 combine_mask_alphas_stat = stat('combine_mask_alphas')
 held_mask_stat = stat('held_mask')
+scale_inter_area_stat = stat('scale(INTER_AREA)')
+scale_inter_linear_stat = stat('scale(INTER_LINEAR)')
+scale_inter_cubic_stat = stat('scale(INTER_CUBIC)')
 
 # if the code were written from scratch, rather than adapted from a pygame.Surface-based implementation,
 # it might have made sense to stick with the numpy "height, width, channels" convention, different
@@ -92,19 +96,17 @@ class Surface:
     def fill(self, color):
         if len(color) == 3:
             color = tuple(color) + (255,)
-        fill_stat.start()
 
-        #this is slow since we have a "non-C-contiguous array"?.. or just because it's 4 elements and not 1?..
+        #this is slow maybe since we have a "non-C-contiguous array"?.. and definitely because it's 4 elements and not 1
+        #in testing this is very slow even with contiguous arrays
         #self._a[:,:] = np.array(color) 
 
         rgba = color[0] | (color[1]<<8) | (color[2]<<16) | (color[3]<<24)
-
         w, h = self.get_size()
-        @RangeFunc
-        def fill_tile(start_y, finish_y):
-            tinylib.fill_32b(self.base_ptr(), w, start_y, finish_y, self.bytes_per_line(), rgba)
-        tinylib.parallel_for_grain(fill_tile, 0, h, 0 if (w*h > 500000) else h)
 
+        fill_stat.start()
+        # this is a bit faster than ispc and a lot faster than assigning np.array(color); it doesn't seem to matter if we transpose the dimensions or not
+        self.uint32_unsafe()[:,:] = rgba
         fill_stat.stop(w*h)
 
     def blend(self, color):
@@ -207,8 +209,17 @@ class Surface:
 
         blits_stat.stop(blitw * blith * len(foregrounds))
 
+    def is_contig_transposed(self):
+        return self.get_width()*4 == self.bytes_per_line()
+
     def copy(self):
-        return Surface(strides_preserving_copy(self._a), alpha=self._alpha)
+        copy_stat.start()
+        s = Surface(strides_preserving_copy(self._a), alpha=self._alpha)
+        # interestingly this is slower, not faster:
+        #s = Surface(self.get_size(), alpha=self._alpha, color=COLOR_UNINIT)
+        #s.trans_unsafe()[...] = self.trans_unsafe()[...]
+        copy_stat.stop(self.get_width()*self.get_height())
+        return s
 
     def empty_like(self):
         return Surface((self.get_width(), self.get_height()), alpha=self._alpha, color=COLOR_UNINIT)
@@ -249,11 +260,30 @@ class Surface:
         '''this QImage is aliased to the array - don't use after freeing the array/surface object'''
         w, h, _ = self._a.shape
         bytes_per_line = self.bytes_per_line()
+        assert w*4 == bytes_per_line # note that we don't support non-contig surfaces - but copy().qimage_[unsafe]() will work
         # without the cast, if we just pass ptr_to(0,0), we get garbage pixel data, I wonder what's happening there
-        ibuffer = ct.cast(self.base_ptr(), ct.POINTER(ct.c_uint8 * (w * bytes_per_line * 4))).contents
+        ibuffer = ct.cast(self.base_ptr(), ct.POINTER(ct.c_uint8 * (h * bytes_per_line * 4))).contents
         return QImage(ibuffer, w, h, bytes_per_line, QImage.Format_RGBA8888)
 
     def qimage(self): return self.qimage_unsafe().copy()
+
+    def trans_unsafe(self):
+        w, h, _ = self._a.shape
+        bytes_per_line = self.bytes_per_line()
+        ibuffer = ct.cast(self.base_ptr(), ct.POINTER(ct.c_uint8 * (h * bytes_per_line * 4))).contents
+        return np.ndarray((h,w,4), buffer=ibuffer, strides=(bytes_per_line,4,1), dtype=np.uint8)
+
+    def trans_uint32_unsafe(self):
+        w, h, _ = self._a.shape
+        bytes_per_line = self.bytes_per_line()
+        ibuffer = ct.cast(self.base_ptr(), ct.POINTER(ct.c_uint32 * (h * bytes_per_line))).contents
+        return np.ndarray((h,w), buffer=ibuffer, strides=(bytes_per_line,4), dtype=np.uint32)
+
+    def uint32_unsafe(self):
+        w, h, _ = self._a.shape
+        bytes_per_line = self.bytes_per_line()
+        ibuffer = ct.cast(self.base_ptr(), ct.POINTER(ct.c_uint32 * (h * bytes_per_line))).contents
+        return np.ndarray((w,h), buffer=ibuffer, strides=(4,bytes_per_line), dtype=np.uint32)
 
 def load(fname):
 
