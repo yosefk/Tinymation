@@ -1354,10 +1354,10 @@ class PenTool(Button):
 
         if self.prev_drawn:
             self.short_term_bbox = (1000000, 1000000, -1, -1)
-            xarr = np.array([cx])
-            yarr = np.array([cy])
-            tarr = np.array([layout.event_time])
-            parr = np.array([min(layout.pressure,0.7) if layout.subpixel else 0.35])
+            xarr = np.array([cx], dtype=float)
+            yarr = np.array([cy], dtype=float)
+            tarr = np.array([layout.event_time], dtype=float)
+            parr = np.array([min(layout.pressure,0.7) if layout.subpixel else 0.35], dtype=float)
             tinylib.brush_paint(self.brush, 1, *[arr_base_ptr(arr) for arr in [xarr, yarr, tarr, parr]], drawing_area.xscale, self.region)
             self.update_bbox()
 
@@ -1497,7 +1497,7 @@ class PenLineShiftSmoothTool(Button):
         simplified_new_points = simplify_polyline(list(new_points[first_diff:last_diff]),1)
         changed_old_points = list(old_points[first_diff:last_diff])
 
-        new_points = np.asfortranarray(np.concatenate((old_points[:first_diff], np.array(simplified_new_points), old_points[last_diff:])))
+        new_points = np.asfortranarray(np.concatenate((old_points[:first_diff], np.array(simplified_new_points, dtype=float), old_points[last_diff:])))
 
         affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), WIDTH*4)
 
@@ -1918,8 +1918,8 @@ def splev(x, tck):
     return y.reshape(xshape)
 
 def bspline_interp(points, smoothing=None):
-    x = np.array([1.*p[0] for p in points])
-    y = np.array([1.*p[1] for p in points])
+    x = np.array([p[0] for p in points], dtype=float)
+    y = np.array([p[1] for p in points], dtype=float)
 
     def dist(i1, i2):
         return math.sqrt((x[i1]-x[i2])**2 + (y[i1]-y[i2])**2)
@@ -2013,7 +2013,6 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
 
     oft=0 # at one point it seemed that skeletonization moves the points by .5... currently oft is 0 since it doesn't seem so
-    w = np.array([i/(len(xs1)) for i in range(len(xs1))] + [1]*len(xs) + [i/len(xs2) for i in range(len(xs2),0,-1)])
     xs = np.concatenate((xs1[::-1]+oft, xs, xs2+oft))
     ys = np.concatenate((ys1[::-1]+oft, ys, ys2+oft))
     lines_patch[:] = 0
@@ -2047,8 +2046,8 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     ptr, ystride, width, height = greyscale_c_params(lines)
     brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, 2.5, 0, 0, 0, 0, ptr, width, height, 4, ystride, 0)
 
-    xarr = np.array(px)
-    yarr = np.array(py)
+    xarr = np.array(px, dtype=float)
+    yarr = np.array(py, dtype=float)
     rect = np.zeros(4, dtype=np.int32)
     region = arr_base_ptr(rect)
 
@@ -2090,7 +2089,7 @@ class FlashlightTool(Button):
 
         if try_to_patch:
             # Ctrl pressed - attempt to patch a hole using the previous skeleton (if relevant
-            if last_skeleton:
+            if last_skeleton is not None:
                 skeleton, skx, sky = last_skeleton
                 if x >= skx.start and x < skx.stop and y >= sky.start and y < sky.stop:
                     found = False
@@ -2336,6 +2335,7 @@ class Layout:
     def new_tool(self): return self.new_delete_tool() and self.tool.is_new
     def new_delete_tool(self): return isinstance(self.tool, NewDeleteTool) 
     def zoom_pan_tool(self): return isinstance(self.tool, ZoomTool)
+    def needle_tool(self): return isinstance(self.tool, FlashlightTool)
 
     def toggle_playing(self):
         self.is_playing = not self.is_playing
@@ -2772,10 +2772,13 @@ class DrawingArea(LayoutElemBase):
         return (x-left), (y-bottom)
     def on_mouse_down(self,x,y):
         alt = QGuiApplication.queryKeyboardModifiers() & Qt.AltModifier
+        ctrl = QGuiApplication.queryKeyboardModifiers() & Qt.ControlModifier
         if alt:
             set_tool(TOOLS['zoom'])
             layout.restore_tool_on_mouse_up = True
-        else:
+        elif not layout.needle_tool() and not (ctrl and patching_tool_selected()):
+            # except upon zooming or patching, we clear the fading mask (if it's purpose is locking
+            # we won't get here, and if it's a skeleton, it's invalidated by tool use)
             self.clear_fading_mask()
         trace.class_context(layout.tool)
         layout.tool.on_mouse_down(*self.fix_xy(x,y))
@@ -4052,7 +4055,7 @@ class Movie(MovieData):
 
     def _set_undrawable_layers_grid(self, s, color, x=0, y=0):
         alpha = surf.pixels3d(s)
-        color = np.array(color)
+        color = np.array(color, dtype=np.uint8)
         alpha[x::WIDTH*3, y::WIDTH*3, :] = color
         alpha[x+1::WIDTH*3, y::WIDTH*3, :] = color
         alpha[x::WIDTH*3, y+1::WIDTH*3, :] = color
