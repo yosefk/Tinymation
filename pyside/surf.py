@@ -54,6 +54,10 @@ held_mask_stat = stat('held_mask')
 scale_inter_area_stat = stat('scale(INTER_AREA)')
 scale_inter_linear_stat = stat('scale(INTER_LINEAR)')
 scale_inter_cubic_stat = stat('scale(INTER_CUBIC)')
+rotate_stat = stat('rotate')
+
+def surf_array(w, h):
+    return np.ndarray((w, h, 4), strides=(4, w*4, 1), dtype=np.uint8)
 
 # if the code were written from scratch, rather than adapted from a pygame.Surface-based implementation,
 # it might have made sense to stick with the numpy "height, width, channels" convention, different
@@ -66,7 +70,7 @@ class Surface:
         if type(size_or_data) is tuple:
             w, h = size_or_data
             w, h = round(w), round(h)
-            self._a = np.ndarray((w, h, 4), strides=(4, w*4, 1), dtype=np.uint8)
+            self._a = surf_array(w, h)
             if color!=COLOR_UNINIT:
                 self.fill(color if color is not None else (0,0,0,0))
         else:
@@ -324,8 +328,14 @@ def save(surface, filename):
     stat.stop(surface.get_width() * surface.get_height())
 
 def rotate(surface, angle):
-    return surface # FIXME
-#    return Surface(pg.transform.rotate(surface.surface, angle))
+    assert angle in [90, -90]
+    rotate_stat.start()
+    rotated = np.rot90(surface._a, {90:1,-90:-1}[angle])
+    width,height = surface.get_size()
+    arr = surf_array(height, width)
+    arr[...] = rotated[...]
+    rotate_stat.stop(width*height)
+    return Surface(arr, surface.get_alpha())
 
 def pixels3d(surface):
     return surface._a[:,:,0:3]
