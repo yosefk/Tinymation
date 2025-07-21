@@ -429,16 +429,39 @@ import cv2
 def interruptible_export(movie):
     check_if_interrupted()
 
+    def get_frame_images(i):
+        transparent_frame = movie._blit_layers(movie.layers, i, transparent=True)
+        frame = Surface((res.IWIDTH, res.IHEIGHT), color=BACKGROUND)
+        frame.blit(transparent_frame, (0,0))
+        check_if_interrupted()
+        return frame, transparent_frame
+
+    def write_transparent_png(fname, transparent_frame):
+        transparent_pixels = transpose_xy(surf.pixels3d(transparent_frame))
+        transparent_pixels = np.dstack([cv2.cvtColor(transparent_pixels, cv2.COLOR_RGB2BGR), transpose_xy(surf.pixels_alpha(transparent_frame))])
+
+        cv2.imwrite(fname, transparent_pixels)
+        check_if_interrupted()
+
+    def write_opaque_png(fname, pixels):
+        cv2.imwrite(fname, cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR))
+        check_if_interrupted()
+
+    if len(movie.frames) == 1:
+        # no animation - produce a single PNG image
+        frame, transparent_frame = get_frame_images(0)
+        write_transparent_png(movie.png_path(0), transparent_frame)
+        pixels = transpose_xy(surf.pixels3d(frame))
+        write_opaque_png(movie.still_png_path(), pixels)
+        return
+
     assert FRAME_RATE==12
     opaque_ext = '.opaque.png'
     try:
         with MP4(movie.mp4_path(), res.IWIDTH, res.IHEIGHT, fps=24) as mp4_writer:
             for i in range(len(movie.frames)):
-                transparent_frame = movie._blit_layers(movie.layers, i, transparent=True)
-                frame = Surface((res.IWIDTH, res.IHEIGHT), color=BACKGROUND)
-                frame.blit(transparent_frame, (0,0))
+                frame, transparent_frame = get_frame_images(i)
 
-                check_if_interrupted()
                 pixels = transpose_xy(surf.pixels3d(frame))
                 check_if_interrupted()
 
@@ -450,16 +473,11 @@ def interruptible_export(movie):
                 check_if_interrupted() 
                 mp4_writer.write_frame(pixels)
                 check_if_interrupted() 
-                transparent_pixels = transpose_xy(surf.pixels3d(transparent_frame))
-                transparent_pixels = np.dstack([cv2.cvtColor(transparent_pixels, cv2.COLOR_RGB2BGR), transpose_xy(surf.pixels_alpha(transparent_frame))])
 
-                cv2.imwrite(movie.png_path(i), transparent_pixels)
-                check_if_interrupted()
+                write_transparent_png(movie.png_path(i), transparent_frame)
+
                 # non-transparent PNGs for the GIF generation, see also below
-                cv2.imwrite(movie.png_path(i)+opaque_ext, cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR))
-                check_if_interrupted()
-
-                check_if_interrupted()
+                write_opaque_png(movie.png_path(i)+opaque_ext, pixels)
 
         # we fill the background color rather than producing transparent GIFs for 2.5 reasons:
         # * GIF transparency is binary so you get ugly aliasing artifacts
@@ -470,7 +488,7 @@ def interruptible_export(movie):
         # that can be converted into any format, including transparent GIF/WebP/APNG. someone who just wants to get a GIF to upload is probably better
         # served by a WYSIWYG non-transparent GIF with the same background color they see when viewing the clip in Tinymation
  
-        # FIXME proper path, handle single-frame clips
+        # FIXME proper path
         gifski = '..\\gifski\\gifski-win.exe' if on_windows else '../gifski/gifski-linux'
         os.system(f'{gifski} --width 1920 -r {FRAME_RATE} --quiet {movie.png_wildcard()+opaque_ext} --output {movie.gif_path()}')
  
@@ -4838,6 +4856,16 @@ def paste_frame():
 
 def open_explorer(path):
     if on_windows:
+        # note: attempts to persuade explorer to open in "large icons mode" involve using a COM interface
+        # with OS-dependent numeric viewing modes, and even upon success (which is unlikely since you
+        # need to look for the window based on the path and sleep until you find it but there may be
+        # other windows with the same path and how do you know if you found the new one), it has the
+        # downside of scrolling the window up, so the user doesn't see the selection that at least
+        # is visible if we just run explorer /select,path. so giving up on forcing it to show icons
+        #
+        # another advantage of giving up is that Windows remembers the user's preference from the last
+        # time the directory was opened and since we always export into the same directory,
+        # you only need to configure this once.
         subprocess.Popen(['explorer', '/select,'+path])
     else:
         subprocess.Popen(['nautilus', '-s', path])
@@ -4846,7 +4874,7 @@ def export_and_open_explorer():
     trace.event('export-clip')
     movie.save_and_export()
 
-    open_explorer(movie.gif_path())
+    open_explorer(movie.gif_path() if len(movie.frames)>1 else movie.still_png_path())
 
 def open_dir_path_dialog():
     dialog = QFileDialog()
