@@ -12,33 +12,6 @@ ASSETS = 'assets'
 from concurrent.futures import ThreadPoolExecutor
 executor = ThreadPoolExecutor(max_workers=1)
 
-# a hack for pyinstaller - when we spawn a subprocess in python, we pass sys.executable
-# and sys.argv[0] as the command line and python then hides its own executable from the sys.argv
-# of the subprocess, but this doesn't happen with a pyinstaller produced executables
-# so you end up seeing another argument at the beginning of sys.argv; this code strips it
-def is_exe(s): return s.endswith('.exe') or s=='tinymation'
-if len(sys.argv) > 1 and is_exe(sys.argv[0]) and is_exe(sys.argv[1]):
-    sys.argv = sys.argv[1:]
-
-# we spawn subprocesses to compress BMPs to PNGs and remove the BMPs
-# every time we save a BMP [which is faster than saving a PNG]
-
-def compress_and_remove(filepairs):
-    for infile, outfile in zip(filepairs[0::2], filepairs[1::2]):
-        image = QImage(infile)
-        if image.save(outfile) and QImage(outfile) == image:
-            os.unlink(infile)
-
-if len(sys.argv)>1 and sys.argv[1] == 'compress-and-remove':
-    compress_and_remove(sys.argv[2:])
-    sys.exit()
-
-# we spawn subprocesses to export the movie to GIF, MP4 and a PNG sequence
-# every time we close a movie (if we reopen it, we interrupt the exporting
-# process and then restart upon closing; when we exit the application,
-# we wait for all the exporting to finish so the user knows all the exported
-# data is ready upon exiting)
-
 import signal
 import uuid
 import json
@@ -364,13 +337,13 @@ class MovieData:
                     return # no changes
         except FileNotFoundError:
             pass
-        self.edited_since_export = True
         with open(fname, 'w') as clip_file:
             clip_file.write(text)
 
     def gif_path(self): return os.path.realpath(self.dir)+'-GIF.gif'
     def mp4_path(self): return os.path.realpath(self.dir)+'-MP4.mp4'
-    def export_paths(self): return [self.gif_path(), self.mp4_path()]
+    def still_png_path(self): return os.path.realpath(self.dir)+'-PNG.png'
+    def export_paths_outside_clipdir(self): return [self.gif_path(), self.mp4_path(), self.still_png_path()]
     def png_path(self, i): return os.path.join(os.path.realpath(self.dir), FRAME_FMT%i)
     def png_wildcard(self): return os.path.join(os.path.realpath(self.dir), 'frame*.png')
 
@@ -415,6 +388,8 @@ class MovieData:
 # finally, Qt's media writer classes seem to rely on ffmpeg, same as imageio.
 class MP4:
     def __init__(self, fname, width, height, fps):
+        import av
+        self.av = av
         self.output = av.open(fname, 'w', format='mp4')
         self.stream = self.output.add_stream('h264', str(fps))
         self.stream.width = width
@@ -422,12 +397,12 @@ class MP4:
         self.stream.pix_fmt = 'yuv420p' # Windows Media Player eats this up unlike yuv444p
         self.stream.options = {'crf': '17'} # quite bad quality with smaller file sizes without this
     def write_frame(self, pixels):
-        frame = av.VideoFrame.from_ndarray(pixels, format='rgb24')
+        frame = self.av.VideoFrame.from_ndarray(pixels, format='rgb24')
         # without this reformat() call with both the format and the colorspace options, we get slightly
         # wrong colors (ffmpeg malfunctions similarly with the default settings and it's fixed by the -colorspace option,
         # though in that experiment I didn't try also specifying a yuv420p output; I don't know why we need to explicitly
         # convert the source to YUV in this code in addition to the converstion to the bt709 colorspace)
-        frame = frame.reformat(format='yuv420p', dst_colorspace=av.video.reformatter.Colorspace.ITU709)
+        frame = frame.reformat(format='yuv420p', dst_colorspace=self.av.video.reformatter.Colorspace.ITU709)
         packet = self.stream.encode(frame)
         self.output.mux(packet)
     def close(self):
@@ -438,13 +413,12 @@ class MP4:
     def __exit__(self, *args): self.close()
 
 interrupted = False
-def signal_handler(signum, stack):
+def interrupt_export():
     global interrupted
     interrupted = True
 
 def check_if_interrupted():
     if interrupted:
-        #print('interrupted',sys.argv[2])
         raise KeyboardInterrupt
 
 def transpose_xy(image):
@@ -452,9 +426,7 @@ def transpose_xy(image):
 
 import cv2
 
-def export(clipdir):
-    #print('exporting',clipdir)
-    movie = MovieData(clipdir, read_pixels=False)
+def interruptible_export(movie):
     check_if_interrupted()
 
     assert FRAME_RATE==12
@@ -462,10 +434,6 @@ def export(clipdir):
     try:
         with MP4(movie.mp4_path(), res.IWIDTH, res.IHEIGHT, fps=24) as mp4_writer:
             for i in range(len(movie.frames)):
-                for layer in movie.layers:
-                    layer.frame(i).read_pixels()
-                    check_if_interrupted()
-
                 transparent_frame = movie._blit_layers(movie.layers, i, transparent=True)
                 frame = Surface((res.IWIDTH, res.IHEIGHT), color=BACKGROUND)
                 frame.blit(transparent_frame, (0,0))
@@ -491,8 +459,6 @@ def export(clipdir):
                 cv2.imwrite(movie.png_path(i)+opaque_ext, cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR))
                 check_if_interrupted()
 
-                for layer in movie.layers:
-                    layer.frame(i).del_pixels() # save memory footprint - we might have several background export processes
                 check_if_interrupted()
 
         # we fill the background color rather than producing transparent GIFs for 2.5 reasons:
@@ -504,7 +470,7 @@ def export(clipdir):
         # that can be converted into any format, including transparent GIF/WebP/APNG. someone who just wants to get a GIF to upload is probably better
         # served by a WYSIWYG non-transparent GIF with the same background color they see when viewing the clip in Tinymation
  
-        # FIXME proper path
+        # FIXME proper path, handle single-frame clips
         gifski = '..\\gifski\\gifski-win.exe' if on_windows else '../gifski/gifski-linux'
         os.system(f'{gifski} --width 1920 -r {FRAME_RATE} --quiet {movie.png_wildcard()+opaque_ext} --output {movie.gif_path()}')
  
@@ -518,24 +484,15 @@ def export(clipdir):
 
     #print('done with',clipdir)
 
-if len(sys.argv)>1 and sys.argv[1] == 'export':
-    signal.signal(signal.SIGBREAK if on_windows else signal.SIGINT, signal_handler)
-
+def export(movie):
     try:
-        _empty_frame = Frame('')
-        check_if_interrupted()
-
-        import av
-        check_if_interrupted()
-
-        export(sys.argv[2])
+        interruptible_export(movie)
     except KeyboardInterrupt:
-        pass # not an error
+        print('INTERRUPTED')
+        pass
     except:
         import traceback
         traceback.print_exc()
-    finally:
-        sys.exit()
 
 def get_last_modified(filenames):
     f2mtime = {}
@@ -547,42 +504,19 @@ def get_last_modified(filenames):
 def is_exported_png(f): return f.endswith('.png') and f != CURRENT_FRAME_FILE
 
 class ExportProgressStatus:
-    def __init__(self):
-        self.first = True
-    def _init(self, initial_clips):
-        self.clip2frames = {}
-        for clip in initial_clips:
-            movie = MovieData(clip, read_pixels=False)
-            self.clip2frames[clip] = len(movie.frames)
-        self.total = sum(self.clip2frames.values())
-        self.initial_clips = initial_clips
+    def __init__(self, clipdir, num_frames):
+        self.clipdir = clipdir
+        self.total = num_frames
     def update(self, live_clips):
         self.done = 0
         import re
         fmt = re.compile(r'frame([0-9]+)\.png')
-        for clip in live_clips:
-            pngs = [f for f in os.listdir(clip) if is_exported_png(f)]
-            if pngs:
-                last = get_last_modified([os.path.join(clip, f) for f in pngs])
-                m = fmt.match(os.path.basename(last))
-                if m:
-                    self.done += int(m.groups()[0]) + 1 # frame 3 being ready means 4 are done
-
-        if self.first:
-            self._init(live_clips)
-            # don't show that we've already done most of the work if we have
-            # a lot of progress to report the first time - always report progress
-            # "from 0 to 100"
-            self.total -= self.done
-            self.done_before_we_started_looking = self.done
-            self.done = 0
-            self.first = False
-        else:
-            for clip in self.initial_clips: # clips we no longer need to check are still done
-                if clip not in live_clips:
-                    self.done += self.clip2frames[clip]
-            # our "0%" included this amount of done stuff - don't go above 100%
-            self.done -= self.done_before_we_started_looking
+        pngs = [f for f in os.listdir(self.clipdir) if is_exported_png(f)]
+        if pngs:
+            last = get_last_modified([os.path.join(self.clipdir, f) for f in pngs])
+            m = fmt.match(os.path.basename(last))
+            if m:
+                 self.done = int(m.groups()[0]) + 1 # frame 3 being ready means 4 are done
 
 _empty_frame = Frame('')
 
@@ -3512,7 +3446,6 @@ class MovieList:
     def __init__(self):
         self.reload()
         self.histories = {}
-        self.exporting_processes = {}
         self.opening = False
     def delete_current_history(self):
         del self.histories[self.clips[self.clip_pos]]
@@ -3537,11 +3470,7 @@ class MovieList:
         movie.save_before_closing()
         self.clip_pos = clip_pos
         movie = open_movie_with_progress_bar(self.clips[clip_pos])
-        movie.edited_since_export = self.export_in_progress() # if we haven't finished
-        # exporting [meaning that we'll interrupt the exporting process], treat the movie as
-        # "edited since export"
         self.open_history(clip_pos)
-        self.interrupt_export()
     def open_history(self, clip_pos):
         global history
         history = self.histories.get(self.clips[clip_pos], History())
@@ -3549,43 +3478,6 @@ class MovieList:
     def save_history(self):
         if self.clips:
             self.histories[self.clips[self.clip_pos]] = history
-    def export_in_progress(self):
-        if self.clips:
-            clip = self.clips[self.clip_pos]
-            if clip in self.exporting_processes:
-                proc = self.exporting_processes[clip]
-                return proc.poll() is None
-    def start_export(self):
-        self.interrupt_export()
-        if self.clips:
-            clip = self.clips[self.clip_pos]
-            CREATE_NEW_PROCESS_GROUP = 0x00000200
-            kwargs = dict(creationflags=CREATE_NEW_PROCESS_GROUP) if on_windows else {}
-            self.exporting_processes[clip] = subprocess.Popen([sys.executable, sys.argv[0], 'export', clip], **kwargs)
-    def interrupt_export(self):
-        if self.export_in_progress():
-            clip = self.clips[self.clip_pos]
-            proc = self.exporting_processes[clip]
-            os.kill(proc.pid, signal.CTRL_BREAK_EVENT if on_windows else signal.SIGINT)
-            proc.wait()
-            del self.exporting_processes[clip]
-    def wait_for_all_exporting_to_finish(self):
-        progress_bar = ProgressBar('Exporting...')
-        progress_status = ExportProgressStatus()
-
-        while True:
-            live_clips = []
-            for clip, proc in self.exporting_processes.items():
-                if proc.poll() is None:
-                    live_clips.append(clip)
-            if not live_clips:
-                break
-            progress_status.update(live_clips)
-            time.sleep(0.3)
-            progress_bar.on_progress(progress_status.done, progress_status.total)
-
-        progress_bar.close()
-        self.exporting_processes = {}
 
 # 2 questions for a movie list:
 # 1. ordering - why by creation date and not by last modification date?
@@ -3789,9 +3681,6 @@ class Movie(MovieData):
     def __init__(self, dir, progress=default_progress_callback):
         iwidth, iheight = (res.IWIDTH, res.IHEIGHT)
         MovieData.__init__(self, dir, progress=progress)
-
-        self.edited_since_export = True # MovieList can set it safely to false - we don't know
-        # if the last exporting process is done or not
 
         # load the movie's palette
         palette_file = os.path.join(dir, PALETTE_FILE)
@@ -4050,7 +3939,6 @@ class Movie(MovieData):
     def edit_curr_frame(self):
         f = self.frame(self.pos)
         f.increment_version()
-        self.edited_since_export = True
         return f
 
     def _set_undrawable_layers_grid(self, s, color, x=0, y=0):
@@ -4151,27 +4039,45 @@ class Movie(MovieData):
             if f.endswith('-deleted') and f.startswith('layer-') and os.path.isdir(full):
                 shutil.rmtree(full)
 
-    def save_and_start_export(self, export=True):
+    def _save_without_export_or_closing(self):
+        '''to export, call save_and_export(); to close, call save_before_closing()'''
         self.frame(self.pos).save()
         self.save_meta()
 
-        # we need this to start exporting or .pngs might not be ready
         for layer in self.layers:
             for frame in layer.frames:
                 frame.wait_for_compression_to_finish()
 
-        if export and (self.edited_since_export or not self.exported_files_exist()):
+    def save_and_export(self):
+        self._save_without_export_or_closing()
 
-            # remove old pngs so we don't have stale ones lying around that don't correspond to a valid frame;
-            # also, we use them for getting the status of the export progress...
-            for f in os.listdir(self.dir):
-                if is_exported_png(f):
-                    os.unlink(os.path.join(self.dir, f))
+        # remove old exported files so we don't have stale ones lying around that don't correspond to a valid frame
+        # (or a stale MP4/GIF for a now-single-frame clip or vice versa);
+        # also, we use the pngs specifically for getting the status of the export progress...
+        for f in os.listdir(self.dir):
+            if is_exported_png(f):
+                os.unlink(os.path.join(self.dir, f))
+        for f in self.export_paths_outside_clipdir():
+            if os.path.exists(f):
+                os.unlink(f)
 
-            movie_list.start_export()
+        self._export_with_progress_bar()
 
-    def save_before_closing(self, export=True):
-        self.save_and_start_export(export)
+    def _export_with_progress_bar(self):
+        future = executor.submit(export, self)
+
+        progress_bar = ProgressBar('Exporting...')
+        progress_status = ExportProgressStatus(self.dir, len(self.frames))
+
+        while not future.done():
+            progress_status.update([self.dir])
+            progress_bar.on_progress(progress_status.done, progress_status.total)
+            time.sleep(0.3)
+
+        progress_bar.close()
+
+    def save_before_closing(self):
+        self._save_without_export_or_closing()
 
         movie_list.save_history()
         global history
@@ -4195,7 +4101,7 @@ class Movie(MovieData):
 
     def delete(self): self.rename(movie.dir + '-deleted')
     def rename(self, new_path):
-        for f in self.export_paths():
+        for f in self.export_paths_outside_clipdir():
             if os.path.exists(f):
                 try:
                     os.unlink(f)
@@ -4316,8 +4222,7 @@ def remove_clip():
         return # we don't remove the last clip - if we did we'd need to create a blank one,
         # which is a bit confusing. [we can't remove the last frame in a timeline, either]
     global movie
-    movie.save_before_closing(export=False)
-    movie_list.interrupt_export()
+    movie.save_before_closing()
     movie.delete()
     movie_list.delete_current_history()
     movie_list.reload()
@@ -4325,9 +4230,7 @@ def remove_clip():
     new_clip_pos = 0
     movie = open_movie_with_progress_bar(movie_list.clips[new_clip_pos])
     movie_list.clip_pos = new_clip_pos
-    movie.edited_since_export = movie_list.export_in_progress()
     movie_list.open_history(new_clip_pos)
-    movie_list.interrupt_export()
 
 class RenameDialog(QDialog):
     def __init__(self, initial_text="", parent=None):
@@ -4733,7 +4636,6 @@ def load_clips_dir():
     movie_dir, is_new_dir = default_clip_dir()
     global movie
     movie = Movie(movie_dir) if is_new_dir else open_movie_with_progress_bar(movie_dir)
-    movie.edited_since_export = is_new_dir
 
     init_layout()
     movie.restore_viewing_params()
@@ -4942,10 +4844,7 @@ def open_explorer(path):
 
 def export_and_open_explorer():
     trace.event('export-clip')
-    movie.save_and_start_export()
-    movie_list.wait_for_all_exporting_to_finish() # wait for this movie and others if we
-    # were still exporting them - so that when we open explorer all the exported data is up to date
-    movie.edited_since_export = False
+    movie.save_and_export()
 
     open_explorer(movie.gif_path())
 
@@ -4976,7 +4875,6 @@ def open_clip_dir():
     global WD
     if file_path and os.path.realpath(file_path) != os.path.realpath(WD):
         movie.save_before_closing()
-        movie_list.wait_for_all_exporting_to_finish()
         set_wd(file_path)
         load_clips_dir()
 
@@ -5313,7 +5211,7 @@ class TinymationWidget(QWidget):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
-            self.shutdown(export_on_exit=not (event.modifiers() & Qt.ShiftModifier))
+            self.shutdown()
             self.close()
             return
 
@@ -5345,17 +5243,13 @@ class TinymationWidget(QWidget):
         # Fall back to default handling for other events
         return super().nativeEvent(eventType, message)
 
-    def shutdown(self, export_on_exit=True):
+    def shutdown(self):
         if UNDER_TEST:
             self.test_thread.quit()
             self.test_thread.wait()
             self.test_conn.close()
 
-        movie.save_before_closing(export_on_exit)
-        if export_on_exit:
-            movie_list.wait_for_all_exporting_to_finish()
-        else:
-            print('Shift-Escape pressed - skipping export to GIF and MP4!')
+        movie.save_before_closing()
 
     if UNDER_TEST:
         @Slot(object)
