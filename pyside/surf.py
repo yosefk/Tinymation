@@ -345,8 +345,8 @@ def pixels_alpha(surface):
 
 def box(surface, rect, color):
     sub = surface.subsurface(rect, clip=True)
-    if len(color) == 3:
-        sub.fill(color)
+    if len(color) == 3 or color[3] == 255:
+        sub.fill(color[:3])
     else:
         sub.blend(color)
 
@@ -354,11 +354,16 @@ def rect(surface, color, rect, width=0, border_radius=0):
     if width == 0:
         box(surface, rect, color)
     else:
-        x,y,w,h = rect
-        box(surface, (x,y,width,h), color)
-        box(surface, (x,y,w,width), color)
-        box(surface, (x+w-width,y,width,h), color)
-        box(surface, (x,y+h-width,w,width), color)
+        if len(color)==3:
+            color = color + (255,)
+        x,y,w,h = [round(n) for n in rect]
+        sw,sh = surface.get_size()
+        if w <= 0 or h <= 0:
+            return
+
+        rgba = (ct.c_uint8*4)(*color)
+        tinylib.fill_rounded_rectangle_negative(surface.base_ptr(), surface.bytes_per_line(), sw, sh, x, y, w, h,
+                                                float(width), border_radius, rgba)
 
 def filled_circle(surface, cx, cy, radius, color):
     '''a very inefficient filled_circle, needn't do better atm since this is only done for cursors at init time'''

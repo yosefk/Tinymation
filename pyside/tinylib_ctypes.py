@@ -85,9 +85,15 @@ tinylib.blit_held_mask.argtypes = [ct.c_void_p, ct.c_int]*5 + [ct.c_void_p] + [c
 
 tinylib.fill_32b.argtypes = [ct.c_void_p] + [ct.c_int]*4 + [ct.c_uint]
 
+#void fill_rounded_rectangle_negative(uint8_t* rgba, int image_stride, int image_width, int image_height,
+#                                    int x, int y, int rect_width, int rect_height, float border_width,
+#                                    float corner_radius, const uint8_t* color) {
+tinylib.fill_rounded_rectangle_negative.argtypes = [ct.c_void_p] + [ct.c_int]*7 + [ct.c_float]*2 + [ct.c_uint8*4]
+
 RangeFunc = ct.CFUNCTYPE(None, ct.c_int, ct.c_int)
 tinylib.parallel_for_grain.argtypes = [RangeFunc] + [ct.c_int]*3
 
 tinylib.parallel_set_num_threads.argtypes = [ct.c_int]
 
 tinylib.parallel_set_num_threads(WORKERS)
+

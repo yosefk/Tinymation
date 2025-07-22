@@ -651,8 +651,17 @@ WIDTH = 3 # the smallest width where you always have a pure pen color rendered a
 MEDIUM_ERASER_WIDTH = 5*WIDTH
 BIG_ERASER_WIDTH = 20*WIDTH
 PAINT_BUCKET_WIDTH = 3*WIDTH
-CURSOR_SIZE = int(screen.get_width() * 0.055)
+CURSOR_SIZE = round(screen.get_width() * 0.055)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
+LIST_RECT_CORNER_RADIUS = round(screen.get_width() * 0.015)
+
+def list_rect(surface, rect, selected):
+    inner_color, outer_color = OUTLINE, UNDRAWABLE
+    radius = LIST_RECT_CORNER_RADIUS/3 if not selected else LIST_RECT_CORNER_RADIUS
+    if selected:
+        surf.rect(surface, outer_color, rect, 6, radius)
+    surf.rect(surface, inner_color, rect, 4 if selected else 2, radius)
+    surf.rect(surface, outer_color, rect, 1, radius)
 
 print('clips read from, and saved to',WD)
 
@@ -3097,8 +3106,7 @@ class TimelineArea(LayoutElemBase):
         def draw_frame(pos, pos_dist, x, thumb_width):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
             surface.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
-            border = 1 + 2*(pos==movie.pos)
-            surf.rect(surface, OUTLINE, (x, bottom, thumb_width, height), border)
+            list_rect(surface, (x, bottom, thumb_width, height), pos==movie.pos)
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
                 eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
@@ -3321,7 +3329,7 @@ class LayersArea(LayoutElemBase):
             image_left = (width - image.get_width())/2
             surf.rect(surface, BACKGROUND, (image_left, blit_bottom, image.get_width(), image.get_height()))
             surface.blit(image, (image_left, blit_bottom), image.get_rect()) 
-            surf.rect(surface, OUTLINE, (image_left, blit_bottom, image.get_width(), image.get_height()), border)
+            list_rect(surface, (image_left, blit_bottom, image.get_width(), image.get_height()), layer_pos == movie.layer_pos)
 
             max_border = 3
             if len(movie.frames) > 1 and layer.visible and list(layout.timeline_area().light_table_positions()):
@@ -3475,9 +3483,9 @@ class MovieList:
             fulldir = os.path.join(WD, clipdir)
             frame_file = os.path.join(fulldir, CURRENT_FRAME_FILE)
             image = load_image(frame_file) if os.path.exists(frame_file) else new_frame()
-            # FIXME: take the aspect ratio from the json file into account
             # TODO: avoid reloading images if the file didn't change since the last time
-            self.images.append(scale_image(image, height=single_image_height))
+            # we use best quality here since these change rarely and the vertical ones can really look bad otherwise
+            self.images.append(scale_image(image, height=single_image_height, best_quality=True))
             self.clips.append(fulldir)
         self.clip_pos = 0#[i for i,clip in enumerate(self.clips) if clip == movie.dir][0]
     def open_clip(self, clip_pos):
@@ -3576,8 +3584,7 @@ class MovieListArea(LayoutElemBase):
                 self.buttons.append((pos,button_start))
             else:
                 self.selected_xrange = (startx, startx + image.get_width())
-            border = 1 + selected*2
-            surf.rect(surface, OUTLINE, (startx, 0, image.get_width(), image.get_height()), border)
+            list_rect(surface, (startx, 0, image.get_width(), image.get_height()), selected)
             leftmost += image.get_width()
             covered += image.get_width()
             pos += 1

@@ -24,5 +24,6 @@ EXPORTS
     blit_combined_mask 
     blit_held_mask
 	fill_32b 
+	fill_rounded_rectangle_negative
 	parallel_set_num_threads 
 	parallel_for_grain 
