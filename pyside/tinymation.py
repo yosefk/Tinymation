@@ -654,6 +654,7 @@ PAINT_BUCKET_WIDTH = 3*WIDTH
 CURSOR_SIZE = round(screen.get_width() * 0.055)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
 LIST_RECT_CORNER_RADIUS = round(screen.get_width() * 0.015)
+SELECTION_CORNER_RADIUS = LIST_RECT_CORNER_RADIUS / 3
 
 def list_rect(surface, rect, selected):
     inner_color, outer_color = OUTLINE, UNDRAWABLE
@@ -3663,7 +3664,13 @@ class ToolSelectionButton(LayoutElemBase):
         self.tool = tool
     def highlight_selection(self):
         if self.tool is layout.full_tool:
-            surf.rect(screen, SELECTED, self.rect)
+            x,y,w,h = self.rect
+            r = SELECTION_CORNER_RADIUS
+            exp_rect = [x-r/3,y-r/3,w+r*2/3,h+r*2/3]
+            surf.rect(screen, SELECTED, exp_rect)
+            surf.rect(screen, UNDRAWABLE, exp_rect, 5, r)
+            surf.rect(screen, SELECTED, exp_rect, 2.5, r)
+            surf.rect(screen, UNDRAWABLE, exp_rect, 0, r)
     def draw(self):
         self.tool.tool.draw(self.rect,self.tool.cursor[1])
     def hit(self,x,y): return self.tool.tool.hit(x,y,self.rect)

@@ -351,7 +351,7 @@ def box(surface, rect, color):
         sub.blend(color)
 
 def rect(surface, color, rect, width=0, border_radius=0):
-    if width == 0:
+    if width == 0 and border_radius == 0:
         box(surface, rect, color)
     else:
         if len(color)==3:
