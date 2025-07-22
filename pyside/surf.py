@@ -258,6 +258,7 @@ class Surface:
 
     def get_at(self, pos):
         x,y = pos
+        x,y = round(x),round(y)
         return tuple([int(c) for c in self._a[x,y]])
 
     def qimage_unsafe(self):

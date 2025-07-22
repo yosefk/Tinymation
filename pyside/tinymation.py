@@ -2267,10 +2267,12 @@ class Layout:
             if self.restore_tool_on_mouse_up:
                 restore_tool()
                 self.restore_tool_on_mouse_up = False
+                self.focus_elem = None
                 return
             if self.focus_elem:
                 trace.class_context(self.focus_elem)
                 self.focus_elem.on_mouse_up(x,y)
+                self.focus_elem = None
         elif event.type == MOUSEMOTION and self.is_pressed:
             if self.focus_elem:
                 trace.class_context(self.focus_elem)
@@ -3702,6 +3704,8 @@ class TogglePlaybackButton(Button):
         Button.draw(self, self.rect, icon)
     def on_mouse_down(self,x,y):
         toggle_playing()
+        self.redraw = True
+    def on_mouse_move(self,x,y): self.redraw = False
 
 class Tool:
     def __init__(self, tool, cursor, chars):
