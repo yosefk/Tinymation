@@ -329,6 +329,8 @@ def save(surface, filename):
     stat.stop(surface.get_width() * surface.get_height())
 
 def rotate(surface, angle):
+    if angle in [0, 360]:
+        return surface
     assert angle in [90, -90]
     rotate_stat.start()
     rotated = np.rot90(surface._a, {90:1,-90:-1}[angle])

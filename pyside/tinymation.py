@@ -2108,7 +2108,8 @@ def scale_rect(rect):
     return (round(left*sw), round(bottom*sh), round(width*sw), round(height*sh))
 
 DRAWING_LAYOUT = 1
-ANIMATION_LAYOUT = 2
+LAYERS_LAYOUT = 2
+ANIMATION_LAYOUT = 3
 
 class Layout:
     def __init__(self):
@@ -2142,7 +2143,13 @@ class Layout:
         self.elems_event_order = self.elems[1:] + [self.drawing_area()]
 
     def hidden(self, elem):
-        return self.mode == DRAWING_LAYOUT and (isinstance(elem, TimelineArea) or isinstance(elem, LayersArea) or isinstance(elem, TogglePlaybackButton))
+        if self.mode == ANIMATION_LAYOUT:
+            return False
+        if self.mode == LAYERS_LAYOUT:
+            return isinstance(elem, TimelineArea) or isinstance(elem, TogglePlaybackButton)
+        if self.mode == DRAWING_LAYOUT:
+            return isinstance(elem, TimelineArea) or isinstance(elem, LayersArea) or isinstance(elem, TogglePlaybackButton)
+        assert False, "Layout: unknown mode"
 
     def draw(self):
         if self.is_pressed:
@@ -4246,6 +4253,12 @@ def prev_frame():
         return
     movie.prev_frame()
 
+def next_layer():
+    movie.next_layer()
+
+def prev_layer():
+    movie.prev_layer()
+
 def insert_clip():
     global movie
     movie.save_before_closing()
@@ -4375,17 +4388,25 @@ TOOLS = {
     'remove-frame': Tool(NewDeleteTool(False, remove_frame, remove_clip, remove_layer), garbage_bin_cursor, ''),
 }
 
+def help_screen():
+    import help
+    images = {}
+    for name, angle, height in help.icons:
+        images[name.replace('-','_')] = scale_image(surf.rotate(load_image(f"{name}.png"), angle), height=height, best_quality=True).qimage()
+    help.HelpDialog(images).exec()
+
 FUNCTIONS = {
     'insert-frame': (insert_frame, '=+'),
     'remove-frame': (remove_frame, '-_'),
-    'next-frame': (next_frame, '.<'),
-    'prev-frame': (prev_frame, ',>'),
+    'next-frame': (next_frame, ['>','.',Qt.Key_Right]),
+    'prev-frame': (prev_frame, ['<',',',Qt.Key_Left]),
+    'next-layer': (next_layer, [Qt.Key_Up]),
+    'prev-layer': (prev_layer, [Qt.Key_Down]),
     'toggle-playing': (toggle_playing, [Qt.Key_Enter, Qt.Key_Return]),
-    'toggle-loop-mode': (toggle_loop_mode, 'c'),
-    'toggle-frame-hold': (toggle_frame_hold, 'h'),
-    'toggle-layer-lock': (toggle_layer_lock, 'l'),
+    'toggle-frame-hold': (toggle_frame_hold, 'hH'),
+    'toggle-layer-lock': (toggle_layer_lock, 'lL'),
     'zoom-to-film-res': (zoom_to_film_res, '1'),
-    'last-paint-bucket': (PaintBucketTool.choose_last_color, 'kK'),
+    'last-paint-bucket': (PaintBucketTool.choose_last_color, 'kKcC'),
 }
 
 tool_change = 0
@@ -4959,6 +4980,10 @@ def run_repl():
 
 # TODO: proper test for modifiers; less use of Ctrl
 def process_keydown_event(event):
+    if event.key() in [ord('/'),ord('?'),Qt.Key_F1]:
+        help_screen()
+        return
+
     ctrl = event.modifiers() & Qt.ControlModifier
     shift = event.modifiers() & Qt.ShiftModifier
 
@@ -5004,6 +5029,19 @@ def process_keydown_event(event):
             paste_frame()
             return
 
+    # Ctrl-[/Ctrl-]: layer up/down, alias to arrow up/down
+    if ctrl and event.key() == Qt.Key_BracketLeft:
+        prev_layer()
+        return
+    if ctrl and event.key() == Qt.Key_BracketRight:
+        next_layer()
+        return
+
+    # Ctrl-1: alias to 1
+    if ctrl and event.key() == Qt.Key_1:
+        zoom_to_film_res()
+        return
+
     # Ctrl-R: rotate
     if ctrl and event.key() == Qt.Key_R:
         swap_width_height()
@@ -5028,11 +5066,14 @@ def process_keydown_event(event):
         rename_clip()
         return
 
-    # Ctrl-1/2: set layout to drawing/animation
-    if ctrl and event.key() == Qt.Key_1:
+    # Ctrl-2/3/4: set layout to drawing/layers/animation
+    if ctrl and event.key() == Qt.Key_2:
         layout.mode = DRAWING_LAYOUT
         return
-    if ctrl and event.key() == Qt.Key_2:
+    if ctrl and event.key() == Qt.Key_3:
+        layout.mode = LAYERS_LAYOUT
+        return
+    if ctrl and event.key() == Qt.Key_4:
         layout.mode = ANIMATION_LAYOUT
         return
 
