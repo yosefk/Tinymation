@@ -52,6 +52,30 @@ double lineToPointDistance(const Line2D& l, const Point2D& p)
     return fabs(cross) / norm(v);
 }
 
+auto lineSegmentToPointDistance(const Point2D& start, const Point2D& end)
+{
+    double lineMag = distance(start, end);
+    double invSqLineMag = 1/(lineMag*lineMag);
+    Point2D d = diff(end, start);
+
+    return [=](const Point2D& p) {
+        if(lineMag < 1e-8) { //the line segment is a point
+            return distance(p, start);
+        }
+        //project the point onto the line segment
+        Point2D pd = diff(p, start);
+        double u = ( pd.x*d.x + pd.y*d.y ) * invSqLineMag;
+        //clip to [0,1]
+        u = std::min(1.0, std::max(0.0, u));
+
+        //projection point
+        Point2D proj = sum(start, mul(d, u));
+
+        //return the distance from the projection point
+        return distance(p, proj);
+    };
+}
+
 enum class Intersection
 {
     NONE,
@@ -99,11 +123,13 @@ struct SamplePoint
     bool operator!=(const SamplePoint& p) const { return !(*this == p); }
 };
 
+unsigned int g_random_seed = 1;
+
 class Noise2D
 {
   private:
     //TODO: better seeding
-    std::mt19937 rng;         // Random number generator
+    std::mt19937 rng{g_random_seed++};         // Random number generator
     std::uniform_real_distribution<double> angleDist{0.0, 2.0 * M_PI}; // For random angle (0 to 2π)
     std::uniform_real_distribution<double> magDist{0, 1};   // For random magnitude (0 to 1)
 
@@ -152,7 +178,7 @@ class ImagePainter
     void getROI(int* region);
     void paintWithin(const int* region);
     //this is a "pen" line - solid with sharp antialised edges
-    void drawLine(const Point2D& start, const Point2D& end, double width);
+    void drawLine(const Point2D& start, const Point2D& end, double width, const unsigned char* rgb=nullptr);
 
     //this is inspired by Krita's "Pencil-2"; it draws circles with the diameter equaling the line width,
     //placing them not too close to each other (it remembers the last center across calls)
@@ -166,7 +192,8 @@ class ImagePainter
     //- otherwise it does a multiplicative change using the pressure parameter, more accurately it interpolates
     //  between the old value and a new one computed by multiplying by 1-pressure, with intensity defining the weights
     //  (high intensity / middle of the circle -> more change.)
-    void drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure);
+    template<class DistFunc>
+    void drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure, const DistFunc& distFunc, double distThresh);
 
     //these are used by drawLineUsingWideSoftCiclesWithNoisyCenters
     Point2D _lastCircleCenter; // Center of the last drawn circle
@@ -179,7 +206,11 @@ class ImagePainter
     Point2D _maxPainted;
 };
 
-void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure)
+//TODO: LUT
+double sigmoid(double x) { return 1 / (1 + exp(-x)); }
+
+template<class DistFunc>
+void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure, const DistFunc& distFunc, double distThresh)
 {
     // Extend the bounding box slightly to capture anti-aliased edges
     double aa_margin = 1.0; // Extra pixels for smooth edges
@@ -197,6 +228,7 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
                 continue;
             }
             double d = distance(center, Point2D{double(x+0.5),double(y+0.5)});
+
             // Anti-aliasing: Smooth transition near the edge
             const double aa_width = 1.0; // Width of the anti-aliasing band
             const double feather_width = 3;
@@ -233,12 +265,41 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
             int pixValChange = round(double(greatestPixValChange) * intensity);
             int newVal;
             if(greatestPixValChange > 0) {
-                newVal = std::max(0, std::min(oldVal + pixValChange, 255));
+		int nv = oldVal + pixValChange;
+		//an ugly and limited way to solve a more general problem, where additive brushes, if you apply
+		//them at the same line repeatedly, eventually saturate all the pixels and then the line is no longer
+		//antialiased like it was before the saturation. this handles it crudely for near-highest pressures
+		//(we cap pressure at 0.7 when calling this code), which empirically solves an otherwise seemingly
+		//frequent case of saturation when pressing hard on the pencil. you can of course still saturate
+		//the pixels at lower pressures, but the lower pressure, the more passes it will take (and the less
+		//likely you are to be accurate enouogh at repeatedly drawing at the exact same line for the aliasing
+		//to appear)
+		if(pressure > 0.65 && nv > pixValChange*10) {
+		     nv = std::max(oldVal, pixValChange*10);
+		}
+                newVal = std::max(0, std::min(nv, 255));
             }
             else {
                 newVal = std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
             }
+
             if(newVal != oldVal) {
+	        //don't deposit/erase color at the circle boundaries:
+		/*
+		double w = 2;
+                double c = std::max(-w, std::min(w, distFunc(Point2D{(double)x,(double)y}) - distThresh));
+                int grey = (1-sigmoid(c*6/w)) * 255;
+                if(grey >= 255 - 30) {
+                    grey = 255;
+                }
+                if(!_erase && newVal >= grey) {
+	            continue;
+                }
+	        if(_erase && oldVal <= 255-grey) {
+		    continue;
+                }
+		*/
+
                 _image[ind] = newVal;
                 _xmin = std::min(_xmin, x);
                 _ymin = std::min(_ymin, y);
@@ -271,9 +332,12 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double segmentLength = distance(start, end);
     Point2D direction = diff(end, start);
 
+    auto distFunc = lineSegmentToPointDistance(start ,end);
+    double distThresh = maxCenterNoise * 2;
+
     if (segmentLength == 0) {
         if (_isFirstSegment) {
-            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange, pressure);
+            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange, pressure, distFunc, distThresh);
             _lastCircleCenter = start;
             _remainingDistance = interval;
         }
@@ -285,7 +349,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
 
     // For the first segment, start at the start point
     if (_isFirstSegment) {
-        drawSoftCircle(start, radius, greatestPixValChange, pressure);
+        drawSoftCircle(start, radius, greatestPixValChange, pressure, distFunc, distThresh);
         _lastCircleCenter = start;
         _remainingDistance = interval;
         _isFirstSegment = false;
@@ -295,7 +359,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double distanceToNext = _remainingDistance;
     while (distanceToNext <= segmentLength + 1e-10) { // Small epsilon for floating-point errors
         Point2D center = sum(start, mul(unitDirection, distanceToNext));
-        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure);
+        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure, distFunc, distThresh);
         _lastCircleCenter = center;
         distanceToNext += interval;
     }
@@ -334,31 +398,10 @@ void ImagePainter::paintWithin(const int* region)
     _maxPainted.y = region[3];
 }
 
-//TODO: LUT
-double sigmoid(double x) { return 1 / (1 + exp(-x)); }
-
-void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double width)
+void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double width, const unsigned char* rgb)
 {
-    double lineMag = distance(start, end);
-    double invSqLineMag = 1/(lineMag*lineMag);
-    Point2D d = diff(end, start);
+    auto distFromLine = lineSegmentToPointDistance(start, end);
 
-    auto distFromLine = [&](const Point2D& p) {
-        if(lineMag < 1e-8) { //the line segment is a point
-            return distance(p, start);
-        }
-        //project the point onto the line segment
-        Point2D pd = diff(p, start);
-        double u = ( pd.x*d.x + pd.y*d.y ) * invSqLineMag;
-        //clip to [0,1]
-        u = std::min(1.0, std::max(0.0, u));
-
-        //projection point
-        Point2D proj = sum(start, mul(d, u));
-
-        //return the distance from the projection point
-        return distance(p, proj);
-    };
     int startx = std::max(floor(std::min(start.x,end.x) - width), _minPainted.x);
     int starty = std::max(floor(std::min(start.y,end.y) - width), _minPainted.y);
     int endx = std::min(ceil(std::max(start.x,end.x) + width), _maxPainted.x);

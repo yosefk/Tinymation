@@ -2603,8 +2603,12 @@ class DrawingArea(LayoutElemBase):
 
     def _draw_region(self, frame_region):
         xmin, ymin, xmax, ymax = frame_region
-        xmax += 1
-        ymax += 1
+        interp_margin = 2 # since we're doing bicubic interpolation, to repaint a region, we need
+        # to add a bit of a margin
+        xmax += 1 + interp_margin
+        ymax += 1 + interp_margin
+        xmin -= interp_margin
+        ymin -= interp_margin
 
         # trim region to the currently displayed area [to avoid scaling stuff needlessly]
         (zxmin, zymin, zw, zh), _, _ = self.rois()
