@@ -265,38 +265,34 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
             int pixValChange = round(double(greatestPixValChange) * intensity);
             int newVal;
             if(greatestPixValChange > 0) {
-		int nv = oldVal + pixValChange;
-		//an ugly and limited way to solve a more general problem, where additive brushes, if you apply
-		//them at the same line repeatedly, eventually saturate all the pixels and then the line is no longer
-		//antialiased like it was before the saturation. this handles it crudely for near-highest pressures
-		//(we cap pressure at 0.7 when calling this code), which empirically solves an otherwise seemingly
-		//frequent case of saturation when pressing hard on the pencil. you can of course still saturate
-		//the pixels at lower pressures, but the lower pressure, the more passes it will take (and the less
-		//likely you are to be accurate enouogh at repeatedly drawing at the exact same line for the aliasing
-		//to appear)
-		if(pressure > 0.65 && nv > pixValChange*10) {
-//		     nv = std::max(oldVal, pixValChange*10);
-		}
-                newVal = std::max(0, std::min(nv, 255));
+                newVal = std::max(0, std::min(oldVal + pixValChange, 255));
+	        if(newVal >= 255-30) {
+		    newVal = 255;
+	        }
             }
             else {
                 newVal = std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
             }
 
             if(newVal != oldVal) {
-	        //don't deposit/erase color at the circle boundaries:
-		double w = 2;
-                double c = std::max(-w, std::min(w, distFunc(Point2D{(double)x,(double)y}) - distThresh));
-                int grey = (1-sigmoid(c*6/w)) * 255;
-                if(grey >= 255 - 30) {
-                    grey = 255;
-                }
-                if(!_erase && newVal >= grey) {//*3) {
-	            continue;
-                }
-	        if(_erase && oldVal <= 255-grey*5) {
-//		    continue;
-                }
+	        //don't deposit too much color at the line boundaries. additive brushes, if you apply
+		//them at the same line repeatedly, eventually saturate all the pixels and then the line is no longer
+		//antialiased like it was before the saturation. currently ignoring the problem for erasers
+		//where you'd need a somewhat different formula for distThresh at least (so it seems from testing);
+		//the problem is more acute with the pencil than the eraser in my testing since with a pencil you
+		//draw repeatedly to strengthen the line and aliasing appears quickly and often in my usage,
+		//more so than with the eraser
+		if(!_erase) {
+                    double w = 2;
+	            double c = std::max(-w, std::min(w, distFunc(Point2D{(double)x,(double)y}) - distThresh));
+	            int grey = (1-sigmoid(c*6/w)) * 255;
+	            if(grey >= 255 - 30) {
+	                grey = 255;
+	            }
+	            if(newVal > grey) {
+			continue;
+	            }
+		}
 
                 _image[ind] = newVal;
                 _xmin = std::min(_xmin, x);
@@ -330,7 +326,6 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double segmentLength = distance(start, end);
     Point2D direction = diff(end, start);
 
-//    auto distFunc = lineSegmentToPointDistance(start ,end);
     auto distFunc = [=](const Point2D& p) { return lineToPointDistance(Line2D{start, end}, p); };
     double distThresh = maxCenterNoise;
 
