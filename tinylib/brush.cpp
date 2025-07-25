@@ -275,7 +275,7 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
 		//likely you are to be accurate enouogh at repeatedly drawing at the exact same line for the aliasing
 		//to appear)
 		if(pressure > 0.65 && nv > pixValChange*10) {
-		     nv = std::max(oldVal, pixValChange*10);
+//		     nv = std::max(oldVal, pixValChange*10);
 		}
                 newVal = std::max(0, std::min(nv, 255));
             }
@@ -285,20 +285,18 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
 
             if(newVal != oldVal) {
 	        //don't deposit/erase color at the circle boundaries:
-		/*
 		double w = 2;
                 double c = std::max(-w, std::min(w, distFunc(Point2D{(double)x,(double)y}) - distThresh));
                 int grey = (1-sigmoid(c*6/w)) * 255;
                 if(grey >= 255 - 30) {
                     grey = 255;
                 }
-                if(!_erase && newVal >= grey) {
+                if(!_erase && newVal >= grey) {//*3) {
 	            continue;
                 }
-	        if(_erase && oldVal <= 255-grey) {
-		    continue;
+	        if(_erase && oldVal <= 255-grey*5) {
+//		    continue;
                 }
-		*/
 
                 _image[ind] = newVal;
                 _xmin = std::min(_xmin, x);
@@ -332,8 +330,9 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double segmentLength = distance(start, end);
     Point2D direction = diff(end, start);
 
-    auto distFunc = lineSegmentToPointDistance(start ,end);
-    double distThresh = maxCenterNoise * 2;
+//    auto distFunc = lineSegmentToPointDistance(start ,end);
+    auto distFunc = [=](const Point2D& p) { return lineToPointDistance(Line2D{start, end}, p); };
+    double distThresh = maxCenterNoise;
 
     if (segmentLength == 0) {
         if (_isFirstSegment) {
