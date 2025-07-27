@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
-#include <unordered_map>
 
 struct Point2D
 {
@@ -15,6 +14,8 @@ struct Point2D
     bool operator==(const Point2D& p) const { return x==p.x && y==p.y; }
     bool operator!=(const Point2D& p) const { return !(*this == p); }
 };
+
+//you don't really want to use it, but for quick hacks, it's there
 namespace std {
     template <>
     struct hash<Point2D> {
@@ -194,6 +195,58 @@ struct Coord
     Coord neigh(int xoft, int yoft) const { return {x+xoft,y+yoft}; }
 };
 
+class CoordSet
+{
+  public:
+    struct Value
+    {
+        unsigned char pixVal=0;
+        bool valid=false;
+    };
+    void setRegion(int x, int y, int width, int height) {
+        if(_values.size() < width*height) {
+            _values.resize(width*height);
+        }
+        _x = x;
+        _y = y;
+        _width = width;
+        _height = height;
+        std::fill(_values.begin(), _values.end(), Value());
+    }
+    void setRegion(const Point2D& center, int radius) {
+        int x = (int)floor(center.x - radius);
+        int y = (int)floor(center.y - radius);
+        int width = (int)ceil(center.x + radius) - x;
+        int height = (int)ceil(center.y + radius) - y;
+        setRegion(x,y,width,height);
+    }
+    void addPixel(int x, int y, int pixVal) {
+        if(outOfBounds(x,y)) {
+            return;
+        }
+        Value& v = _values[index(x,y)];
+        v.valid = true;
+        v.pixVal = pixVal;
+    }
+    Value findPixel(int x, int y) const {
+        if(outOfBounds(x,y)) {
+            return Value();
+        }
+        return _values[index(x,y)];
+    }
+
+  private:
+    bool outOfBounds(int x, int y) const {
+        return x < _x || x >= _x + _width || y < _y || y >= _y + _height;
+    }
+    int index(int x, int y) const { return (y-_y)*_width + (x-_x); }
+    int _x = 0;
+    int _y = 0;
+    int _width = 0;
+    int _height = 0;
+    std::vector<Value> _values;
+};
+
 class ImagePainter
 {
   public:
@@ -247,17 +300,29 @@ class ImagePainter
 
     Noise2D _noise2D;
 
+    ///don't paint outside this rectangle
     Point2D _minPainted;
     Point2D _maxPainted;
-    Point2D _lastStart;
+
+    //drawLine maintains the set of coordinates around the previous end coordinate
+    //(passed to the previous drawLine call) to avoid artifacts of alpha blending
+    CoordSet _aroundPrevEndpoint;
+    CoordSet _aroundCurrEndpoint;
+
+    //drawLine detects "sharp turns" in the polyline since otherwise its artifact
+    //avoidance for the points where polyline segments connect creates its own artifacts
+    //upon sharp turns
+    Point2D _lastStart; //we need the previous start coordinate to detect a turn
     bool _lastStartValid = false;
-
-    std::unordered_map<Point2D,int> _lastEndPoints;
-    //didn't work
-    Point2D _minLastEnd;
-    Point2D _maxLastEnd;
-
-    bool _detectSharpTurns = false; //FIXME
+    //we turn off sharp turn detection at the end (maybe too late but hopefully it prevents
+    //at least some "fat dots" when raising the pen), and more shockingly at the beginning
+    //(because tablets produce strange coordinates early on sometimes and this paints ugly
+    //as it is without the additional line fatness when a sharp turn is detected in those
+    //weird coordinates.) so we ignore sharp turns until we accumulate enough polyline distance
+    //from the start (which means a sharp turn right at the beginning can show the artifact
+    //sharp turn detection is supposed to prevent... not too bad for a cleanup pen though
+    //and the "real" solution is to somehow deal with the bad input we sometimes get)
+    bool _detectSharpTurns = false;
     double _cumDist = 0;
 };
 
@@ -465,19 +530,13 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
     //we can't erase an already fully-erased pixel, or strengthen an already-strongest-possible one
     int immutableVal = _erase ? 0 : 255;
 
-    std::vector<Coord> boundaryPoints;
-
-//    printf("LINE %f %f -> %f %f\n", start.x, start.y, end.x, end.y);
-
-    std::unordered_map<Point2D,int> newLast;
-
+    //detect sharp turns to prevent artifacts (see also below)
     if(!_detectSharpTurns) {
         _cumDist += distance(start, end);
         if(_cumDist > 15) {
             _detectSharpTurns = true;
         }
     }
-
 
     bool sharpTurn = false;
     if(!_lastStartValid) {
@@ -486,10 +545,10 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
     else if(_detectSharpTurns && std::max(distance(_lastStart, start), distance(start, end)) > 0) {
         double cos = cosOfAngleBetween2Lines(_lastStart, start, end);
         sharpTurn = cos < 0.5;
-//        if(sharpTurn) _image[int(start.x)*_xstride+int(start.y)*_ystride-3] = 255;
-        printf("sharpTurn %d cos=%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f\n", (int)sharpTurn, cos, _lastStart.x, _lastStart.y, start.x, start.y, end.x, end.y);
     }
     _lastStart = start;
+
+    _aroundCurrEndpoint.setRegion(end, halfWidth+w+2);
 
     for(int y = starty; y < endy; y++) {
         for(int x = startx; x < endx; x++) {
@@ -515,52 +574,41 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
             if(_erase) {
                 newVal = std::min(255-grey, oldVal);
             }
+            //here we use alpha blending ("over") rather than max blending.
+            //there's no reason to not do this for erasers as well, except that currently
+            //the actually used erasers don't use drawLine but rather are pencil/soft circle
+            //based - if we ever want to use "sharp" erasers, there's value in avoiding aliasing
+            //artifacts when 2 adjacent lines (whether created by pens or erasers) get close enough
+            //("over" blending makes these artifacts much less pronounced)
             else {
-//                newVal = std::max(grey, oldVal);
-#if 1// NEWPEN
-                auto q = _lastEndPoints.find(p);
-                bool domax=false;
-                int realoldval = 0;
-                if(!sharpTurn && q!=_lastEndPoints.end()) {
-                    realoldval = oldVal;
-                    oldVal = q->second;
-                    domax=true;
+                int valAfterLastDrawLine = 0;
+                CoordSet::Value v = _aroundPrevEndpoint.findPixel(x,y);
+                if(v.valid && !sharpTurn) {
+                    valAfterLastDrawLine = oldVal;
+                    oldVal = v.pixVal; //even older than the original oldVal... this is the value
+                    //_before_ the last drawLine. basically when hitting a pixel near the last end
+                    //point, we take the maximal value between what the 2 lines would have painted
+                    //there [which is similar to "reverting to max blending" at this region but
+                    //not exactly since the stuff painted there /before the previous drawLine call/
+                    //is blended with "over" rather than max]
+                    //
+                    //if we don't handle this overlap between the 2 line segments specially,
+                    //we will see artifacts (fat dots) where they connect. we avoid this special
+                    //casing upon sharp turns since it comes with an artifact of its own ("thin"
+                    //lines at the turn, compared to the fatter lines further away from the turning
+                    //point that result from over blending 2 lines drawn one on top of another)
                 }
-                newVal = std::max(grey, oldVal);
-//                int maxChange = (255-oldVal) / 4;
-//                int maxVal = std::min(grey + maxChange, 255);
-//                newVal = (raw_u >= 0 && raw_u <= 1) ? std::min(maxVal, grey+oldVal) : oldVal;//std::min(255, grey+oldVal > grey*5 ? std::max(oldVal, grey*5) : grey+oldVal) : oldVal;// std::max(grey, oldVal);
-//
-//                newVal = (raw_u >= 0 && raw_u <= 1) ? std::min(255, grey+oldVal) : oldVal;//std::min(255, grey+oldVal > grey*5 ? std::max(oldVal, grey*5) : grey+oldVal) : oldVal;// std::max(grey, oldVal);
-//
-//
-//                //over
-//                newVal = (raw_u<=1) ? (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8 : oldVal;
                 newVal = (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8;
-                if(domax) {
-                    newVal = std::max(newVal,realoldval);
-                }
-#endif
-//                newVal = (raw_u>=0 &&raw_u<=1) ? (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8 : oldVal;
-//
-//                newVal = (_lastEndPoints.find(p)==_lastEndPoints.end()) ? (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8 : std::max(oldVal,grey);
-                /*
-                bool overlap = p.x >= _minLastEnd.x && p.y >= _minLastEnd.y && p.x < _maxLastEnd.x && p.y < _maxLastEnd.y; 
-                if(overlap) printf("overlap %d %d\n", x,y);
-                newVal = (!overlap) ? (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8 : std::max(oldVal, grey);
-                if(grey >= 255-30){
-                        newVal = 255;
-                }
-                */
-                if(grey >= 255-30){
-                        newVal = 255;
+                newVal = std::max(newVal, valAfterLastDrawLine);
+
+                //if we wanted to paint a pixel stopping flood fill, let's do it regardless
+                //of what came before us
+                if(grey >= 255-30) {
+                    newVal = 255;
                 }
                 if(distance(p, end) <= halfWidth+w+1) {
-                    newLast[p] = oldVal;
+                    _aroundCurrEndpoint.addPixel(x,y,oldVal);
                 }
-            }
-            if(!_erase && dist > halfWidth-.5 && raw_u >= 0 && raw_u <= 1) {
-                boundaryPoints.push_back({x,y});
             }
             if(newVal != oldVal) {
                 _image[ind] = newVal;
@@ -572,53 +620,10 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
             }
         }
     }
-    _lastEndPoints = newLast;
+    //should std::move the vector of CoordSet::Value without reallocation
+    std::swap(_aroundCurrEndpoint, _aroundPrevEndpoint);
 
-    if(!_erase) {
-    double pressure = 0.7;
-    int greatestPixValChange = 96;//192;//2 + 64*std::min(1., std::max(0., pressure*pressure - 0.1 + pressure*0.2)) * (_erase ? -1 : 1);//std::max(0., pressure*pressure - 0.1);
-    std::vector<Coord> pointsBetweenLines;
-    auto distFunc = [](const Point2D& p) { return 0; };
-    for(const auto& p : boundaryPoints) {
-        //FIXME: image boundaries
-        int midVal = value(p);
-        auto isBetweenDark = [&](int xoft, int yoft) {
-            int n1 = value(p.neigh(xoft,yoft));
-            int n2 = value(p.neigh(-xoft,-yoft));
-            return n1 > midVal && n2 > midVal && n1 > 128 && n2 > 128;
-        };
-        if(isBetweenDark(0,1) || isBetweenDark(1,0)) {
-            pointsBetweenLines.push_back(p);
-//            _image[p.x*_xstride+p.y*_ystride-3] = 255;
-//            _image[p.x*_xstride+p.y*_ystride] = (value(p.neigh(0,1)) + value(p.neigh(0,-1)) + value(p.neigh(1,0)) + value(p.neigh(-1,0))) >> 2;
-//            Point2D pd{double(p.x), double(p.y)};
-//            double raw_u;
-//            Point2D proj = projOntoLine(pd, raw_u);
-//            drawSoftCircle(proj, distance(pd, proj), greatestPixValChange, pressure, distFunc, 1); 
-//            drawSoftCircle(pd, 2, greatestPixValChange, pressure, distFunc, 1); 
-
-//                drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure, distFunc, 1);
-//            pointsBetweenLines.push_back(proj);
-        }
-    }
-    auto randomize = [this](const Coord& p) {
-       if(value(p) == 255) return;
-       _image[p.x*_xstride+p.y*_ystride] = std::max(0, std::min(255, value(p) + (rand()%32 - 16)));// (value(p.neigh(0,1)) + value(p.neigh(0,-1)) + value(p.neigh(1,0)) + value(p.neigh(-1,0))) >> 2;
-
-    };
-    for(const auto& p : pointsBetweenLines) {
-        for(int y=-1; y<=1; ++y) {
-            for(int x=-1; x<=1; ++x) {
-//                randomize(p.neigh(x,y));
-            }
-        }
-    }
-    }
     onLinePainted(start, end);
-
-    double margin = halfWidth;//+w+1;
-    _minLastEnd = sum(end, Point2D{-margin,-margin});
-    _maxLastEnd = sum(end, Point2D{margin,margin});
 }
 
 Point2D tangent(const SamplePoint& p1, const SamplePoint& p2)
@@ -779,6 +784,9 @@ void Brush::paint(SamplePoint& p, double zoomCoeff)
         else {
             Point2D newTangent = tangent(p, _olderP);
             if((newTangent.x == 0 && newTangent.y == 0) || (_prevTangent.x == 0 && _prevTangent.y == 0)) {
+                //not sure why Krita doesn't have this test; it prevents us from painting a line early on when we don't have
+                //enough history to paint a bezier segment (rather than not having enough _curvature_ for it to make sense).
+                //without this test it seems that we paint a line and then a bezier segment starting at the same point
                 if(_olderP.pos != _prevP.pos) {
                     //printf("paintLine prevP %f %f -> p %f %f (olderP %f %f)\n", _prevP.pos.x, _prevP.pos.y, p.pos.x, p.pos.y, _olderP.pos.x, _olderP.pos.y);
                     paintLine(_prevP, p);
@@ -800,7 +808,6 @@ void Brush::paint(SamplePoint& p, double zoomCoeff)
 
 void Brush::endPaint()
 {
-    printf("endPaint\n");
     _painter->detectSharpTurns(false); //not sure this helps (with a fat dot appearing at the end in drawLine) but seemingly can't hurt
     if(!_paintedAtLeastOnce) {
         paintAt(_prevP);
@@ -808,7 +815,6 @@ void Brush::endPaint()
     else if(_smoothing != Smoothing::NONE && _haveTangent) {
         _haveTangent = false;
         Point2D newTangent = tangent(_prevP, _olderP);
-        printf("last paintBezierSegment\n");
         paintBezierSegment(_olderP, _prevP, _prevTangent, newTangent);
     }
 }
@@ -922,7 +928,7 @@ void Brush::paintLine(const SamplePoint& p1, const SamplePoint& p2)
         else {
             if(_polyline.back() != p1) {
                 //not sure why this happnes... it occasionally does - TODO: debug this... doesn't seem to cause visible adverse effects...
-                //printf("Brush::paintLine - WARNING: paintLine called with p1 different from the previous paintLine's p2!\n");
+                printf("Brush::paintLine - WARNING: paintLine called with p1 different from the previous paintLine's p2!\n");
             }
             _polyline.push_back(p2);
         }
