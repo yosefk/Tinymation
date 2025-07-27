@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <unordered_map>
 
 struct Point2D
 {
@@ -14,14 +15,48 @@ struct Point2D
     bool operator==(const Point2D& p) const { return x==p.x && y==p.y; }
     bool operator!=(const Point2D& p) const { return !(*this == p); }
 };
+namespace std {
+    template <>
+    struct hash<Point2D> {
+        size_t operator()(const Point2D& p) const noexcept {
+            // Combine hashes of x and y (example using std::hash)
+            size_t h1 = std::hash<int>{}(p.x);
+            size_t h2 = std::hash<int>{}(p.y);
+            return h1 ^ (h2 << 1); // Simple hash combination
+        }
+    };
+}
 
 Point2D sum(const Point2D& p1, const Point2D& p2) { return Point2D{p1.x+p2.x, p1.y+p2.y}; }
 Point2D diff(const Point2D& p1, const Point2D& p2) { return Point2D{p1.x-p2.x, p1.y-p2.y}; }
 Point2D mul(const Point2D& p, double f) { return Point2D{p.x*f, p.y*f}; }
 Point2D mid(const Point2D& p1, const Point2D& p2) { return mul(sum(p1, p2), 0.5); }
+double dot(const Point2D& p1, const Point2D& p2) { return p1.x*p2.x + p1.y*p2.y; }
 double norm(const Point2D& v) { return sqrt(v.x*v.x + v.y*v.y); }
 double manhattanLength(const Point2D& v) { return fabs(v.x) + fabs(v.y); }
 double distance(const Point2D& p1, const Point2D& p2) { return norm(diff(p1, p2)); }
+
+
+double cosOfAngleBetween2Lines(const Point2D& p1, const Point2D& p2, const Point2D& p3) {
+    // Compute direction vectors: v1 = p2 - p1, v2 = p3 - p2
+    Point2D v1 = diff(p2, p1); // Vector from p1 to p2
+    Point2D v2 = diff(p3, p2); // Vector from p2 to p3
+
+    // Compute magnitudes of the vectors
+    double mag_v1 = norm(v1);
+    double mag_v2 = norm(v2);
+
+    double dot_product = dot(v1, v2);
+
+    // Compute cosine of the angle
+    double cos_theta = dot_product / (mag_v1 * mag_v2);
+
+    // Clamp cos_theta to [-1, 1] to handle numerical errors
+    if (cos_theta > 1.0) cos_theta = 1.0;
+    if (cos_theta < -1.0) cos_theta = -1.0;
+
+    return cos_theta;
+}
 
 struct Line2D
 {
@@ -52,27 +87,27 @@ double lineToPointDistance(const Line2D& l, const Point2D& p)
     return fabs(cross) / norm(v);
 }
 
-auto lineSegmentToPointDistance(const Point2D& start, const Point2D& end)
+auto projectPointOntoLineSegument(const Point2D& start, const Point2D& end)
 {
     double lineMag = distance(start, end);
     double invSqLineMag = 1/(lineMag*lineMag);
     Point2D d = diff(end, start);
 
-    return [=](const Point2D& p) {
+    return [=](const Point2D& p, double& raw_u) {
         if(lineMag < 1e-8) { //the line segment is a point
-            return distance(p, start);
+            return start;
         }
         //project the point onto the line segment
         Point2D pd = diff(p, start);
         double u = ( pd.x*d.x + pd.y*d.y ) * invSqLineMag;
+        raw_u = u;
         //clip to [0,1]
         u = std::min(1.0, std::max(0.0, u));
 
         //projection point
         Point2D proj = sum(start, mul(d, u));
 
-        //return the distance from the projection point
-        return distance(p, proj);
+        return proj;
     };
 }
 
@@ -152,6 +187,13 @@ class Noise2D
     }
 };
 
+struct Coord
+{
+    int x=0;
+    int y=0;
+    Coord neigh(int xoft, int yoft) const { return {x+xoft,y+yoft}; }
+};
+
 class ImagePainter
 {
   public:
@@ -185,7 +227,10 @@ class ImagePainter
     //and adding some noise to the center location 
     void drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& start, const SamplePoint& end, double width);
 
+    void detectSharpTurns(bool b) { _detectSharpTurns=b; if(!b) _cumDist=0; }
+
   private:
+    int value(const Coord& c) { return _image[_ystride*c.y + _xstride*c.x]; }
     //currently this function can do two kinds of changes to the image pixels:
     //- if greatestPixValChange is positive, it does an additive change (it computes an intensity
     //  per pixel to make the circle edges soft, and then adds greatestPixValChange * intensity, clamping to 255)
@@ -204,6 +249,16 @@ class ImagePainter
 
     Point2D _minPainted;
     Point2D _maxPainted;
+    Point2D _lastStart;
+    bool _lastStartValid = false;
+
+    std::unordered_map<Point2D,int> _lastEndPoints;
+    //didn't work
+    Point2D _minLastEnd;
+    Point2D _maxLastEnd;
+
+    bool _detectSharpTurns = false; //FIXME
+    double _cumDist = 0;
 };
 
 //TODO: LUT
@@ -266,33 +321,33 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
             int newVal;
             if(greatestPixValChange > 0) {
                 newVal = std::max(0, std::min(oldVal + pixValChange, 255));
-	        if(newVal >= 255-30) {
-		    newVal = 255;
-	        }
+                if(newVal >= 255-30) {
+                    newVal = 255;
+                }
             }
             else {
                 newVal = std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
             }
 
             if(newVal != oldVal) {
-	        //don't deposit too much color at the line boundaries. additive brushes, if you apply
-		//them at the same line repeatedly, eventually saturate all the pixels and then the line is no longer
-		//antialiased like it was before the saturation. currently ignoring the problem for erasers
-		//where you'd need a somewhat different formula for distThresh at least (so it seems from testing);
-		//the problem is more acute with the pencil than the eraser in my testing since with a pencil you
-		//draw repeatedly to strengthen the line and aliasing appears quickly and often in my usage,
-		//more so than with the eraser
-		if(!_erase) {
+                //don't deposit too much color at the line boundaries. additive brushes, if you apply
+                //them at the same line repeatedly, eventually saturate all the pixels and then the line is no longer
+                //antialiased like it was before the saturation. currently ignoring the problem for erasers
+                //where you'd need a somewhat different formula for distThresh at least (so it seems from testing);
+                //the problem is more acute with the pencil than the eraser in my testing since with a pencil you
+                //draw repeatedly to strengthen the line and aliasing appears quickly and often in my usage,
+                //more so than with the eraser
+                if(!_erase) {
                     double w = 2;
-	            double c = std::max(-w, std::min(w, distFunc(Point2D{(double)x,(double)y}) - distThresh));
-	            int grey = (1-sigmoid(c*6/w)) * 255;
-	            if(grey >= 255 - 30) {
-	                grey = 255;
-	            }
-	            if(newVal > grey) {
-			continue;
-	            }
-		}
+                    double c = std::max(-w, std::min(w, distFunc(Point2D{(double)x,(double)y}) - distThresh));
+                    int grey = (1-sigmoid(c*6/w)) * 255;
+                    if(grey >= 255 - 30) {
+                        grey = 255;
+                    }
+                    if(newVal > grey) {
+                        continue;
+                    }
+                }
 
                 _image[ind] = newVal;
                 _xmin = std::min(_xmin, x);
@@ -394,7 +449,8 @@ void ImagePainter::paintWithin(const int* region)
 
 void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double width, const unsigned char* rgb)
 {
-    auto distFromLine = lineSegmentToPointDistance(start, end);
+    double raw_u = 0;
+    auto projOntoLine = projectPointOntoLineSegument(start, end);
 
     int startx = std::max(floor(std::min(start.x,end.x) - width), _minPainted.x);
     int starty = std::max(floor(std::min(start.y,end.y) - width), _minPainted.y);
@@ -409,6 +465,32 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
     //we can't erase an already fully-erased pixel, or strengthen an already-strongest-possible one
     int immutableVal = _erase ? 0 : 255;
 
+    std::vector<Coord> boundaryPoints;
+
+//    printf("LINE %f %f -> %f %f\n", start.x, start.y, end.x, end.y);
+
+    std::unordered_map<Point2D,int> newLast;
+
+    if(!_detectSharpTurns) {
+        _cumDist += distance(start, end);
+        if(_cumDist > 15) {
+            _detectSharpTurns = true;
+        }
+    }
+
+
+    bool sharpTurn = false;
+    if(!_lastStartValid) {
+        _lastStartValid = true;
+    }
+    else if(_detectSharpTurns && std::max(distance(_lastStart, start), distance(start, end)) > 0) {
+        double cos = cosOfAngleBetween2Lines(_lastStart, start, end);
+        sharpTurn = cos < 0.5;
+//        if(sharpTurn) _image[int(start.x)*_xstride+int(start.y)*_ystride-3] = 255;
+        printf("sharpTurn %d cos=%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f\n", (int)sharpTurn, cos, _lastStart.x, _lastStart.y, start.x, start.y, end.x, end.y);
+    }
+    _lastStart = start;
+
     for(int y = starty; y < endy; y++) {
         for(int x = startx; x < endx; x++) {
             int ind = y*_ystride + x*_xstride;
@@ -416,7 +498,8 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
             if(oldVal == immutableVal) {
                 continue;
             }
-            double dist = distFromLine({(double)x,(double)y});
+            Point2D p{double(x),double(y)};
+            double dist = distance(p, projOntoLine(p, raw_u));
 
             if(dist > halfWidth+w+1) {
                 continue;
@@ -433,7 +516,51 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
                 newVal = std::min(255-grey, oldVal);
             }
             else {
+//                newVal = std::max(grey, oldVal);
+#if 1// NEWPEN
+                auto q = _lastEndPoints.find(p);
+                bool domax=false;
+                int realoldval = 0;
+                if(!sharpTurn && q!=_lastEndPoints.end()) {
+                    realoldval = oldVal;
+                    oldVal = q->second;
+                    domax=true;
+                }
                 newVal = std::max(grey, oldVal);
+//                int maxChange = (255-oldVal) / 4;
+//                int maxVal = std::min(grey + maxChange, 255);
+//                newVal = (raw_u >= 0 && raw_u <= 1) ? std::min(maxVal, grey+oldVal) : oldVal;//std::min(255, grey+oldVal > grey*5 ? std::max(oldVal, grey*5) : grey+oldVal) : oldVal;// std::max(grey, oldVal);
+//
+//                newVal = (raw_u >= 0 && raw_u <= 1) ? std::min(255, grey+oldVal) : oldVal;//std::min(255, grey+oldVal > grey*5 ? std::max(oldVal, grey*5) : grey+oldVal) : oldVal;// std::max(grey, oldVal);
+//
+//
+//                //over
+//                newVal = (raw_u<=1) ? (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8 : oldVal;
+                newVal = (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8;
+                if(domax) {
+                    newVal = std::max(newVal,realoldval);
+                }
+#endif
+//                newVal = (raw_u>=0 &&raw_u<=1) ? (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8 : oldVal;
+//
+//                newVal = (_lastEndPoints.find(p)==_lastEndPoints.end()) ? (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8 : std::max(oldVal,grey);
+                /*
+                bool overlap = p.x >= _minLastEnd.x && p.y >= _minLastEnd.y && p.x < _maxLastEnd.x && p.y < _maxLastEnd.y; 
+                if(overlap) printf("overlap %d %d\n", x,y);
+                newVal = (!overlap) ? (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8 : std::max(oldVal, grey);
+                if(grey >= 255-30){
+                        newVal = 255;
+                }
+                */
+                if(grey >= 255-30){
+                        newVal = 255;
+                }
+                if(distance(p, end) <= halfWidth+w+1) {
+                    newLast[p] = oldVal;
+                }
+            }
+            if(!_erase && dist > halfWidth-.5 && raw_u >= 0 && raw_u <= 1) {
+                boundaryPoints.push_back({x,y});
             }
             if(newVal != oldVal) {
                 _image[ind] = newVal;
@@ -445,7 +572,53 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
             }
         }
     }
+    _lastEndPoints = newLast;
+
+    if(!_erase) {
+    double pressure = 0.7;
+    int greatestPixValChange = 96;//192;//2 + 64*std::min(1., std::max(0., pressure*pressure - 0.1 + pressure*0.2)) * (_erase ? -1 : 1);//std::max(0., pressure*pressure - 0.1);
+    std::vector<Coord> pointsBetweenLines;
+    auto distFunc = [](const Point2D& p) { return 0; };
+    for(const auto& p : boundaryPoints) {
+        //FIXME: image boundaries
+        int midVal = value(p);
+        auto isBetweenDark = [&](int xoft, int yoft) {
+            int n1 = value(p.neigh(xoft,yoft));
+            int n2 = value(p.neigh(-xoft,-yoft));
+            return n1 > midVal && n2 > midVal && n1 > 128 && n2 > 128;
+        };
+        if(isBetweenDark(0,1) || isBetweenDark(1,0)) {
+            pointsBetweenLines.push_back(p);
+//            _image[p.x*_xstride+p.y*_ystride-3] = 255;
+//            _image[p.x*_xstride+p.y*_ystride] = (value(p.neigh(0,1)) + value(p.neigh(0,-1)) + value(p.neigh(1,0)) + value(p.neigh(-1,0))) >> 2;
+//            Point2D pd{double(p.x), double(p.y)};
+//            double raw_u;
+//            Point2D proj = projOntoLine(pd, raw_u);
+//            drawSoftCircle(proj, distance(pd, proj), greatestPixValChange, pressure, distFunc, 1); 
+//            drawSoftCircle(pd, 2, greatestPixValChange, pressure, distFunc, 1); 
+
+//                drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure, distFunc, 1);
+//            pointsBetweenLines.push_back(proj);
+        }
+    }
+    auto randomize = [this](const Coord& p) {
+       if(value(p) == 255) return;
+       _image[p.x*_xstride+p.y*_ystride] = std::max(0, std::min(255, value(p) + (rand()%32 - 16)));// (value(p.neigh(0,1)) + value(p.neigh(0,-1)) + value(p.neigh(1,0)) + value(p.neigh(-1,0))) >> 2;
+
+    };
+    for(const auto& p : pointsBetweenLines) {
+        for(int y=-1; y<=1; ++y) {
+            for(int x=-1; x<=1; ++x) {
+//                randomize(p.neigh(x,y));
+            }
+        }
+    }
+    }
     onLinePainted(start, end);
+
+    double margin = halfWidth;//+w+1;
+    _minLastEnd = sum(end, Point2D{-margin,-margin});
+    _maxLastEnd = sum(end, Point2D{margin,margin});
 }
 
 Point2D tangent(const SamplePoint& p1, const SamplePoint& p2)
@@ -606,9 +779,13 @@ void Brush::paint(SamplePoint& p, double zoomCoeff)
         else {
             Point2D newTangent = tangent(p, _olderP);
             if((newTangent.x == 0 && newTangent.y == 0) || (_prevTangent.x == 0 && _prevTangent.y == 0)) {
-                paintLine(_prevP, p);
+                if(_olderP.pos != _prevP.pos) {
+                    //printf("paintLine prevP %f %f -> p %f %f (olderP %f %f)\n", _prevP.pos.x, _prevP.pos.y, p.pos.x, p.pos.y, _olderP.pos.x, _olderP.pos.y);
+                    paintLine(_prevP, p);
+                }
             }
             else {
+                //printf("paintBezierSegment %f %f -> %f %f\n", _olderP.pos.x, _olderP.pos.y, _prevP.pos.x, _prevP.pos.y);
                 paintBezierSegment(_olderP, _prevP, _prevTangent, newTangent);
             }
             _prevTangent = newTangent;
@@ -623,12 +800,15 @@ void Brush::paint(SamplePoint& p, double zoomCoeff)
 
 void Brush::endPaint()
 {
+    printf("endPaint\n");
+    _painter->detectSharpTurns(false); //not sure this helps (with a fat dot appearing at the end in drawLine) but seemingly can't hurt
     if(!_paintedAtLeastOnce) {
         paintAt(_prevP);
     }
     else if(_smoothing != Smoothing::NONE && _haveTangent) {
         _haveTangent = false;
         Point2D newTangent = tangent(_prevP, _olderP);
+        printf("last paintBezierSegment\n");
         paintBezierSegment(_olderP, _prevP, _prevTangent, newTangent);
     }
 }
@@ -861,10 +1041,10 @@ extern "C" void brush_free(Brush* brush)
 //flood-filling color as the lines are erased
 
 extern "C" void flood_fill_color_based_on_mask_many_seeds(int* color, unsigned char* mask,
-		int color_stride, int mask_stride, int width, int height,
-		int* region, int _8_connectivity,
-		int mask_new_val, int new_color_value,
-		const int* seed_x, const int* seed_y, int num_seeds);
+                int color_stride, int mask_stride, int width, int height,
+                int* region, int _8_connectivity,
+                int mask_new_val, int new_color_value,
+                const int* seed_x, const int* seed_y, int num_seeds);
 
 class FloodFillingPainter : public ImagePainter
 {
