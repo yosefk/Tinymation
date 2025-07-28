@@ -301,6 +301,9 @@ struct PixTraitsRGB
     }
     PixVal blend(unsigned char pixValChange, PixVal oldVal) const {
         PixVal v;
+        if(pixValChange == 0) {
+            return oldVal;
+        }
         for(int i=0; i<3; ++i) {
             v.rgb[i] = (pixValChange*newColor.rgb[i] + (255-pixValChange)*oldVal.rgb[i] + (1<<7)) >> 8;
         }
@@ -493,8 +496,13 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
 
     double maxCenterNoise = radius * 0.25;
 
+    if(_rgb) {
+        maxCenterNoise = 0;
+        greatestPixValChange = 64;
+    }
+
     auto updatePressureParams = [&] {
-        if(!_erase) {
+        if(!_erase && !_rgb) {
             greatestPixValChange = 2 + 96*std::min(1., std::max(0., pressure*pressure - 0.1 + pressure*0.2)) * (_erase ? -1 : 1);//std::max(0., pressure*pressure - 0.1);
             maxCenterNoise = radius * (3.5 * (1-pressure)*(1-pressure) + 0.25);
         }

@@ -1095,7 +1095,7 @@ def find_nearest(array, center_x, center_y, value):
     return tuple(points[nearest_idx])
 
 class PenTool(Button):
-    def __init__(self, eraser=False, soft=False, width=WIDTH, zoom_changes_pixel_width=True):
+    def __init__(self, eraser=False, soft=False, width=WIDTH, zoom_changes_pixel_width=True, rgb=None):
         Button.__init__(self)
         self.prev_drawn = None
         self.color = BACKGROUND if eraser else PEN
@@ -1104,7 +1104,7 @@ class PenTool(Button):
         self.width = width
         self.zoom_changes_pixel_width = zoom_changes_pixel_width
         self.circle_width = (width//2)*2
-        self.smooth_dist = 20
+        self.smooth_dist = 40
         self.points = []
         self.polyline = []
         self.lines_array = None
@@ -1114,6 +1114,7 @@ class PenTool(Button):
         self.history_time_period = 1000
         self.timer = None
         self.patching = False
+        self.rgb = rgb
 
     def brush_flood_fill_color_based_on_mask(self):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
@@ -1153,9 +1154,15 @@ class PenTool(Button):
         if smoothDist is None:
             smoothDist = self.smooth_dist
         ptr, ystride, width, height = greyscale_c_params(self.lines_array)
+        if self.rgb:
+            color = surf.pixels3d(movie.edit_curr_frame().surf_by_id('lines'))
+            color_ptr, color_stride, color_width, color_height = color_c_params(color)
+            ptr = color_ptr
         lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
         self.brush = tinylib.brush_init_paint(x, y, layout.event_time, layout.pressure, lineWidth, smoothDist, dry,
                 1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
+        if self.rgb:
+            tinylib.brush_set_rgb(self.brush, (ct.c_uint8*3)(*self.rgb))
 
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
@@ -4375,6 +4382,8 @@ TOOLS = {
     'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
     'pen': Tool(PenTool(width=2.5, zoom_changes_pixel_width=False), pen_cursor, 'bB'),
     'pencil': Tool(PenTool(soft=True, width=4, zoom_changes_pixel_width=False), pencil_cursor, 'sS'),
+    # TODO: do a reasonable tool UI for this
+    'rgb4lines': Tool(PenTool(soft=True, width=20, zoom_changes_pixel_width=True, rgb=(255,80,192)), pencil_cursor, 'qQ'),
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
     'eraser-big': Tool(PenTool(eraser=True, soft=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
