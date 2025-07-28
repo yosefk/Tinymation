@@ -278,7 +278,8 @@ class ImagePainter
     //this is inspired by Krita's "Pencil-2"; it draws circles with the diameter equaling the line width,
     //placing them not too close to each other (it remembers the last center across calls)
     //and adding some noise to the center location 
-    void drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& start, const SamplePoint& end, double width);
+    template<class PixTraits>
+    void drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& start, const SamplePoint& end, double width, const PixTraits& pixTraits);
 
     void detectSharpTurns(bool b) { _detectSharpTurns=b; if(!b) _cumDist=0; }
 
@@ -290,7 +291,8 @@ class ImagePainter
     //- otherwise it does a multiplicative change using the pressure parameter, more accurately it interpolates
     //  between the old value and a new one computed by multiplying by 1-pressure, with intensity defining the weights
     //  (high intensity / middle of the circle -> more change.)
-    void drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure);
+    template<class PixTraits>
+    void drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure, const PixTraits& pixTraits);
 
     //these are used by drawLineUsingWideSoftCiclesWithNoisyCenters
     Point2D _lastCircleCenter; // Center of the last drawn circle
@@ -328,7 +330,68 @@ class ImagePainter
 //TODO: LUT
 double sigmoid(double x) { return 1 / (1 + exp(-x)); }
 
-void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure)
+//the "pix traits" business is for being able to call drawSoftCircle on both alpha channels
+//(for line rendering/erasing) and RGB (where we paint the color and leave alpha alone.)
+//note drawing lines with non-noisy soft circles gives a good line but not as well anti-aliased
+//as drawLine() produces; but this should be good enough for _line coloring_ where you see few edges
+//between lines of different colors, and this is much easier to implement than do the various odd
+//things drawLine does in the RGB space.
+
+struct PixTraitsAlpha
+{
+    typedef unsigned char PixVal;
+    PixVal fetch(const unsigned char* pixAddr) const { return *pixAddr; }
+    void store(unsigned char* pixAddr, PixVal pixVal) const { *pixAddr = pixVal; }
+    PixVal blend(unsigned char pixValChange, PixVal oldVal) const {
+        int newVal = (pixValChange*255 + (255-pixValChange)*oldVal + (1<<7)) >> 8;
+        newVal = std::max(newVal, (int)oldVal); //otherwise newVal can get smaller by 1 which adds up badly
+        if(newVal >= 255-10) {
+            newVal = 255;
+        }
+        return newVal;
+    }
+    PixVal erase(double pressure, double intensity, PixVal oldVal) const {
+        return std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
+    }
+};
+
+struct RGBPixVal
+{
+    unsigned char rgb[3];
+};
+
+struct PixTraitsRGB
+{
+    typedef RGBPixVal PixVal;
+    PixVal newColor;
+
+    PixVal fetch(const unsigned char* pixAddr) const {
+        PixVal v;
+        v.rgb[0] = pixAddr[0];
+        v.rgb[1] = pixAddr[1];
+        v.rgb[2] = pixAddr[2];
+        return v;
+    }
+    void store(unsigned char* pixAddr, PixVal v) const {
+        pixAddr[0] = v.rgb[0];
+        pixAddr[1] = v.rgb[1];
+        pixAddr[2] = v.rgb[2];
+    }
+    PixVal blend(unsigned char pixValChange, PixVal oldVal) const {
+        PixVal v;
+        for(int i=0; i<3; ++i) {
+            int newVal = (pixValChange*newColor.rgb[i] + (255-pixValChange)*oldVal.rgb[i] + (1<<7)) >> 8;
+            v.rgb[i] = std::max(newVal, (int)oldVal.rgb[i]); //otherwise newVal can get smaller by 1 which adds up badly
+        }
+        return v;
+    }
+    PixVal erase(double pressure, double intensity, PixVal oldVal) {
+        return PixVal(); //not implemented/used ATM
+    }
+};
+
+template<class PixTraits>
+void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure, const PixTraits& pix)
 {
     // Extend the bounding box slightly to capture anti-aliased edges
     double aa_margin = 1.0; // Extra pixels for smooth edges
@@ -341,7 +404,7 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
     for(int y = starty; y < endy; y++) {
         for(int x = startx; x < endx; x++) {
             int ind = y*_ystride + x*_xstride;
-            int oldVal = _image[ind];
+            typename PixTraits::PixVal oldVal = pix.fetch(_image+ind);
             if(oldVal == immutableVal) {
                 continue;
             }
@@ -382,47 +445,53 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
 
             // Apply pixel value change
             int pixValChange = round(double(greatestPixValChange) * intensity);
-            int newVal;
+            typename PixTraits::PixVal newVal;
             if(greatestPixValChange > 0) {
                 //newVal = std::max(0, std::min(oldVal + pixValChange, 255));
-                newVal = (pixValChange*255 + (255-pixValChange)*oldVal + (1<<7)) >> 8;
-                newVal = std::max(newVal, oldVal); //otherwise newVal can get smaller by 1 which adds up badly
-                if(newVal >= 255-10) {
-                    newVal = 255;
-                }
+                //newVal = (pixValChange*255 + (255-pixValChange)*oldVal + (1<<7)) >> 8;
+                //newVal = std::max(newVal, oldVal); //otherwise newVal can get smaller by 1 which adds up badly
+                //if(newVal >= 255-10) {
+                //    newVal = 255;
+                //}
+                newVal = pix.blend(pixValChange, oldVal);
             }
             else {
-                newVal = std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
+                //newVal = std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
+                newVal = pix.erase(pressure, intensity, oldVal);
             }
 
             if(newVal != oldVal) {
-                _image[ind] = newVal;
+                pix.store(_image+ind, newVal);
                 _xmin = std::min(_xmin, x);
                 _ymin = std::min(_ymin, y);
                 _xmax = std::max(_xmax, x);
                 _ymax = std::max(_ymax, y);
-                onPixelPainted(x, y, _image[ind]);
+                onPixelPainted(x, y, newVal);
             }
         }
     }
 }
 
-void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& starts, const SamplePoint& ends, double width)
+template<class PixTraits>
+void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& starts, const SamplePoint& ends, double width, const PixTraits& pixTraits)
 {
     Point2D start = starts.pos;
     Point2D end = ends.pos;
 
     double radius = width / 2;
-    double interval = radius * 0.3;
-    double pressure = (starts.pressure + ends.pressure)/2; //TODO: move this into the loop instead of being loop invariant
+    double interval = _erase ? radius * 0.3 : radius * 0.1;
+    double pressure = starts.pressure;// + ends.pressure)/2; //TODO: move this into the loop instead of being loop invariant
     int greatestPixValChange = 0;
 
     double maxCenterNoise = radius * 0.25;
-    if(!_erase) {
-        interval = radius * 0.1;
-        greatestPixValChange = 2 + 96*std::min(1., std::max(0., pressure*pressure - 0.1 + pressure*0.2)) * (_erase ? -1 : 1);//std::max(0., pressure*pressure - 0.1);
-        maxCenterNoise = radius * (3.5 * (1-pressure)*(1-pressure) + 0.25);
-    }
+
+    auto updatePressureParams = [&] {
+        if(!_erase) {
+            greatestPixValChange = 2 + 96*std::min(1., std::max(0., pressure*pressure - 0.1 + pressure*0.2)) * (_erase ? -1 : 1);//std::max(0., pressure*pressure - 0.1);
+            maxCenterNoise = radius * (3.5 * (1-pressure)*(1-pressure) + 0.25);
+        }
+    };
+    updatePressureParams();
 
     // Compute segment length and direction
     double segmentLength = distance(start, end);
@@ -430,7 +499,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
 
     if (segmentLength == 0) {
         if (_isFirstSegment) {
-            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange, pressure);
+            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange, pressure, pixTraits);
             _lastCircleCenter = start;
             _remainingDistance = interval;
         }
@@ -442,7 +511,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
 
     // For the first segment, start at the start point
     if (_isFirstSegment) {
-        drawSoftCircle(start, radius, greatestPixValChange, pressure);
+        drawSoftCircle(start, radius, greatestPixValChange, pressure, pixTraits);
         _lastCircleCenter = start;
         _remainingDistance = interval;
         _isFirstSegment = false;
@@ -452,7 +521,9 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double distanceToNext = _remainingDistance;
     while (distanceToNext <= segmentLength + 1e-10) { // Small epsilon for floating-point errors
         Point2D center = sum(start, mul(unitDirection, distanceToNext));
-        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure);
+        pressure = std::max(0.0, std::min(1.0, ((distanceToNext * ends.pressure + (segmentLength - distanceToNext)*starts.pressure)/segmentLength)));
+        updatePressureParams();
+        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure, pixTraits);
         _lastCircleCenter = center;
         distanceToNext += interval;
     }
@@ -915,7 +986,7 @@ void Brush::paintLine(const SamplePoint& p1, const SamplePoint& p2)
     _paintedAtLeastOnce = true;
     if(_painter) {
         if(_softLines) {
-          _painter->drawLineUsingWideSoftCiclesWithNoisyCenters(p1, p2, _lineWidth);
+          _painter->drawLineUsingWideSoftCiclesWithNoisyCenters(p1, p2, _lineWidth, PixTraitsAlpha());
         }
         else {
           _painter->drawLine(p1.pos, p2.pos, _lineWidth);
