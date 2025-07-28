@@ -12,6 +12,9 @@ WORKERS = min(os.cpu_count(), 8)
 tinylib.brush_init_paint.argtypes = [ct.c_double]*6 + [ct.c_int]*3 + [ct.c_void_p] + [ct.c_int]*4 + [ct.c_void_p]
 tinylib.brush_init_paint.restype = ct.c_void_p
 
+#void brush_set_rgb(Brush* brush, const unsigned char* rgb)
+tinylib.brush_set_rgb.argtypes = [ct.c_void_p, ct.c_uint8*3]
+
 #void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, double zoom, int* region)
 tinylib.brush_paint.argtypes = [ct.c_void_p, ct.c_int] + [ct.c_void_p]*4 + [ct.c_double] + [ct.c_void_p]
 

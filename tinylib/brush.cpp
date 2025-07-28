@@ -247,6 +247,71 @@ class CoordSet
     std::vector<Value> _values;
 };
 
+//the "pix traits" business is for being able to call drawSoftCircle on both alpha channels
+//(for line rendering/erasing) and RGB (where we paint the color and leave alpha alone.)
+//note drawing lines with non-noisy soft circles gives a good line but not as well anti-aliased
+//as drawLine() produces; but this should be good enough for _line coloring_ where you see few edges
+//between lines of different colors, and this is much easier to implement than do the various odd
+//things drawLine does in the RGB space.
+
+struct PixTraitsAlpha
+{
+    typedef unsigned char PixVal;
+    PixVal immutable(bool erase) const { return erase ? 0 : 255; }
+    PixVal fetch(const unsigned char* pixAddr) const { return *pixAddr; }
+    void store(unsigned char* pixAddr, PixVal pixVal) const { *pixAddr = pixVal; }
+    PixVal blend(unsigned char pixValChange, PixVal oldVal) const {
+        int newVal = (pixValChange*255 + (255-pixValChange)*oldVal + (1<<7)) >> 8;
+        newVal = std::max(newVal, (int)oldVal); //otherwise newVal can get smaller by 1 which adds up badly
+        if(newVal >= 255-10) {
+            newVal = 255;
+        }
+        return newVal;
+    }
+    PixVal erase(double pressure, double intensity, PixVal oldVal) const {
+        return std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
+    }
+    int toInt(PixVal val) const { return val; }
+};
+
+struct RGBPixVal
+{
+    unsigned char rgb[3];
+    bool operator==(const RGBPixVal& that) const { return rgb[0]==that.rgb[0] && rgb[1]==that.rgb[1] && rgb[2]==that.rgb[2]; }
+    bool operator!=(const RGBPixVal& that) const { return !(*this == that); } 
+};
+
+struct PixTraitsRGB
+{
+    typedef RGBPixVal PixVal;
+    PixVal newColor;
+
+    PixVal immutable(bool erase) const { return newColor; }
+    PixVal fetch(const unsigned char* pixAddr) const {
+        PixVal v;
+        v.rgb[0] = pixAddr[0];
+        v.rgb[1] = pixAddr[1];
+        v.rgb[2] = pixAddr[2];
+        return v;
+    }
+    void store(unsigned char* pixAddr, PixVal v) const {
+        pixAddr[0] = v.rgb[0];
+        pixAddr[1] = v.rgb[1];
+        pixAddr[2] = v.rgb[2];
+    }
+    PixVal blend(unsigned char pixValChange, PixVal oldVal) const {
+        PixVal v;
+        for(int i=0; i<3; ++i) {
+            v.rgb[i] = (pixValChange*newColor.rgb[i] + (255-pixValChange)*oldVal.rgb[i] + (1<<7)) >> 8;
+        }
+        return v;
+    }
+    PixVal erase(double pressure, double intensity, PixVal oldVal) const {
+        return PixVal(); //not implemented/used ATM
+    }
+    int toInt(const PixVal&) const { return 0; }
+};
+
 class ImagePainter
 {
   public:
@@ -263,6 +328,9 @@ class ImagePainter
     int _xmax;
     int _ymax;
 
+    bool _rgb = false;
+    PixTraitsRGB _pixTraitsRGB;
+
     ImagePainter() { resetROI(); }
 
     virtual ~ImagePainter() {}
@@ -278,8 +346,7 @@ class ImagePainter
     //this is inspired by Krita's "Pencil-2"; it draws circles with the diameter equaling the line width,
     //placing them not too close to each other (it remembers the last center across calls)
     //and adding some noise to the center location 
-    template<class PixTraits>
-    void drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& start, const SamplePoint& end, double width, const PixTraits& pixTraits);
+    void drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& start, const SamplePoint& end, double width);
 
     void detectSharpTurns(bool b) { _detectSharpTurns=b; if(!b) _cumDist=0; }
 
@@ -330,66 +397,6 @@ class ImagePainter
 //TODO: LUT
 double sigmoid(double x) { return 1 / (1 + exp(-x)); }
 
-//the "pix traits" business is for being able to call drawSoftCircle on both alpha channels
-//(for line rendering/erasing) and RGB (where we paint the color and leave alpha alone.)
-//note drawing lines with non-noisy soft circles gives a good line but not as well anti-aliased
-//as drawLine() produces; but this should be good enough for _line coloring_ where you see few edges
-//between lines of different colors, and this is much easier to implement than do the various odd
-//things drawLine does in the RGB space.
-
-struct PixTraitsAlpha
-{
-    typedef unsigned char PixVal;
-    PixVal fetch(const unsigned char* pixAddr) const { return *pixAddr; }
-    void store(unsigned char* pixAddr, PixVal pixVal) const { *pixAddr = pixVal; }
-    PixVal blend(unsigned char pixValChange, PixVal oldVal) const {
-        int newVal = (pixValChange*255 + (255-pixValChange)*oldVal + (1<<7)) >> 8;
-        newVal = std::max(newVal, (int)oldVal); //otherwise newVal can get smaller by 1 which adds up badly
-        if(newVal >= 255-10) {
-            newVal = 255;
-        }
-        return newVal;
-    }
-    PixVal erase(double pressure, double intensity, PixVal oldVal) const {
-        return std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
-    }
-};
-
-struct RGBPixVal
-{
-    unsigned char rgb[3];
-};
-
-struct PixTraitsRGB
-{
-    typedef RGBPixVal PixVal;
-    PixVal newColor;
-
-    PixVal fetch(const unsigned char* pixAddr) const {
-        PixVal v;
-        v.rgb[0] = pixAddr[0];
-        v.rgb[1] = pixAddr[1];
-        v.rgb[2] = pixAddr[2];
-        return v;
-    }
-    void store(unsigned char* pixAddr, PixVal v) const {
-        pixAddr[0] = v.rgb[0];
-        pixAddr[1] = v.rgb[1];
-        pixAddr[2] = v.rgb[2];
-    }
-    PixVal blend(unsigned char pixValChange, PixVal oldVal) const {
-        PixVal v;
-        for(int i=0; i<3; ++i) {
-            int newVal = (pixValChange*newColor.rgb[i] + (255-pixValChange)*oldVal.rgb[i] + (1<<7)) >> 8;
-            v.rgb[i] = std::max(newVal, (int)oldVal.rgb[i]); //otherwise newVal can get smaller by 1 which adds up badly
-        }
-        return v;
-    }
-    PixVal erase(double pressure, double intensity, PixVal oldVal) {
-        return PixVal(); //not implemented/used ATM
-    }
-};
-
 template<class PixTraits>
 void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure, const PixTraits& pix)
 {
@@ -400,7 +407,7 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
     int endx = ceil(std::min(center.x + radius + aa_margin, _maxPainted.x));
     int endy = ceil(std::min(center.y + radius + aa_margin, _maxPainted.y));
 
-    int immutableVal = _erase ? 0 : 255;
+    typename PixTraits::PixVal immutableVal = pix.immutable(_erase);
     for(int y = starty; y < endy; y++) {
         for(int x = startx; x < endx; x++) {
             int ind = y*_ystride + x*_xstride;
@@ -466,14 +473,15 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
                 _ymin = std::min(_ymin, y);
                 _xmax = std::max(_xmax, x);
                 _ymax = std::max(_ymax, y);
-                onPixelPainted(x, y, newVal);
+                if(!_rgb) {
+                    onPixelPainted(x, y, pix.toInt(newVal));
+                }
             }
         }
     }
 }
 
-template<class PixTraits>
-void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& starts, const SamplePoint& ends, double width, const PixTraits& pixTraits)
+void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& starts, const SamplePoint& ends, double width)
 {
     Point2D start = starts.pos;
     Point2D end = ends.pos;
@@ -493,13 +501,22 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     };
     updatePressureParams();
 
+    auto drawCircle = [&](const Point2D& center) {
+        if(_rgb) {
+            drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure, _pixTraitsRGB);
+        }
+        else {
+            drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure, PixTraitsAlpha());
+        }
+    };
+
     // Compute segment length and direction
     double segmentLength = distance(start, end);
     Point2D direction = diff(end, start);
 
     if (segmentLength == 0) {
         if (_isFirstSegment) {
-            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange, pressure, pixTraits);
+            drawCircle(start);
             _lastCircleCenter = start;
             _remainingDistance = interval;
         }
@@ -511,7 +528,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
 
     // For the first segment, start at the start point
     if (_isFirstSegment) {
-        drawSoftCircle(start, radius, greatestPixValChange, pressure, pixTraits);
+        drawCircle(start);
         _lastCircleCenter = start;
         _remainingDistance = interval;
         _isFirstSegment = false;
@@ -523,7 +540,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
         Point2D center = sum(start, mul(unitDirection, distanceToNext));
         pressure = std::max(0.0, std::min(1.0, ((distanceToNext * ends.pressure + (segmentLength - distanceToNext)*starts.pressure)/segmentLength)));
         updatePressureParams();
-        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure, pixTraits);
+        drawCircle(center);
         _lastCircleCenter = center;
         distanceToNext += interval;
     }
@@ -986,7 +1003,7 @@ void Brush::paintLine(const SamplePoint& p1, const SamplePoint& p2)
     _paintedAtLeastOnce = true;
     if(_painter) {
         if(_softLines) {
-          _painter->drawLineUsingWideSoftCiclesWithNoisyCenters(p1, p2, _lineWidth, PixTraitsAlpha());
+          _painter->drawLineUsingWideSoftCiclesWithNoisyCenters(p1, p2, _lineWidth);
         }
         else {
           _painter->drawLine(p1.pos, p2.pos, _lineWidth);
@@ -1010,7 +1027,7 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double press
     brush._smoothing = Smoothing::WEIGHTED;
     brush._lineWidth = lineWidth;
     brush._smoothDist = smoothDist;
-    brush._tailAggressiveness = 0; //since we don't have pressure values, this parameter has no effect anyway
+    brush._tailAggressiveness = 0; //TODO: for soft lines/pencil, might want to experiment with this parameter
     brush._softLines = softLines;
     
     if(!dry) {
@@ -1031,6 +1048,18 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double press
     brush.initPaint({{x,y},time,pressure});
 
     return &brush;
+}
+
+//note that you should have created the brush pointing to rgb pixels if you are to call this function
+//(by default you point to the alpha channel which is imageBase+3 in an RGB image, here you want
+//to point to imageBase)
+extern "C" void brush_set_rgb(Brush* brush, const unsigned char* rgb)
+{
+    ImagePainter& painter = *brush->_painter;
+    painter._rgb = true;
+    painter._pixTraitsRGB.newColor.rgb[0] = rgb[0];
+    painter._pixTraitsRGB.newColor.rgb[1] = rgb[1];
+    painter._pixTraitsRGB.newColor.rgb[2] = rgb[2];
 }
 
 extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, double zoom, int* region)
