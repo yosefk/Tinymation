@@ -290,8 +290,7 @@ class ImagePainter
     //- otherwise it does a multiplicative change using the pressure parameter, more accurately it interpolates
     //  between the old value and a new one computed by multiplying by 1-pressure, with intensity defining the weights
     //  (high intensity / middle of the circle -> more change.)
-    template<class DistFunc>
-    void drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure, const DistFunc& distFunc, double distThresh);
+    void drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure);
 
     //these are used by drawLineUsingWideSoftCiclesWithNoisyCenters
     Point2D _lastCircleCenter; // Center of the last drawn circle
@@ -329,8 +328,7 @@ class ImagePainter
 //TODO: LUT
 double sigmoid(double x) { return 1 / (1 + exp(-x)); }
 
-template<class DistFunc>
-void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure, const DistFunc& distFunc, double distThresh)
+void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int greatestPixValChange, double pressure)
 {
     // Extend the bounding box slightly to capture anti-aliased edges
     double aa_margin = 1.0; // Extra pixels for smooth edges
@@ -380,13 +378,16 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
                     continue;
                 }
             }
+            intensity = std::max(intensity, 0.0);
 
             // Apply pixel value change
             int pixValChange = round(double(greatestPixValChange) * intensity);
             int newVal;
             if(greatestPixValChange > 0) {
-                newVal = std::max(0, std::min(oldVal + pixValChange, 255));
-                if(newVal >= 255-30) {
+                //newVal = std::max(0, std::min(oldVal + pixValChange, 255));
+                newVal = (pixValChange*255 + (255-pixValChange)*oldVal + (1<<7)) >> 8;
+                newVal = std::max(newVal, oldVal); //otherwise newVal can get smaller by 1 which adds up badly
+                if(newVal >= 255-10) {
                     newVal = 255;
                 }
             }
@@ -395,25 +396,6 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
             }
 
             if(newVal != oldVal) {
-                //don't deposit too much color at the line boundaries. additive brushes, if you apply
-                //them at the same line repeatedly, eventually saturate all the pixels and then the line is no longer
-                //antialiased like it was before the saturation. currently ignoring the problem for erasers
-                //where you'd need a somewhat different formula for distThresh at least (so it seems from testing);
-                //the problem is more acute with the pencil than the eraser in my testing since with a pencil you
-                //draw repeatedly to strengthen the line and aliasing appears quickly and often in my usage,
-                //more so than with the eraser
-                if(!_erase) {
-                    double w = 2;
-                    double c = std::max(-w, std::min(w, distFunc(Point2D{(double)x,(double)y}) - distThresh));
-                    int grey = (1-sigmoid(c*6/w)) * 255;
-                    if(grey >= 255 - 30) {
-                        grey = 255;
-                    }
-                    if(newVal > grey) {
-                        continue;
-                    }
-                }
-
                 _image[ind] = newVal;
                 _xmin = std::min(_xmin, x);
                 _ymin = std::min(_ymin, y);
@@ -438,7 +420,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double maxCenterNoise = radius * 0.25;
     if(!_erase) {
         interval = radius * 0.1;
-        greatestPixValChange = 2 + 64*std::min(1., std::max(0., pressure*pressure - 0.1 + pressure*0.2)) * (_erase ? -1 : 1);//std::max(0., pressure*pressure - 0.1);
+        greatestPixValChange = 2 + 96*std::min(1., std::max(0., pressure*pressure - 0.1 + pressure*0.2)) * (_erase ? -1 : 1);//std::max(0., pressure*pressure - 0.1);
         maxCenterNoise = radius * (3.5 * (1-pressure)*(1-pressure) + 0.25);
     }
 
@@ -446,12 +428,9 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double segmentLength = distance(start, end);
     Point2D direction = diff(end, start);
 
-    auto distFunc = [=](const Point2D& p) { return lineToPointDistance(Line2D{start, end}, p); };
-    double distThresh = maxCenterNoise;
-
     if (segmentLength == 0) {
         if (_isFirstSegment) {
-            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange, pressure, distFunc, distThresh);
+            drawSoftCircle(_noise2D.addNoise(start, maxCenterNoise), radius, greatestPixValChange, pressure);
             _lastCircleCenter = start;
             _remainingDistance = interval;
         }
@@ -463,7 +442,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
 
     // For the first segment, start at the start point
     if (_isFirstSegment) {
-        drawSoftCircle(start, radius, greatestPixValChange, pressure, distFunc, distThresh);
+        drawSoftCircle(start, radius, greatestPixValChange, pressure);
         _lastCircleCenter = start;
         _remainingDistance = interval;
         _isFirstSegment = false;
@@ -473,7 +452,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
     double distanceToNext = _remainingDistance;
     while (distanceToNext <= segmentLength + 1e-10) { // Small epsilon for floating-point errors
         Point2D center = sum(start, mul(unitDirection, distanceToNext));
-        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure, distFunc, distThresh);
+        drawSoftCircle(_noise2D.addNoise(center, maxCenterNoise), radius, greatestPixValChange, pressure);
         _lastCircleCenter = center;
         distanceToNext += interval;
     }
