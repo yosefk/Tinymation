@@ -6,7 +6,7 @@
 extern "C"
 void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x, const double* y,
                     double focus_x, double focus_y, int* first_diff, int* last_diff,
-                    const double* curvature_maximums = nullptr, double corner_effect_strength = 0.5,
+                    const unsigned char* is_corner = nullptr, double corner_effect_strength = 0.5,
                     double threshold = 30.0, double smoothness = 0.6,
                     double pull_strength = 0.5, int num_neighbors = 1,
                     double max_endpoint_dist = 30.0, double zero_endpoint_dist_start = 5.0) {
@@ -64,11 +64,11 @@ void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x,
     // Compute distances to closest corner points
     std::vector<double> dist_to_closest_corner(npoints, std::numeric_limits<double>::infinity());
     
-    if (curvature_maximums != nullptr && corner_effect_strength > 0) {
+    if (is_corner != nullptr && corner_effect_strength > 0) {
         // Left-to-right pass
         double dist_from_last_corner = std::numeric_limits<double>::infinity();
         for (int i = 0; i < npoints; ++i) {
-            if (curvature_maximums[i] > 0) {
+            if (is_corner[i]) {
                 // This is a corner point
                 dist_from_last_corner = 0.0;
                 dist_to_closest_corner[i] = 0.0;
@@ -85,7 +85,7 @@ void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x,
         // Right-to-left pass
         dist_from_last_corner = std::numeric_limits<double>::infinity();
         for (int i = npoints - 1; i >= 0; --i) {
-            if (curvature_maximums[i] > 0) {
+            if (is_corner[i] > 0) {
                 // This is a corner point
                 dist_from_last_corner = 0.0;
                 dist_to_closest_corner[i] = 0.0;

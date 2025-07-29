@@ -15,8 +15,10 @@ EXPORTS
     brush_free 
 	brush_flood_fill_color_based_on_mask 
     fitpack_splev 
+    fitpack_splder
     fitpack_parcur 
     smooth_polyline 
+    find_peaks
     blit_rgba8888 
     blit_rgba8888_inplace 
     blits_rgba8888_inplace 

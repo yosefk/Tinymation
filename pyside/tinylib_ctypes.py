@@ -35,7 +35,18 @@ tinylib.brush_free.argtypes = [ct.c_void_p]
 #                                          int _8_connectivity, int mask_new_val, int new_color_value)
 tinylib.brush_flood_fill_color_based_on_mask.argtypes = [ct.c_void_p]*3 + [ct.c_int]*5
 
-tinylib.fitpack_parcur.argtypes = [ct.c_void_p]*2 + [ct.c_int]*3 + [ct.c_double] + [ct.c_void_p]*3
+tinylib.fitpack_parcur.argtypes = [ct.c_void_p]*2 + [ct.c_int]*2 + [ct.c_void_p, ct.c_int, ct.c_double] + [ct.c_void_p]*3
+tinylib.fitpack_parcur.restype = ct.c_int
+
+#int fitpack_splev(const double* knots, int num_knots, const double* coefficients, int spline_degree,
+#                  const double* positions_to_evaluate, double* spline_values, int num_spline_values)
+tinylib.fitpack_splev.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int] + [ct.c_void_p]*2 + [ct.c_int]
+tinylib.fitpack_splev.restype = ct.c_int
+
+#int fitpack_splder(const double* knots, int num_knots, const double* coefficients, int spline_degree, int derivative_num,
+#                   const double* positions_to_evaluate, double* spline_values, int num_spline_values)
+tinylib.fitpack_splder.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*2 + [ct.c_void_p]*2 + [ct.c_int]
+tinylib.fitpack_splder.restype = ct.c_int
 
 #void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x, const double* y,
 #                    double focus_x, double focus_y, int* first_diff, int* last_diff,
@@ -44,6 +55,9 @@ tinylib.fitpack_parcur.argtypes = [ct.c_void_p]*2 + [ct.c_int]*3 + [ct.c_double]
 #                    double pull_strength = 0.5, int num_neighbors = 1,
 #                    double max_endpoint_dist = 30.0, double zero_endpoint_dist_start = 5.0)
 tinylib.smooth_polyline.argtypes = [ct.c_int]+[ct.c_void_p]*4+[ct.c_double]*2+[ct.c_void_p]*3+[ct.c_double]*4+[ct.c_int]+[ct.c_double]*2
+
+#void find_peaks(unsigned char* peaks, const double* y, int n, double height, int distance)
+tinylib.find_peaks.argtypes = [ct.c_void_p]*2 + [ct.c_int] + [ct.c_double] + [ct.c_int]
 
 #extern "C" void blit_rgba8888(uint8_t* __restrict bg_base, const uint8_t* __restrict fg_base,
 #                              int bg_stride, int fg_stride, int width, int start_y, int finish_y,

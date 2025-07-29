@@ -1335,6 +1335,42 @@ class PenTool(Button):
             
         self.prev_drawn = (x,y) 
 
+def polyline_corners(points, curvature_threshold=1, peak_distance=15):
+    # Fit a B-spline to the polyline
+#    import scipy.interpolate
+#    tck1, u1 = scipy.interpolate.splprep(points.T, s=0, k=3)
+    points = np.column_stack([points[:,0],points[:,1]]) # array layout correction
+#    print(points.shape)
+    tck, u = splprep(points, smoothing=0)
+#    print(tck1)
+#    print(tck)
+#    print(u1)
+#    print(u)
+
+    #tck, u = tck1, u1
+
+    # Evaluate the spline at the u values returned by splprep
+#    import scipy.interpolate
+    dx, dy = splev(u, tck, der=1)  # First derivatives at u
+    ddx, ddy = splev(u, tck, der=2)  # Second derivatives at u
+
+    # Compute curvature at u values
+    numerator = np.abs(dx * ddy - dy * ddx)
+    denominator = (dx**2 + dy**2)**1.5
+    curvature = numerator / denominator 
+
+#    print(curvature)
+#    import scipy.signal
+#    fp,_ =scipy.signal.find_peaks(curvature, height=curvature_threshold, distance=peak_distance)
+#    print(fp)
+
+    peaks = np.empty(len(curvature), dtype=np.uint8)
+#    peaks[:]=0
+#    peaks[fp]=1
+    tinylib.find_peaks(arr_base_ptr(peaks), arr_base_ptr(curvature), len(curvature), curvature_threshold, peak_distance)
+
+    return peaks#, splev(u, tck)
+
 def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5, corner_stiffness=1):
     xarr = points[:, 0]
     yarr = points[:, 1]
@@ -1346,9 +1382,7 @@ def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0
     first_diff = np.zeros(1, dtype=np.int32)
     last_diff = np.zeros(1, dtype=np.int32)
 
-    _, corner_indexes, _, _, _, _ = fitpack_turns.plot_polyline_and_sharp_turns(xarr, yarr, curvature_threshold=1, s=0, k=3, plot=False)
-    corner_vec = np.zeros(len(xarr))
-    corner_vec[corner_indexes]=1
+    corner_vec = polyline_corners(points)
 
     tinylib.smooth_polyline(len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
             arr_base_ptr(first_diff), arr_base_ptr(last_diff),
@@ -1382,14 +1416,6 @@ def simplify_polyline(points, threshold):
     result.append(points[-1])
     return result
 
-import fitpack_turns
-
-def corner_points(points):
-    xarr = points[:, 0]
-    yarr = points[:, 1]
-    t, i, x, y, xs, ys = fitpack_turns.plot_polyline_and_sharp_turns(xarr, yarr, curvature_threshold=1, s=0, k=3, plot=False)
-    return zip(list(x),list(y)), zip(list(xs),list(ys))#[(xarr[n], yarr[n]) for n in i]
-
 class PenLineShiftSmoothTool(Button):
     def __init__(self):
         Button.__init__(self)
@@ -1418,12 +1444,22 @@ class PenLineShiftSmoothTool(Button):
         self.rgba_lines = rgba_array(self.lines)
         self.rgba_frame_without_line = rgba_array(self.frame_without_line)
 
+#        is_corner, spline = polyline_corners(self.editable_pen_line.points)
+#        print('corners')
+#        for i,isc in enumerate(is_corner):
+#            if isc:
+#                print(i)
+#                x,y = self.editable_pen_line.points[i]
+#                self.rgba_lines[int(x),int(y),0] = 255
 #        turns,spline = corner_points(self.editable_pen_line.points)
 #        for x,y in turns:
 #            self.rgba_lines[int(x),int(y),0] = 255
-#        for x,y in spline:
-#            self.rgba_lines[int(x),int(y),2] = 255
-#            self.rgba_lines[int(x),int(y),3] = 255
+#        for x,y in zip(*spline):
+#            try:
+#                self.rgba_lines[int(x),int(y),2] = 255
+#                self.rgba_lines[int(x),int(y),3] = 255
+#            except:
+#                pass
 
     def on_mouse_up(self, x, y):
         if self.editable_pen_line is None:
@@ -1871,7 +1907,8 @@ def splprep(points, weights=None, smoothing=None):
     t = np.zeros(m+k+1)
     c = np.zeros((m+k+1)*idim)
     num_knots = np.zeros(1, np.int32)
-    ier = tinylib.fitpack_parcur(arr_base_ptr(points), arr_base_ptr(weights), idim, m, k, smoothing,
+    u = np.zeros(m)
+    ier = tinylib.fitpack_parcur(arr_base_ptr(points), arr_base_ptr(weights), idim, m, arr_base_ptr(u), k, smoothing,
                                  arr_base_ptr(t), arr_base_ptr(num_knots), arr_base_ptr(c))
 
     n = num_knots[0]
@@ -1879,9 +1916,9 @@ def splprep(points, weights=None, smoothing=None):
     #    in the b-spline representation of the spline curve s(u),i.e.
     #       the b-spline coefficients of the spline sj(u) will be given
     #           in c(n*(j-1)+i),i=1,2,...,n-k-1 for j=1,2,...,idim.
-    return (t[:n], [c[n*j:n*j+n-k-1] for j in range(idim)], k)
+    return (t[:n], [c[n*j:n*j+n-k-1] for j in range(idim)], k), u
 
-def splev(x, tck):
+def splev(x, tck, der=0):
     t, c, k = tck
     try:
         c[0][0]
@@ -1889,13 +1926,16 @@ def splev(x, tck):
     except Exception:
         parametric = False
     if parametric:
-        return list(map(lambda c, x=x, t=t, k=k: splev(x, [t, c, k]), c))
+        return list(map(lambda c, x=x, t=t, k=k: splev(x, [t, c, k], der=der), c))
 
     x = np.asarray(x)
     xshape = x.shape
     x = x.ravel()
     y = np.zeros(x.shape, float)
-    ier = tinylib.fitpack_splev(arr_base_ptr(t), t.shape[0], arr_base_ptr(c), k, arr_base_ptr(x), arr_base_ptr(y), y.shape[0])
+    if der == 0:
+        ier = tinylib.fitpack_splev(arr_base_ptr(t), t.shape[0], arr_base_ptr(c), k, arr_base_ptr(x), arr_base_ptr(y), y.shape[0])
+    else:
+        ier = tinylib.fitpack_splder(arr_base_ptr(t), t.shape[0], arr_base_ptr(c), k, der, arr_base_ptr(x), arr_base_ptr(y), y.shape[0])
     assert ier == 0
     return y.reshape(xshape)
 
@@ -1913,7 +1953,7 @@ def bspline_interp(points, smoothing=None):
     #tck, u = splprep([x, y], s=smoothing)
     #ufirst, ulast = u[0], u[-1] # these evaluate to 0, 1
     # our splprep works like this:
-    tck = splprep(np.column_stack([x,y]), smoothing=smoothing)
+    tck, _ = splprep(np.column_stack([x,y]), smoothing=smoothing)
     ufirst, ulast = 0, 1
 
     step=(ulast-ufirst)/curve_length
