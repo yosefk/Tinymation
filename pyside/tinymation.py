@@ -1335,14 +1335,7 @@ class PenTool(Button):
             
         self.prev_drawn = (x,y) 
 
-#void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x, const double* y,
-#                    double focus_x, double focus_y, int* first_diff, int* last_diff,
-#                    double threshold = 30.0, double smoothness = 0.6,
-#                    double pull_strength = 0.5, int num_neighbors = 1,
-#                    double max_endpoint_dist = 30.0, double zero_endpoint_dist_start = 5.0)
-tinylib.smooth_polyline.argtypes = [ct.c_int]+[ct.c_void_p]*4+[ct.c_double]*2+[ct.c_void_p]*2+[ct.c_double]*3+[ct.c_int]+[ct.c_double]*2
-
-def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5):
+def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5, corner_stiffness=1):
     xarr = points[:, 0]
     yarr = points[:, 1]
     
@@ -1353,8 +1346,13 @@ def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0
     first_diff = np.zeros(1, dtype=np.int32)
     last_diff = np.zeros(1, dtype=np.int32)
 
+    _, corner_indexes, _, _, _, _ = fitpack_turns.plot_polyline_and_sharp_turns(xarr, yarr, curvature_threshold=1, s=0, k=3, plot=False)
+    corner_vec = np.zeros(len(xarr))
+    corner_vec[corner_indexes]=1
+
     tinylib.smooth_polyline(len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
             arr_base_ptr(first_diff), arr_base_ptr(last_diff),
+            arr_base_ptr(corner_vec), corner_stiffness,
             threshold, smoothness, pull_strength, num_neighbors, max_endpoint_dist, zero_endpoint_dist_start)
 
     return new_arr, first_diff[0], last_diff[0]+1
@@ -1384,6 +1382,14 @@ def simplify_polyline(points, threshold):
     result.append(points[-1])
     return result
 
+import fitpack_turns
+
+def corner_points(points):
+    xarr = points[:, 0]
+    yarr = points[:, 1]
+    t, i, x, y, xs, ys = fitpack_turns.plot_polyline_and_sharp_turns(xarr, yarr, curvature_threshold=1, s=0, k=3, plot=False)
+    return zip(list(x),list(y)), zip(list(xs),list(ys))#[(xarr[n], yarr[n]) for n in i]
+
 class PenLineShiftSmoothTool(Button):
     def __init__(self):
         Button.__init__(self)
@@ -1411,6 +1417,13 @@ class PenLineShiftSmoothTool(Button):
 
         self.rgba_lines = rgba_array(self.lines)
         self.rgba_frame_without_line = rgba_array(self.frame_without_line)
+
+#        turns,spline = corner_points(self.editable_pen_line.points)
+#        for x,y in turns:
+#            self.rgba_lines[int(x),int(y),0] = 255
+#        for x,y in spline:
+#            self.rgba_lines[int(x),int(y),2] = 255
+#            self.rgba_lines[int(x),int(y),3] = 255
 
     def on_mouse_up(self, x, y):
         if self.editable_pen_line is None:
@@ -1459,7 +1472,7 @@ class PenLineShiftSmoothTool(Button):
 
         endpoint_dist = 15
 
-        new_points, first_diff, last_diff = smooth_polyline(old_points, (cx,cy), threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist)
+        new_points, first_diff, last_diff = smooth_polyline(old_points, (cx,cy), threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist, corner_stiffness=min(1,1.7-p*2))
 
         # we allow ourselves the use of list (and Python code not calling into C) for the modified points, of which there are few;
         # the bulk of the points, of which there can be many, we manage as numpy arrays and process in C
