@@ -743,13 +743,14 @@ class Brush
     void paint(SamplePoint& p, double zoomCoeff);
     void endPaint();
 
+    const std::vector<SamplePoint>& polyline() const { return _polyline; }
+    const std::vector<int>& sample2polyline() const { return _sample2polyline; }
+  private:
     void paintAt(const SamplePoint& p);
     void paintLine(const SamplePoint& p1, const SamplePoint& p2);
     void paintBezierSegment(const SamplePoint& p1, const SamplePoint& p2, const Point2D& tangent1, const Point2D& tangent2);
     void paintBezierCurve(const SamplePoint& p1, const SamplePoint& p2, const Point2D& control1, const Point2D& control2);
 
-    const std::vector<SamplePoint>& polyline() const { return _polyline; }
-  private:
     //painting state
     SamplePoint _prevP; //previous value of p passed to paint (or initPaint the first time paint is called)
     SamplePoint _olderP; //previous value of _prevP
@@ -759,6 +760,9 @@ class Brush
     bool _haveTangent = false;
     Point2D _prevTangent{0, 0};
     std::vector<SamplePoint> _polyline; //these are the coordinates of the polyline that was painted - after Bezier smoothing etc.
+    std::vector<int> _sample2polyline; //maps input sample indexes to the polyline index corresponding to the start of painting at that point
+    inline void addSample2Polyline() { _sample2polyline.push_back(_polyline.size()); }
+    int _sampleIndex = 0;
 };
 
 void Brush::initPaint(const SamplePoint& p)
@@ -773,6 +777,9 @@ void Brush::initPaint(const SamplePoint& p)
 
 void Brush::paint(SamplePoint& p, double zoomCoeff)
 {
+    //this is inaccurate since painting "lags" the arrival of new samples. however this is very simple
+    //and isn't prone to worse errors than this where we push too many or too few entries to _sample2polyline
+    addSample2Polyline();
     if(_smoothing == Smoothing::WEIGHTED && _smoothDist > 0) {
         //smooth the coordinates by taking a weighted average of the history positions & pressure
         Point2D prevPos = _history.empty() ? _prevP.pos : _history.back().pos;
@@ -884,6 +891,7 @@ void Brush::paint(SamplePoint& p, double zoomCoeff)
 void Brush::endPaint()
 {
     _painter->detectSharpTurns(false); //not sure this helps (with a fat dot appearing at the end in drawLine) but seemingly can't hurt
+    addSample2Polyline();
     if(!_paintedAtLeastOnce) {
         paintAt(_prevP);
     }
@@ -1002,12 +1010,18 @@ void Brush::paintLine(const SamplePoint& p1, const SamplePoint& p2)
         }
         else {
             if(_polyline.back() != p1) {
-                //not sure why this happnes... it occasionally does - TODO: debug this... doesn't seem to cause visible adverse effects...
+                //hopefully this no longer happens, and the reason it used to was that paintLine() was called early on because
+                //we didn't have enough history to call paintBezierSegment() and then we called paintBezierSegment, repainting
+                //from the same starting point as in the first paintLine() call
                 printf("Brush::paintLine - WARNING: paintLine called with p1 different from the previous paintLine's p2!\n");
             }
             _polyline.push_back(p2);
         }
     }
+    else {
+        printf("Brush::paintLine - WARNING: repeated line!\n");
+    }
+
     _paintedAtLeastOnce = true;
     if(_painter) {
         if(_softLines) {
@@ -1123,6 +1137,16 @@ extern "C" void brush_get_polyline(Brush* brush, int polyline_length, double* po
             polyline_pressure[i] = polyline[i].pressure; 
         }
     }
+}
+
+extern "C" void brush_get_sample2polyline(Brush* brush, int sample2polyline_length, int* sample2polyline_data)
+{
+    const auto& sample2polyline = brush->sample2polyline();
+    if(sample2polyline_length != (int)sample2polyline.size()) {
+        printf("brush_get_sample2polyline() - WARNING: wrong sample2polyline length\n");
+        return;
+    }
+    std::copy(sample2polyline.begin(), sample2polyline.end(), sample2polyline_data);
 }
 
 extern "C" void brush_free(Brush* brush)

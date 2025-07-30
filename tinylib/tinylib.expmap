@@ -12,6 +12,7 @@
     brush_end_paint;
     brush_get_polyline_length;
     brush_get_polyline;
+    brush_get_sample2polyline;
     brush_free;
     brush_flood_fill_color_based_on_mask;
     fitpack_splev;

@@ -1228,7 +1228,7 @@ class PenTool(Button):
 
         self.draw_line(list(zip(px,py)), smoothDist=0) # don't smooth, bspline_interp already did
 
-    def end_paint(self):
+    def end_paint(self, nsamples=0, get_sample2polyline=False):
         tinylib.brush_end_paint(self.brush, self.region)
         self.update_bbox()
 
@@ -1238,10 +1238,14 @@ class PenTool(Button):
         polyline_y = self.polyline[:, 1]
         tinylib.brush_get_polyline(self.brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, 0)
 
+        if get_sample2polyline:
+            self.sample2polyline = np.empty(nsamples, dtype=np.int32)
+            tinylib.brush_get_sample2polyline(self.brush, nsamples, arr_base_ptr(self.sample2polyline))
+
         tinylib.brush_free(self.brush)
         self.brush = 0
 
-    def draw_line(self, xys, zoom=1, smoothDist=None, dry=False, paintWithin=None):
+    def draw_line(self, xys, zoom=1, smoothDist=None, dry=False, paintWithin=None, get_sample2polyline=False):
         assert not self.eraser
         if len(xys) < 2:
             return
@@ -1261,7 +1265,7 @@ class PenTool(Button):
         tinylib.brush_paint(self.brush, len(xys)-1, arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, zoom, self.region)
         self.update_bbox()
 
-        self.end_paint()
+        self.end_paint(nsamples=len(xys), get_sample2polyline=get_sample2polyline)
 
         self.points = xys
 
@@ -1337,20 +1341,10 @@ class PenTool(Button):
 
 def polyline_corners(points, curvature_threshold=1, peak_distance=15):
     # Fit a B-spline to the polyline
-#    import scipy.interpolate
-#    tck1, u1 = scipy.interpolate.splprep(points.T, s=0, k=3)
     points = np.column_stack([points[:,0],points[:,1]]) # array layout correction
-#    print(points.shape)
     tck, u = splprep(points, smoothing=0)
-#    print(tck1)
-#    print(tck)
-#    print(u1)
-#    print(u)
-
-    #tck, u = tck1, u1
 
     # Evaluate the spline at the u values returned by splprep
-#    import scipy.interpolate
     dx, dy = splev(u, tck, der=1)  # First derivatives at u
     ddx, ddy = splev(u, tck, der=2)  # Second derivatives at u
 
@@ -1359,19 +1353,11 @@ def polyline_corners(points, curvature_threshold=1, peak_distance=15):
     denominator = (dx**2 + dy**2)**1.5
     curvature = numerator / denominator 
 
-#    print(curvature)
-#    import scipy.signal
-#    fp,_ =scipy.signal.find_peaks(curvature, height=curvature_threshold, distance=peak_distance)
-#    print(fp)
-
     peaks = np.empty(len(curvature), dtype=np.uint8)
-#    peaks[:]=0
-#    peaks[fp]=1
     tinylib.find_peaks(arr_base_ptr(peaks), arr_base_ptr(curvature), len(curvature), curvature_threshold, peak_distance)
+    return peaks
 
-    return peaks#, splev(u, tck)
-
-def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5, corner_stiffness=1):
+def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5, corner_stiffness=1, corner_vec=None):
     xarr = points[:, 0]
     yarr = points[:, 1]
     
@@ -1382,7 +1368,8 @@ def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0
     first_diff = np.zeros(1, dtype=np.int32)
     last_diff = np.zeros(1, dtype=np.int32)
 
-    corner_vec = polyline_corners(points)
+    if corner_vec is None:
+        corner_vec = polyline_corners(points)
 
     tinylib.smooth_polyline(len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
             arr_base_ptr(first_diff), arr_base_ptr(last_diff),
@@ -1443,23 +1430,8 @@ class PenLineShiftSmoothTool(Button):
 
         self.rgba_lines = rgba_array(self.lines)
         self.rgba_frame_without_line = rgba_array(self.frame_without_line)
-
-#        is_corner, spline = polyline_corners(self.editable_pen_line.points)
-#        print('corners')
-#        for i,isc in enumerate(is_corner):
-#            if isc:
-#                print(i)
-#                x,y = self.editable_pen_line.points[i]
-#                self.rgba_lines[int(x),int(y),0] = 255
-#        turns,spline = corner_points(self.editable_pen_line.points)
-#        for x,y in turns:
-#            self.rgba_lines[int(x),int(y),0] = 255
-#        for x,y in zip(*spline):
-#            try:
-#                self.rgba_lines[int(x),int(y),2] = 255
-#                self.rgba_lines[int(x),int(y),3] = 255
-#            except:
-#                pass
+    
+        self.corners = polyline_corners(self.editable_pen_line.points)
 
     def on_mouse_up(self, x, y):
         if self.editable_pen_line is None:
@@ -1494,6 +1466,8 @@ class PenLineShiftSmoothTool(Button):
             # but of how much the line intersects the region where a change happened and so how
             # much repainting it takes) - so we ignore old events
 
+        #self.draw_corners(red=0)
+
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
         pen = TOOLS['pen'].tool
@@ -1508,14 +1482,19 @@ class PenLineShiftSmoothTool(Button):
 
         endpoint_dist = 15
 
-        new_points, first_diff, last_diff = smooth_polyline(old_points, (cx,cy), threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist, corner_stiffness=min(1,1.7-p*2))
+        new_points, first_diff, last_diff = smooth_polyline(old_points, (cx,cy), threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist,
+                                                            corner_stiffness=min(1,1.7-p*2), corner_vec=self.corners)
 
         # we allow ourselves the use of list (and Python code not calling into C) for the modified points, of which there are few;
         # the bulk of the points, of which there can be many, we manage as numpy arrays and process in C
         simplified_new_points = simplify_polyline(list(new_points[first_diff:last_diff]),1)
         changed_old_points = list(old_points[first_diff:last_diff])
 
-        new_points = np.asfortranarray(np.concatenate((old_points[:first_diff], np.array(simplified_new_points, dtype=float), old_points[last_diff:])))
+        simplified_new_points_array = np.array(simplified_new_points, dtype=float)
+        self.update_corners(old_points, simplified_new_points_array, first_diff, last_diff)
+
+        new_points = np.asfortranarray(np.concatenate((old_points[:first_diff], simplified_new_points_array, old_points[last_diff:])))
+        assert len(self.corners) == len(new_points)
 
         affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), WIDTH*4)
 
@@ -1526,12 +1505,47 @@ class PenLineShiftSmoothTool(Button):
 
         paintWithin = np.array([minx, miny, maxx, maxy],dtype=np.int32)
 
-        pen.draw_line(new_points, smoothDist=0, paintWithin=paintWithin)
+        pen.draw_line(new_points, smoothDist=0, paintWithin=paintWithin, get_sample2polyline=True)
+
+        # the corners in pen.polyline are roughly where they were in new_points, shifted by sample2polyline
+        # (this is inaccurate both because sample2polyline isn't currently very accurate and because it assumes
+        # thigns about the curvature of the smoothed pen.polyline which might not be true, but it seems to work well
+        # enough in practice. another approach would be to look for new corners (what update_corners currently does)
+        # in pen.polyline rather than in simplified_new_points; this would probably be slightly more accurate since
+        # currently we're assuming that fitpack smoothing works a lot like Krita-like brush smoothing and maybe
+        # sometimes it doesn't.) of course even more sensible might have been to compute curvature in the brush
+        # code directly without relying on fitpack
+        self.update_corner_indexes(pen.sample2polyline, len(pen.polyline))
 
         self.editable_pen_line = EditablePenLine(pen.polyline, start_time)
         self.editable_pen_line.frame_without_line = self.frame_without_line
 
+        #self.draw_corners(red=255)
+
         layout.drawing_area().draw_region(affected_bbox)
+        # if you call draw_corners you might want to call this instead of the draw_region above for debugging:
+        #layout.drawing_area().draw_region(points_bbox(list(old_points)+list(pen.polyline), WIDTH*4))
+
+    def draw_corners(self,red):
+        for i,isc in enumerate(self.corners):
+            if isc:
+                x,y = self.editable_pen_line.points[i]
+                self.rgba_lines[int(x),int(y),0] = red
+
+    def update_corners(self, old_points, simplified_new_points, first_diff, last_diff):
+        '''we're making an effort to only recompute corners at the changed part of the polyline rather than refit a bspline to the whole thing at every step'''
+        distance = 15
+        first_old_point = max(0,first_diff-distance)
+        points_for_corner_finding = np.asfortranarray(np.concatenate((old_points[first_old_point:first_diff], simplified_new_points, old_points[last_diff:last_diff+distance])))
+        new_corners = polyline_corners(points_for_corner_finding)
+        start = first_diff - first_old_point
+        self.corners = np.concatenate((self.corners[:first_diff], new_corners[start:start+simplified_new_points.shape[0]], self.corners[last_diff:]))
+
+    def update_corner_indexes(self, sample2polyline, new_polyline_len):
+        indexes = np.where(self.corners)
+        new_polyline_indexes = sample2polyline[indexes]
+        self.corners = np.zeros(new_polyline_len, dtype=np.uint8)
+        self.corners[new_polyline_indexes] = 1
 
 MIN_ZOOM, MAX_ZOOM = 1, 5
 

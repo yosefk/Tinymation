@@ -28,6 +28,9 @@ tinylib.brush_get_polyline_length.restype = ct.c_int
 #void brush_get_polyline(Brush* brush, int polyline_length, double* polyline_x, double* polyline_y, double* polyline_time, double* polyline_pressure)
 tinylib.brush_get_polyline.argtypes = [ct.c_void_p, ct.c_int] + [ct.c_void_p]*4
 
+#void brush_get_sample2polyline(Brush* brush, int sample2polyline_length, int* sample2polyline_data)
+tinylib.brush_get_sample2polyline.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p]
+
 #void brush_free(Brush* brush)
 tinylib.brush_free.argtypes = [ct.c_void_p]
 
