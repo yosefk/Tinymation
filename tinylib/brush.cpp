@@ -352,6 +352,7 @@ class ImagePainter
     void drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint& start, const SamplePoint& end, double width);
 
     void detectSharpTurns(bool b) { _detectSharpTurns=b; if(!b) _cumDist=0; }
+    void useMaxBlending() { _maxBlending = true; }
 
   private:
     int value(const Coord& c) { return _image[_ystride*c.y + _xstride*c.x]; }
@@ -395,6 +396,11 @@ class ImagePainter
     //and the "real" solution is to somehow deal with the bad input we sometimes get)
     bool _detectSharpTurns = false;
     double _cumDist = 0;
+
+    //for line patching we use max blending because normal alpha blending makes the lines thicker
+    //when you paint over them (and max blending has its own artifacts when the new line is near
+    //an existing one but such artifacts are a rarity when patching while painting over always happens)
+    bool _maxBlending = false;
 };
 
 //TODO: LUT
@@ -655,6 +661,9 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
             //based - if we ever want to use "sharp" erasers, there's value in avoiding aliasing
             //artifacts when 2 adjacent lines (whether created by pens or erasers) get close enough
             //("over" blending makes these artifacts much less pronounced)
+            else if(_maxBlending) {
+                newVal = std::max(grey, oldVal);
+            }
             else {
                 int valAfterLastDrawLine = 0;
                 CoordSet::Value v = _aroundPrevEndpoint.findPixel(x,y);
@@ -1082,6 +1091,11 @@ extern "C" void brush_set_rgb(Brush* brush, const unsigned char* rgb)
     painter._pixTraitsRGB.newColor.rgb[0] = rgb[0];
     painter._pixTraitsRGB.newColor.rgb[1] = rgb[1];
     painter._pixTraitsRGB.newColor.rgb[2] = rgb[2];
+}
+
+extern "C" void brush_use_max_blending(Brush* brush)
+{
+    brush->_painter->useMaxBlending();
 }
 
 extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, double zoom, int* region)

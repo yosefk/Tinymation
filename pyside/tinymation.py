@@ -2081,6 +2081,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     ptr, ystride, width, height = greyscale_c_params(lines)
     brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, 2.5, 0, 0, 0, 0, ptr, width, height, 4, ystride, 0)
+    tinylib.brush_use_max_blending(brush)
 
     xarr = np.array(px, dtype=float)
     yarr = np.array(py, dtype=float)

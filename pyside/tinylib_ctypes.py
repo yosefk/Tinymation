@@ -15,6 +15,9 @@ tinylib.brush_init_paint.restype = ct.c_void_p
 #void brush_set_rgb(Brush* brush, const unsigned char* rgb)
 tinylib.brush_set_rgb.argtypes = [ct.c_void_p, ct.c_uint8*3]
 
+#void brush_use_max_blending(Brush* brush)
+tinylib.brush_use_max_blending.argtypes = [ct.c_void_p]
+
 #void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, double zoom, int* region)
 tinylib.brush_paint.argtypes = [ct.c_void_p, ct.c_int] + [ct.c_void_p]*4 + [ct.c_double] + [ct.c_void_p]
 
