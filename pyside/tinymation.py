@@ -1357,7 +1357,7 @@ def polyline_corners(points, curvature_threshold=1, peak_distance=15):
     tinylib.find_peaks(arr_base_ptr(peaks), arr_base_ptr(curvature), len(curvature), curvature_threshold, peak_distance)
     return peaks
 
-def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5, corner_stiffness=1, corner_vec=None):
+def smooth_polyline(points, focus, prev_closest_to_focus_idx=-1, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5, corner_stiffness=1, corner_vec=None):
     xarr = points[:, 0]
     yarr = points[:, 1]
     
@@ -1371,25 +1371,31 @@ def smooth_polyline(points, focus, threshold=30, smoothness=0.6, pull_strength=0
     if corner_vec is None:
         corner_vec = polyline_corners(points)
 
-    tinylib.smooth_polyline(len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
-            arr_base_ptr(first_diff), arr_base_ptr(last_diff),
+    closest_idx = tinylib.smooth_polyline(len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
+            arr_base_ptr(first_diff), arr_base_ptr(last_diff), prev_closest_to_focus_idx,
             arr_base_ptr(corner_vec), corner_stiffness,
             threshold, smoothness, pull_strength, num_neighbors, max_endpoint_dist, zero_endpoint_dist_start)
 
-    return new_arr, first_diff[0], last_diff[0]+1
+    return new_arr, first_diff[0], last_diff[0]+1, closest_idx
 
 def points_bbox(xys, margin):
     xs = [xy[0] for xy in xys]
     ys = [xy[1] for xy in xys]
     return min(xs)-margin, min(ys)-margin, max(xs)+margin, max(ys)+margin
 
-def simplify_polyline(points, threshold):
+def simplify_polyline(points, threshold, remap_idx=None):
     if len(points) < 100:
-        return points
+        return points, remap_idx if (remap_idx is not None and remap_idx < len(points) and remap_idx >= 0) else None
         
+    remapped_idx = None
     result = [points[0]]
-    
+    if remap_idx == 0:
+        remapped_idx = 0
+
     for i in range(1, len(points)-1):
+        if remap_idx == i:
+            remapped_idx = len(result)
+
         prev = points[i-1]
         curr = points[i]
         next = points[i+1]
@@ -1401,7 +1407,7 @@ def simplify_polyline(points, threshold):
             result.append(curr)
             
     result.append(points[-1])
-    return result
+    return result, remapped_idx
 
 class PenLineShiftSmoothTool(Button):
     def __init__(self):
@@ -1432,6 +1438,14 @@ class PenLineShiftSmoothTool(Button):
         self.rgba_frame_without_line = rgba_array(self.frame_without_line)
     
         self.corners = polyline_corners(self.editable_pen_line.points)
+
+        self.prev_closest_to_focus_idx = -1
+#        print()
+#        print()
+#        print()
+#        print('DOWN')
+#        print()
+
 
     def on_mouse_up(self, x, y):
         if self.editable_pen_line is None:
@@ -1482,13 +1496,27 @@ class PenLineShiftSmoothTool(Button):
 
         endpoint_dist = 15
 
-        new_points, first_diff, last_diff = smooth_polyline(old_points, (cx,cy), threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist,
-                                                            corner_stiffness=min(1,1.7-p*2), corner_vec=self.corners)
+        new_points, first_diff, last_diff, closest_idx = smooth_polyline(old_points, (cx,cy), self.prev_closest_to_focus_idx,
+                                                                         threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist,
+                                                                          corner_stiffness=min(1,1.7-p*2), corner_vec=self.corners)
+#        print(f'closest_idx: {self.prev_closest_to_focus_idx} -> {closest_idx}, diffs: {first_diff} to {last_diff}')
 
         # we allow ourselves the use of list (and Python code not calling into C) for the modified points, of which there are few;
         # the bulk of the points, of which there can be many, we manage as numpy arrays and process in C
-        simplified_new_points = simplify_polyline(list(new_points[first_diff:last_diff]),1)
+        simplified_new_points, simplified_closest_idx = simplify_polyline(list(new_points[first_diff:last_diff]),1,closest_idx-first_diff)
         changed_old_points = list(old_points[first_diff:last_diff])
+
+        if simplified_closest_idx is not None: # pretty sure that this "if" should always be true but we have code for when it isn't, in terms of index remapping it sounds correct
+#            print(f'  ok')
+            simplified_closest_idx += first_diff
+#            print(f'  {simplified_closest_idx=}')
+            self.prev_closest_to_focus_idx = simplified_closest_idx
+        elif closest_idx >= last_diff: # closest point is after last diff (?!)
+            #            print(f'  HMM closest_idx >= last_diff ??')
+            self.prev_closest_to_focus_idx = closest_idx - (len(changed_old_points)-len(simplified_new_points))
+        else: # before first_diff (?!)
+            #            print(f'  HMM closest_idx < first_diff ??')
+            self.prev_closest_to_focus_idx = closest_idx
 
         simplified_new_points_array = np.array(simplified_new_points, dtype=float)
         self.update_corners(old_points, simplified_new_points_array, first_diff, last_diff)
@@ -1515,7 +1543,7 @@ class PenLineShiftSmoothTool(Button):
         # currently we're assuming that fitpack smoothing works a lot like Krita-like brush smoothing and maybe
         # sometimes it doesn't.) of course even more sensible might have been to compute curvature in the brush
         # code directly without relying on fitpack
-        self.update_corner_indexes(pen.sample2polyline, len(pen.polyline))
+        self.update_indexes(pen.sample2polyline, len(pen.polyline))
 
         self.editable_pen_line = EditablePenLine(pen.polyline, start_time)
         self.editable_pen_line.frame_without_line = self.frame_without_line
@@ -1541,11 +1569,15 @@ class PenLineShiftSmoothTool(Button):
         start = first_diff - first_old_point
         self.corners = np.concatenate((self.corners[:first_diff], new_corners[start:start+simplified_new_points.shape[0]], self.corners[last_diff:]))
 
-    def update_corner_indexes(self, sample2polyline, new_polyline_len):
+    def update_indexes(self, sample2polyline, new_polyline_len):
         indexes = np.where(self.corners)
         new_polyline_indexes = sample2polyline[indexes]
         self.corners = np.zeros(new_polyline_len, dtype=np.uint8)
         self.corners[new_polyline_indexes] = 1
+
+        # TODO: stick to endpoint better
+        self.prev_closest_to_focus_idx = sample2polyline[self.prev_closest_to_focus_idx]
+        #print(f'  {self.prev_closest_to_focus_idx=}')
 
 MIN_ZOOM, MAX_ZOOM = 1, 5
 

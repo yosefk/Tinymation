@@ -3,9 +3,91 @@
 #include <cmath>
 #include <algorithm>
 
+double euclidean_distance(double x1, double y1, double x2, double y2) {
+    return std::sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2));
+}
+
+template<class F>
+int find_closest_local_minimum(F&& f, int npoints, int p) {
+    // Helper function to check if index i is a local minimum
+    auto is_local_minimum = [&](int i) -> bool {
+        bool left_ok = (i == 0) || (f(i) <= f(i - 1));
+        bool right_ok = (i == npoints - 1) || (f(i) <= f(i + 1));
+        return left_ok && right_ok;
+    };
+
+    // Check if starting point is already a local minimum
+    if (is_local_minimum(p)) {
+        return p;
+    }
+
+    // Walk outward from p to find closest local minimum
+    int left = p - 1;
+    int right = p + 1;
+
+    while (left >= 0 || right < npoints) {
+        // Check left candidate
+        if (left >= 0 && is_local_minimum(left)) {
+            return left;
+        }
+
+        // Check right candidate
+        if (right < npoints && is_local_minimum(right)) {
+            return right;
+        }
+
+        // Move outward
+        left--;
+        right++;
+    }
+
+    // This should never happen if the function is well-defined,
+    // but if no local minimum is found, return the starting point
+    return p;
+}
+
+int find_closest_to_focus(int npoints, const double* x, const double* y, double focus_x, double focus_y, int prev_closest_to_focus_idx = -1)
+{
+    auto focus_dist = [=](int i) {
+        return euclidean_distance(x[i], y[i], focus_x, focus_y);
+    };
+    if(prev_closest_to_focus_idx < 0) {
+        // no previous point - simply find the closest point to focus
+        int closest_idx = 0;
+        double min_dist = focus_dist(0);
+        for (int i = 1; i < npoints; ++i) {
+            double dist = focus_dist(i);
+            if (dist < min_dist) {
+                min_dist = dist;
+                closest_idx = i;
+            }
+        }
+        return closest_idx;
+    }
+#if ENDP
+    else if(prev_closest_to_focus_idx <= 0) {
+        return 0;
+    }
+    else if(prev_closest_to_focus_idx >= npoints-1) {
+        return npoints-1; //stick to endpoints once you reach them
+                                          //(the user can always lift the stylus and click again to "get out of this"; OTOH
+                                          //sliding away from endpoints makes it hard to pull them anywhere
+    }
+#endif
+    else {
+        //return the location of the local minimum of Euclidean distance to the focus point closest to prev_closest_to_focus_idx.
+        //the idea here is to "stick to the area first selected" since otherwise if we look for the closest point every time,
+        //and the polyline crosses itself, we will jump from part to part (or we might jump from one end of the polyline to the other)
+        return find_closest_local_minimum(focus_dist, npoints, prev_closest_to_focus_idx);
+    }
+}
+
+//TODO: optimize this to be "closer" to O(changed points) rather than O(N) - eg currently we compute stuff
+//for points which we know will remain unchanged
 extern "C"
-void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x, const double* y,
+int smooth_polyline(int npoints, double* new_x, double* new_y, const double* x, const double* y,
                     double focus_x, double focus_y, int* first_diff, int* last_diff,
+                    int prev_closest_to_focus_idx = -1,
                     const unsigned char* is_corner = nullptr, double corner_effect_strength = 0.5,
                     double threshold = 30.0, double smoothness = 0.6,
                     double pull_strength = 0.5, int num_neighbors = 1,
@@ -17,27 +99,14 @@ void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x,
             new_x[i] = x[i];
             new_y[i] = y[i];
         }
-        return;
+        return 0;
     }
-
-    auto euclidean_distance = [](double x1, double y1, double x2, double y2) {
-        return std::sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2));
-    };
 
     auto segment_length = [&](int i1, int i2) {
         return euclidean_distance(x[i1], y[i1], x[i2], y[i2]);
     };
 
-    // Find closest point to focus
-    int closest_idx = 0;
-    double min_dist = euclidean_distance(x[0], y[0], focus_x, focus_y);
-    for (int i = 1; i < npoints; ++i) {
-        double dist = euclidean_distance(x[i], y[i], focus_x, focus_y);
-        if (dist < min_dist) {
-            min_dist = dist;
-            closest_idx = i;
-        }
-    }
+    int closest_idx = find_closest_to_focus(npoints, x, y, focus_x, focus_y, prev_closest_to_focus_idx);
 
     // Compute polyline distances from closest point
     std::vector<double> polyline_dists(npoints);
@@ -210,4 +279,5 @@ void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x,
             *last_diff = i;
         }
     }
+    return closest_idx;
 }
