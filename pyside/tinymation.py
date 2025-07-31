@@ -1440,12 +1440,6 @@ class PenLineShiftSmoothTool(Button):
         self.corners = polyline_corners(self.editable_pen_line.points)
 
         self.prev_closest_to_focus_idx = -1
-#        print()
-#        print()
-#        print()
-#        print('DOWN')
-#        print()
-
 
     def on_mouse_up(self, x, y):
         if self.editable_pen_line is None:
@@ -1498,31 +1492,31 @@ class PenLineShiftSmoothTool(Button):
 
         new_points, first_diff, last_diff, closest_idx = smooth_polyline(old_points, (cx,cy), self.prev_closest_to_focus_idx,
                                                                          threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist,
-                                                                          corner_stiffness=min(1,1.7-p*2), corner_vec=self.corners)
-#        print(f'closest_idx: {self.prev_closest_to_focus_idx} -> {closest_idx}, diffs: {first_diff} to {last_diff}')
+                                                                         corner_stiffness=min(1,1.7-p*2), corner_vec=self.corners)
+
+        if first_diff < 0:
+            assert last_diff == len(old_points)+1
+            return # no changes - nothing to do
 
         # we allow ourselves the use of list (and Python code not calling into C) for the modified points, of which there are few;
         # the bulk of the points, of which there can be many, we manage as numpy arrays and process in C
         simplified_new_points, simplified_closest_idx = simplify_polyline(list(new_points[first_diff:last_diff]),1,closest_idx-first_diff)
         changed_old_points = list(old_points[first_diff:last_diff])
 
-        if simplified_closest_idx is not None: # pretty sure that this "if" should always be true but we have code for when it isn't, in terms of index remapping it sounds correct
-#            print(f'  ok')
+        if simplified_closest_idx is not None: # pretty sure that this "if" should ~always be true but we have code for when it isn't, in terms of index remapping it sounds correct
             simplified_closest_idx += first_diff
-#            print(f'  {simplified_closest_idx=}')
             self.prev_closest_to_focus_idx = simplified_closest_idx
-        elif closest_idx >= last_diff: # closest point is after last diff (?!)
-            #            print(f'  HMM closest_idx >= last_diff ??')
+        elif closest_idx >= last_diff: # closest point is after last diff 
             self.prev_closest_to_focus_idx = closest_idx - (len(changed_old_points)-len(simplified_new_points))
-        else: # before first_diff (?!)
-            #            print(f'  HMM closest_idx < first_diff ??')
+        else: # before first_diff 
             self.prev_closest_to_focus_idx = closest_idx
 
         simplified_new_points_array = np.array(simplified_new_points, dtype=float)
+        assert len(self.corners) == len(old_points), f'{len(self.corners)=} {len(old_points)=} {first_diff=} {last_diff=} {len(simplified_new_points)=}'
         self.update_corners(old_points, simplified_new_points_array, first_diff, last_diff)
 
         new_points = np.asfortranarray(np.concatenate((old_points[:first_diff], simplified_new_points_array, old_points[last_diff:])))
-        assert len(self.corners) == len(new_points)
+        assert len(self.corners) == len(new_points), f'{len(self.corners)=} {len(old_points)=} {first_diff=} {last_diff=} {len(simplified_new_points)=}'
 
         affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), WIDTH*4)
 
@@ -1570,13 +1564,17 @@ class PenLineShiftSmoothTool(Button):
         self.corners = np.concatenate((self.corners[:first_diff], new_corners[start:start+simplified_new_points.shape[0]], self.corners[last_diff:]))
 
     def update_indexes(self, sample2polyline, new_polyline_len):
+        old_len = len(self.corners)
         indexes = np.where(self.corners)
         new_polyline_indexes = sample2polyline[indexes]
         self.corners = np.zeros(new_polyline_len, dtype=np.uint8)
         self.corners[new_polyline_indexes] = 1
 
-        # TODO: stick to endpoint better
-        self.prev_closest_to_focus_idx = sample2polyline[self.prev_closest_to_focus_idx]
+        if self.prev_closest_to_focus_idx != 0: # 0 stays 0
+            if self.prev_closest_to_focus_idx == old_len-1: # last stays last
+                self.prev_closest_to_focus_idx = len(self.corners)-1
+            else:
+                self.prev_closest_to_focus_idx = sample2polyline[self.prev_closest_to_focus_idx]
         #print(f'  {self.prev_closest_to_focus_idx=}')
 
 MIN_ZOOM, MAX_ZOOM = 1, 5

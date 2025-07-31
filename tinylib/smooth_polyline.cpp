@@ -64,7 +64,6 @@ int find_closest_to_focus(int npoints, const double* x, const double* y, double 
         }
         return closest_idx;
     }
-#if ENDP
     else if(prev_closest_to_focus_idx <= 0) {
         return 0;
     }
@@ -73,7 +72,6 @@ int find_closest_to_focus(int npoints, const double* x, const double* y, double 
                                           //(the user can always lift the stylus and click again to "get out of this"; OTOH
                                           //sliding away from endpoints makes it hard to pull them anywhere
     }
-#endif
     else {
         //return the location of the local minimum of Euclidean distance to the focus point closest to prev_closest_to_focus_idx.
         //the idea here is to "stick to the area first selected" since otherwise if we look for the closest point every time,
@@ -209,8 +207,14 @@ int smooth_polyline(int npoints, double* new_x, double* new_y, const double* x, 
 
     double start_endpoint_dist = std::min(max_endpoint_dist,
         euclidean_distance(focus_x, focus_y, x[0], y[0]) - zero_endpoint_dist_start);
+    if(closest_idx == 0) {
+        start_endpoint_dist = 0;
+    }
     double end_endpoint_dist = std::min(max_endpoint_dist,
         euclidean_distance(focus_x, focus_y, x[npoints-1], y[npoints-1]) - zero_endpoint_dist_start);
+    if(closest_idx == npoints-1) {
+        end_endpoint_dist = 0;
+    }
 
     // Use threshold as corner radius for determining corner effect range
     double corner_radius = threshold;
