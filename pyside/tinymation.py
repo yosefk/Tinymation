@@ -862,8 +862,9 @@ def bounding_rectangle_of_a_boolean_mask(mask):
     return minx, maxx, miny, maxy
 
 class EditablePenLine:
-    def __init__(self, points, start_time =None):
+    def __init__(self, points, start_time=None, closed=False):
         self.points = points
+        self.closed = closed
         self.frame_without_line = None
         self.start_time = start_time
 
@@ -1169,7 +1170,7 @@ class PenTool(Button):
             return
         self.patching = ctrl_is_pressed()
         if self.patching:
-            FlashlightTool().on_mouse_down(x,y)
+            NeedleTool().on_mouse_down(x,y)
             return
         self.points = []
         self.polyline = []
@@ -1245,7 +1246,7 @@ class PenTool(Button):
         tinylib.brush_free(self.brush)
         self.brush = 0
 
-    def draw_line(self, xys, zoom=1, smoothDist=None, dry=False, paintWithin=None, get_sample2polyline=False):
+    def draw_line(self, xys, zoom=1, smoothDist=None, dry=False, paintWithin=None, get_sample2polyline=False, closed=False):
         assert not self.eraser
         if len(xys) < 2:
             return
@@ -1258,6 +1259,8 @@ class PenTool(Button):
 
         x0, y0 = arr[0]
         self.init_brush(x0, y0, smoothDist=smoothDist, dry=dry, paintWithin=paintWithin)
+        if closed:
+            tinylib.brush_set_closed(self.brush)
 
         xarr = arr[1:, 0]
         yarr = arr[1:, 1]
@@ -1265,7 +1268,7 @@ class PenTool(Button):
         tinylib.brush_paint(self.brush, len(xys)-1, arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, zoom, self.region)
         self.update_bbox()
 
-        self.end_paint(nsamples=len(xys), get_sample2polyline=get_sample2polyline)
+        self.end_paint(nsamples=len(xys)+int(closed), get_sample2polyline=get_sample2polyline)
 
         self.points = xys
 
@@ -1301,7 +1304,7 @@ class PenTool(Button):
             history_item.optimize(self.bbox)
 
             if not self.soft and not self.eraser: # pen rather than pencil or eraser
-                history_item.editable_pen_line = EditablePenLine(self.polyline) # can be edited with PenLineShiftSmoothTool
+                history_item.editable_pen_line = EditablePenLine(self.polyline) # can be edited with TweezersTool
 
             history.append_item(history_item)
 
@@ -1357,7 +1360,7 @@ def polyline_corners(points, curvature_threshold=1, peak_distance=15):
     tinylib.find_peaks(arr_base_ptr(peaks), arr_base_ptr(curvature), len(curvature), curvature_threshold, peak_distance)
     return peaks
 
-def smooth_polyline(points, focus, prev_closest_to_focus_idx=-1, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5, corner_stiffness=1, corner_vec=None):
+def smooth_polyline(closed, points, focus, prev_closest_to_focus_idx=-1, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5, corner_stiffness=1, corner_vec=None):
     xarr = points[:, 0]
     yarr = points[:, 1]
     
@@ -1371,7 +1374,7 @@ def smooth_polyline(points, focus, prev_closest_to_focus_idx=-1, threshold=30, s
     if corner_vec is None:
         corner_vec = polyline_corners(points)
 
-    closest_idx = tinylib.smooth_polyline(len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
+    closest_idx = tinylib.smooth_polyline(closed, len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
             arr_base_ptr(first_diff), arr_base_ptr(last_diff), prev_closest_to_focus_idx,
             arr_base_ptr(corner_vec), corner_stiffness,
             threshold, smoothness, pull_strength, num_neighbors, max_endpoint_dist, zero_endpoint_dist_start)
@@ -1409,12 +1412,16 @@ def simplify_polyline(points, threshold, remap_idx=None):
     result.append(points[-1])
     return result, remapped_idx
 
-class PenLineShiftSmoothTool(Button):
+class TweezersTool(Button):
     def __init__(self):
         Button.__init__(self)
         self.editable_pen_line = None
 
     def on_mouse_down(self, x, y):
+        if ctrl_is_pressed():
+            try_to_close_the_last_editable_line(*layout.drawing_area().xy2frame(x,y))
+            return
+
         last_item = history.last_item()
         if last_item:
             self.editable_pen_line = last_item.editable_pen_line
@@ -1422,7 +1429,7 @@ class PenLineShiftSmoothTool(Button):
             return
 
         self.lines = movie.edit_curr_frame().surf_by_id('lines')
-        self.frame_without_line = getattr(self.editable_pen_line, 'frame_without_line', None)
+        self.frame_without_line = self.editable_pen_line.frame_without_line
         if self.frame_without_line is None: # the first time we edit a line, we create
             # a surface without the line. we do it here rather than at PenTool.on_mouse_up
             # to avoid slowing down repeated pen use without editing
@@ -1481,6 +1488,7 @@ class PenLineShiftSmoothTool(Button):
         pen = TOOLS['pen'].tool
 
         old_points = self.editable_pen_line.points
+        closed = self.editable_pen_line.closed
 
         p = layout.pressure
         sq = (1+p)**5
@@ -1490,13 +1498,24 @@ class PenLineShiftSmoothTool(Button):
 
         endpoint_dist = 15
 
-        new_points, first_diff, last_diff, closest_idx = smooth_polyline(old_points, (cx,cy), self.prev_closest_to_focus_idx,
+        new_points, first_diff, last_diff, closest_idx = smooth_polyline(closed, old_points, (cx,cy), self.prev_closest_to_focus_idx,
                                                                          threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist,
                                                                          corner_stiffness=min(1,1.7-p*2), corner_vec=self.corners)
 
         if first_diff < 0:
             assert last_diff == len(old_points)+1
             return # no changes - nothing to do
+
+        if last_diff <= first_diff: # wraparound
+            assert np.all(old_points[last_diff:first_diff] == new_points[last_diff:first_diff])
+            assert closed, f'{first_diff=} {last_diff=}'
+            shift = len(old_points) - first_diff
+            new_points = np.roll(new_points, shift, axis=0)
+            old_points = np.roll(old_points, shift, axis=0)
+            self.corners = np.roll(self.corners, shift)
+            last_diff += shift
+            first_diff = 0
+            closest_idx = (closest_idx + shift) % len(old_points)
 
         # we allow ourselves the use of list (and Python code not calling into C) for the modified points, of which there are few;
         # the bulk of the points, of which there can be many, we manage as numpy arrays and process in C
@@ -1527,7 +1546,7 @@ class PenLineShiftSmoothTool(Button):
 
         paintWithin = np.array([minx, miny, maxx, maxy],dtype=np.int32)
 
-        pen.draw_line(new_points, smoothDist=0, paintWithin=paintWithin, get_sample2polyline=True)
+        pen.draw_line(new_points, smoothDist=0, paintWithin=paintWithin, get_sample2polyline=True, closed=closed)
 
         # the corners in pen.polyline are roughly where they were in new_points, shifted by sample2polyline
         # (this is inaccurate both because sample2polyline isn't currently very accurate and because it assumes
@@ -1537,9 +1556,10 @@ class PenLineShiftSmoothTool(Button):
         # currently we're assuming that fitpack smoothing works a lot like Krita-like brush smoothing and maybe
         # sometimes it doesn't.) of course even more sensible might have been to compute curvature in the brush
         # code directly without relying on fitpack
-        self.update_indexes(pen.sample2polyline, len(pen.polyline))
+        polylen = len(pen.polyline)-int(closed)
+        self.update_indexes(pen.sample2polyline, polylen)
 
-        self.editable_pen_line = EditablePenLine(pen.polyline, start_time)
+        self.editable_pen_line = EditablePenLine(pen.polyline[:polylen], start_time, closed=closed)
         self.editable_pen_line.frame_without_line = self.frame_without_line
 
         #self.draw_corners(red=255)
@@ -1549,10 +1569,13 @@ class PenLineShiftSmoothTool(Button):
         #layout.drawing_area().draw_region(points_bbox(list(old_points)+list(pen.polyline), WIDTH*4))
 
     def draw_corners(self,red):
+        def draw_point(i,ch,val):
+            x,y = self.editable_pen_line.points[i]
+            self.rgba_lines[int(x),int(y),ch] = val
         for i,isc in enumerate(self.corners):
             if isc:
-                x,y = self.editable_pen_line.points[i]
-                self.rgba_lines[int(x),int(y),0] = red
+                draw_point(i,0,red)
+        draw_point(self.prev_closest_to_focus_idx, 1, red)
 
     def update_corners(self, old_points, simplified_new_points, first_diff, last_diff):
         '''we're making an effort to only recompute corners at the changed part of the polyline rather than refit a bspline to the whole thing at every step'''
@@ -1568,14 +1591,22 @@ class PenLineShiftSmoothTool(Button):
         indexes = np.where(self.corners)
         new_polyline_indexes = sample2polyline[indexes]
         self.corners = np.zeros(new_polyline_len, dtype=np.uint8)
-        self.corners[new_polyline_indexes] = 1
+        try:
+            self.corners[new_polyline_indexes] = 1
+        except:
+            print(f'{len(self.corners)=} {len(sample2polyline)=} {new_polyline_len=}')
 
         if self.prev_closest_to_focus_idx != 0: # 0 stays 0
             if self.prev_closest_to_focus_idx == old_len-1: # last stays last
                 self.prev_closest_to_focus_idx = len(self.corners)-1
             else:
-                self.prev_closest_to_focus_idx = sample2polyline[self.prev_closest_to_focus_idx]
-        #print(f'  {self.prev_closest_to_focus_idx=}')
+                try:
+                    self.prev_closest_to_focus_idx = sample2polyline[self.prev_closest_to_focus_idx]
+                except:
+                    # not sure why this is happening; it's happening rarely. it's probably better
+                    # to look for the closest point on the polyline at the next mouse move event than
+                    # to raise an exception with all of the side effects of that
+                    self.prev_closest_to_focus_idx = -1
 
 MIN_ZOOM, MAX_ZOOM = 1, 5
 
@@ -1762,7 +1793,7 @@ class PaintBucketTool(Button):
             return
         self.patching = ctrl_is_pressed()
         if self.patching:
-            FlashlightTool().on_mouse_down(x,y)
+            NeedleTool().on_mouse_down(x,y)
             return
         self.history_item = HistoryItem('color')
         self.bboxes = []
@@ -2134,12 +2165,86 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     return True
 
+def close_polyline(points):
+    # fit a curve thru the endpoints - for that, make them "not the endpoints" but put them
+    # in the middle of the curve so that fitpack produces something smooth according to where
+    # the curve is going to near the endpoints. (scipy's splprep has a per=1 parameter for 
+    # fitting closed curves, which early Tinymation even used to use for closing _and_ smoothing
+    # curves early on, but since we now smooth on the fly and don't want to change the curve
+    # after it was already painted by a smoothing step, it's an overkill to pull the code implementing
+    # per=1 into our fitpack subset)
+    orig_points = points
+
+    mid_ind = len(points) // 2
+    points = np.concatenate((points[mid_ind:], points[:mid_ind]))
+
+    points = np.column_stack([points[:,0],points[:,1]]) # array layout correction
+    tck, u = splprep(points, smoothing=points.shape[0]/15)
+
+    ubegin = u[mid_ind]
+    uend = u[mid_ind+1]
+
+    sx, sy = orig_points[0,:]
+    ex, ey = orig_points[-1,:]
+    endpoints_dist = math.sqrt((sx-ex)**2 + (sy-ey)**2)
+    step = (uend-ubegin) / (2*endpoints_dist)
+
+    new_points = splev(np.arange(ubegin, uend, step), tck)
+    new_points = np.array(list(zip(new_points[0], new_points[1])), dtype=float, order='F')
+
+    return np.concatenate((orig_points, new_points))
+
+def redraw_line(line, last_item): 
+    frame_without_line = line.frame_without_line
+    lines = movie.edit_curr_frame().surf_by_id('lines')
+    if frame_without_line is None:
+        frame_without_line = lines.copy()
+        last_item.copy_saved_subsurface_into(frame_without_line)
+        line.frame_without_line = frame_without_line # this is not just an optimization but matters for correctness
+        # since after our redrawing, last_item.copy_saved_subsurface_into() will no longer work as we might have
+        # drawn outside the original line's bbox
+
+    affected_bbox = points_bbox(line.points, margin=WIDTH*4)
+
+    minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
+    minx, miny = res.clip(minx, miny)
+    maxx, maxy = res.clip(maxx, maxy)
+    rgba_array(lines)[minx:maxx,miny:maxy] = rgba_array(frame_without_line)[minx:maxx,miny:maxy]
+
+    pen = TOOLS['pen'].tool
+    pen.lines_array = surf.pixels_alpha(lines)
+    pen.draw_line(line.points, smoothDist=0, closed=True)
+    pen.lines_array = None
+    layout.drawing_area().draw_region(affected_bbox)
+
+def try_to_close_the_last_editable_line(x,y):
+    '''if x,y is close to the endpoints of the last editable line and said line isn't already closed, close it'''
+    last_item = history.last_item()
+    if not last_item or not last_item.editable_pen_line or last_item.editable_pen_line.closed or len(last_item.editable_pen_line.points) < 8:
+        return False
+
+    def dist(point):
+        px, py = point
+        return math.sqrt((px-x)**2 + (py-y)**2)
+
+    hole_radius = math.sqrt(HOLE_REGION_W**2 + HOLE_REGION_H**2)/2
+
+    line = last_item.editable_pen_line
+    if dist(line.points[0]) > hole_radius or dist(line.points[-1]) > hole_radius:
+        return False
+
+    line.points = close_polyline(line.points)
+    line.closed = True
+    redraw_line(line, last_item)
+    return True
+
+
 last_skeleton = None
 
 def ctrl_is_pressed(): return QGuiApplication.queryKeyboardModifiers() & Qt.ControlModifier
 def shift_is_pressed(): return QGuiApplication.queryKeyboardModifiers() & Qt.ShiftModifier
 
-class FlashlightTool(Button):
+class NeedleTool(Button):
     def __init__(self):
         Button.__init__(self)
     def on_mouse_down(self, x, y):
@@ -2147,6 +2252,10 @@ class FlashlightTool(Button):
         x, y = round(x), round(y)
 
         try_to_patch = ctrl_is_pressed()
+
+        if try_to_close_the_last_editable_line(x,y):
+            return
+
         frame = movie.edit_curr_frame() if try_to_patch else movie.curr_frame()
 
         color = surf.pixels3d(frame.surf_by_id('color'))
@@ -2411,7 +2520,7 @@ class Layout:
     def new_tool(self): return self.new_delete_tool() and self.tool.is_new
     def new_delete_tool(self): return isinstance(self.tool, NewDeleteTool) 
     def zoom_pan_tool(self): return isinstance(self.tool, ZoomTool)
-    def needle_tool(self): return isinstance(self.tool, FlashlightTool)
+    def needle_tool(self): return isinstance(self.tool, NeedleTool)
 
     def toggle_playing(self):
         self.is_playing = not self.is_playing
@@ -4485,8 +4594,8 @@ TOOLS = {
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
     'eraser-big': Tool(PenTool(eraser=True, soft=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
-    'tweezers': Tool(PenLineShiftSmoothTool(), tweezers_cursor, 'mM'),
-    'flashlight': Tool(FlashlightTool(), flashlight_cursor, 'nN'), # needle
+    'tweezers': Tool(TweezersTool(), tweezers_cursor, 'mM'),
+    'needle': Tool(NeedleTool(), flashlight_cursor, 'nN'), # needle
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
     # without any more ceremony. but when it's used thru a button, the user needs to
@@ -4745,7 +4854,7 @@ def init_layout():
     color_w = 0.025*2
     i = 0
 
-    layout.add((TOOLBAR_X_START+color_w*2.4, 0.86, color_w*.6, color_w*1.2), ToolSelectionButton(TOOLS['flashlight']))
+    layout.add((TOOLBAR_X_START+color_w*2.4, 0.86, color_w*.6, color_w*1.2), ToolSelectionButton(TOOLS['needle']))
     layout.add((TOOLBAR_X_START+color_w*1.9, 0.85-color_w, color_w*1.1, color_w*1.7), ToolSelectionButton(TOOLS['tweezers']))
     
     first_xy = None
@@ -5057,7 +5166,7 @@ def open_clip_dir():
         load_clips_dir()
 
 def patching_tool_selected():
-    for cls in FlashlightTool, PaintBucketTool, PenTool:
+    for cls in NeedleTool, PaintBucketTool, PenTool, TweezersTool:
         if isinstance(layout.tool, cls):
             return True
 

@@ -743,6 +743,7 @@ class Brush
     bool _smoothPressure = false;
     double _lineWidth = 3;
     bool _softLines = false;
+    bool _closed = false;
 
     //output image
     ImagePainter* _painter = nullptr;
@@ -1093,9 +1094,34 @@ extern "C" void brush_set_rgb(Brush* brush, const unsigned char* rgb)
     painter._pixTraitsRGB.newColor.rgb[2] = rgb[2];
 }
 
+extern "C" void brush_set_closed(Brush* brush)
+{
+    brush->_closed = true;
+}
+
 extern "C" void brush_use_max_blending(Brush* brush)
 {
     brush->_painter->useMaxBlending();
+}
+
+int maxBlendingIndex(int npoints, const double* x, const double* y, double lineWidth)
+{
+    int li = npoints-1;
+    Point2D prev{x[li], y[li]};
+    double distThresh = lineWidth;
+    double polylineDist = 0;
+
+    int i;
+    for(i=li-1; i>=0; --i) {
+        Point2D curr{x[i],y[i]};
+        polylineDist += distance(curr, prev);
+        if(polylineDist >= distThresh) {
+            break;
+        }
+        prev = curr;
+    }
+
+    return i;
 }
 
 extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, const double* time, const double* pressure, double zoom, int* region)
@@ -1103,11 +1129,25 @@ extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, con
     if(brush->_painter) {
         brush->_painter->resetROI();
     }
-    for(int i=0; i<npoints; ++i) {
+    //for closed shapes we assume that brush_paint() is called for the entire set of coordinates in one call
+    //(in any case in a drawing program you don't know the shape is closed without having the entire shape...)
+    int maxBlendAt = -1;
+    if(brush->_closed && npoints > 0) {
+        maxBlendAt = maxBlendingIndex(npoints, x, y, brush->_lineWidth);
+    }
+    int i;
+    for(i=0; i<npoints; ++i) {
+        if(i == maxBlendAt) {
+            brush->_painter->useMaxBlending();
+        }
         SamplePoint s{{x[i],y[i]},time ? time[i] : (i+1)*7, pressure ? pressure[i] : 1};
         brush->paint(s, zoom);
         x[i] = s.pos.x;
         y[i] = s.pos.y;
+    }
+    if(brush->_closed) {
+        SamplePoint s{{x[0],y[0]},time ? time[i-1]+7 : (i+1)*7, pressure ? pressure[i-1] : 1};
+        brush->paint(s, zoom);
     }
     if(brush->_painter) {
         brush->_painter->getROI(region);

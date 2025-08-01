@@ -8,6 +8,7 @@ EXPORTS
 	skeletonize 
 	brush_init_paint 
     brush_set_rgb
+    brush_set_closed
     brush_use_max_blending
 	brush_paint 
 	brush_end_paint 

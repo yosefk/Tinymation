@@ -15,6 +15,9 @@ tinylib.brush_init_paint.restype = ct.c_void_p
 #void brush_set_rgb(Brush* brush, const unsigned char* rgb)
 tinylib.brush_set_rgb.argtypes = [ct.c_void_p, ct.c_uint8*3]
 
+#void brush_set_closed(Brush* brush)
+tinylib.brush_set_closed.argtypes = [ct.c_void_p]
+
 #void brush_use_max_blending(Brush* brush)
 tinylib.brush_use_max_blending.argtypes = [ct.c_void_p]
 
@@ -54,14 +57,14 @@ tinylib.fitpack_splev.restype = ct.c_int
 tinylib.fitpack_splder.argtypes = [ct.c_void_p, ct.c_int, ct.c_void_p] + [ct.c_int]*2 + [ct.c_void_p]*2 + [ct.c_int]
 tinylib.fitpack_splder.restype = ct.c_int
 
-#void smooth_polyline(int npoints, double* new_x, double* new_y, const double* x, const double* y,
+#void smooth_polyline(int closed, int npoints, double* new_x, double* new_y, const double* x, const double* y,
 #                    double focus_x, double focus_y, int* first_diff, int* last_diff,
 #                    int prev_closest_to_focus_idx = -1,
 #                    const double* curvature_maximums = nullptr, double corner_effect_strength = 0.5,
 #                    double threshold = 30.0, double smoothness = 0.6,
 #                    double pull_strength = 0.5, int num_neighbors = 1,
 #                    double max_endpoint_dist = 30.0, double zero_endpoint_dist_start = 5.0)
-tinylib.smooth_polyline.argtypes = [ct.c_int]+[ct.c_void_p]*4+[ct.c_double]*2+[ct.c_void_p]*2+[ct.c_int,ct.c_void_p]+[ct.c_double]*4+[ct.c_int]+[ct.c_double]*2
+tinylib.smooth_polyline.argtypes = [ct.c_int]*2+[ct.c_void_p]*4+[ct.c_double]*2+[ct.c_void_p]*2+[ct.c_int,ct.c_void_p]+[ct.c_double]*4+[ct.c_int]+[ct.c_double]*2
 tinylib.smooth_polyline.restype = ct.c_int
 
 #void find_peaks(unsigned char* peaks, const double* y, int n, double height, int distance)
