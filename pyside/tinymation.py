@@ -1986,6 +1986,9 @@ def splprep(points, weights=None, smoothing=None):
     ier = tinylib.fitpack_parcur(arr_base_ptr(points), arr_base_ptr(weights), idim, m, arr_base_ptr(u), k, smoothing,
                                  arr_base_ptr(t), arr_base_ptr(num_knots), arr_base_ptr(c))
 
+    if ier in [1,10]:
+        raise Exception(f'splprep - failed to fit a bspline: {ier=} identical consecutive points or zero weights might produce ier=10 {list(points)=} {list(weights)=}')
+
     n = num_knots[0]
     # c: on succesful exit, this array will contain the coefficients
     #    in the b-spline representation of the spline curve s(u),i.e.
@@ -2165,6 +2168,12 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     return True
 
+def remove_duplicate_points_ordered(points):
+    # Get indices of unique points, preserving first occurrence
+    _, indices = np.unique(points, axis=0, return_index=True)
+    # Sort indices to maintain original order
+    return points[np.sort(indices)]
+
 def close_polyline(points):
     # fit a curve thru the endpoints - for that, make them "not the endpoints" but put them
     # in the middle of the curve so that fitpack produces something smooth according to where
@@ -2179,10 +2188,12 @@ def close_polyline(points):
     points = np.concatenate((points[mid_ind:], points[:mid_ind]))
 
     points = np.column_stack([points[:,0],points[:,1]]) # array layout correction
-    tck, u = splprep(points, smoothing=points.shape[0]/15)
+    tck, u = splprep(points, smoothing=0)#len(points))
 
-    ubegin = u[mid_ind]
-    uend = u[mid_ind+1]
+    orig_last_ind = len(points[mid_ind:])-1
+    orig_first_ind = orig_last_ind+1
+    ubegin = u[orig_last_ind]
+    uend = u[orig_first_ind]
 
     sx, sy = orig_points[0,:]
     ex, ey = orig_points[-1,:]
@@ -2192,29 +2203,37 @@ def close_polyline(points):
     new_points = splev(np.arange(ubegin, uend, step), tck)
     new_points = np.array(list(zip(new_points[0], new_points[1])), dtype=float, order='F')
 
-    return np.concatenate((orig_points, new_points))
+    # TODO: might want to call simplify_polyline or some such in order to avoid "wrinkles" where endpoints meet
 
-def redraw_line(line, last_item): 
-    frame_without_line = line.frame_without_line
-    lines = movie.edit_curr_frame().surf_by_id('lines')
-    if frame_without_line is None:
-        frame_without_line = lines.copy()
-        last_item.copy_saved_subsurface_into(frame_without_line)
-        line.frame_without_line = frame_without_line # this is not just an optimization but matters for correctness
-        # since after our redrawing, last_item.copy_saved_subsurface_into() will no longer work as we might have
-        # drawn outside the original line's bbox
+    # np.unique is necessary because having duplicate points has been known to trip splprep
+    return np.array(remove_duplicate_points_ordered(np.concatenate((orig_points, new_points))), dtype=float, order='F')
 
+def redraw_line(line, last_item, frame_without_line): 
     affected_bbox = points_bbox(line.points, margin=WIDTH*4)
 
     minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
     minx, miny = res.clip(minx, miny)
     maxx, maxy = res.clip(maxx, maxy)
+
+    history_item = HistoryItem('lines', bbox=(minx, miny, maxx, maxy))
+
+    lines = movie.edit_curr_frame().surf_by_id('lines')
+    if frame_without_line is None:
+        frame_without_line = lines.copy()
+        last_item.copy_saved_subsurface_into(frame_without_line)
+
     rgba_array(lines)[minx:maxx,miny:maxy] = rgba_array(frame_without_line)[minx:maxx,miny:maxy]
 
     pen = TOOLS['pen'].tool
     pen.lines_array = surf.pixels_alpha(lines)
     pen.draw_line(line.points, smoothDist=0, closed=True)
     pen.lines_array = None
+
+    line.frame_without_line = frame_without_line # otherwise, editing the line
+    # will expose the original unedited line...
+    history_item.editable_pen_line = line
+    history.append_item(history_item)
+
     layout.drawing_area().draw_region(affected_bbox)
 
 def try_to_close_the_last_editable_line(x,y):
@@ -2233,9 +2252,8 @@ def try_to_close_the_last_editable_line(x,y):
     if dist(line.points[0]) > hole_radius or dist(line.points[-1]) > hole_radius:
         return False
 
-    line.points = close_polyline(line.points)
-    line.closed = True
-    redraw_line(line, last_item)
+    new_line = EditablePenLine(close_polyline(line.points), closed=True)
+    redraw_line(new_line, last_item, line.frame_without_line)
     return True
 
 
