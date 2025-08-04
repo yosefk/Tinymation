@@ -8,7 +8,7 @@ double euclidean_distance(double x1, double y1, double x2, double y2) {
 }
 
 template<typename F>
-void compute_polyline_distances(std::vector<double>& polyline_dists, int npoints, F&& segment_length, int closest_idx, int closed) {
+double compute_polyline_distances(std::vector<double>& polyline_dists, int npoints, F&& segment_length, int closest_idx, int closed) {
     polyline_dists.resize(npoints);
     polyline_dists[closest_idx] = 0;
     
@@ -38,6 +38,8 @@ void compute_polyline_distances(std::vector<double>& polyline_dists, int npoints
         for (int i = 0; i < npoints; ++i) {
             polyline_dists[i] = std::min(forward_dists[i], backward_dists[i]);
         }
+        //return total perimeter
+        return std::max(forward_dists[npoints-1], backward_dists[npoints-1]);
     } else {
         // For open polylines, use the original approach
         // Forward direction from closest point
@@ -48,6 +50,8 @@ void compute_polyline_distances(std::vector<double>& polyline_dists, int npoints
         for (int i = closest_idx - 1; i >= 0; --i) {
             polyline_dists[i] = polyline_dists[i+1] + segment_length(i, i+1);
         }
+        //we don't need the total perimeter except in the closed case
+        return 0;
     }
 }
 
@@ -312,14 +316,6 @@ void shortest_diff_with_wraparound(const std::vector<bool>& changed, int* first_
     }
 }
 
-extern "C"
-int old_smooth_polyline(int npoints, double* new_x, double* new_y, const double* x, const double* y,
-                    double focus_x, double focus_y, int* first_diff, int* last_diff,
-                    int prev_closest_to_focus_idx = -1,
-                    const unsigned char* is_corner = nullptr, double corner_effect_strength = 0.5,
-                    double threshold = 30.0, double smoothness = 0.6,
-                    double pull_strength = 0.5, int num_neighbors = 1,
-                    double max_endpoint_dist = 30.0, double zero_endpoint_dist_start = 5.0);
 //TODO: optimize this to be "closer" to O(changed points) rather than O(N) - eg currently we compute stuff
 //for points which we know will remain unchanged
 extern "C"
@@ -329,7 +325,7 @@ int smooth_polyline(int closed, int npoints, double* new_x, double* new_y, const
                     const unsigned char* is_corner = nullptr, double corner_effect_strength = 0.5,
                     double threshold = 30.0, double smoothness = 0.6,
                     double pull_strength = 0.5, int num_neighbors = 1,
-                    double max_endpoint_dist = 30.0, double zero_endpoint_dist_start = 5.0) {
+                    double max_endpoint_dist = 30.0) {
     *first_diff = -1;
     *last_diff = npoints;
     if (npoints < 2) {
@@ -348,7 +344,12 @@ int smooth_polyline(int closed, int npoints, double* new_x, double* new_y, const
 
     // Compute polyline distances from closest point
     std::vector<double> polyline_dists;
-    compute_polyline_distances(polyline_dists, npoints, segment_length, closest_idx, closed);
+    double total_closed_perimeter = compute_polyline_distances(polyline_dists, npoints, segment_length, closest_idx, closed);
+    if(closed) {
+        //short closed curves "collapse into dots under high pressure" - limiting the threshold to affect a bit less than
+        //half the curve (or a quarter to each side of the point) prevents this
+        threshold = std::min(threshold, 0.8 * total_closed_perimeter/4);
+    }
 
     // Compute distances from endpoints
     std::vector<double> dist_to_start(npoints);
@@ -411,16 +412,10 @@ int smooth_polyline(int closed, int npoints, double* new_x, double* new_y, const
     // Endpoint distances are only relevant for open polylines
     double start_endpoint_dist = 0, end_endpoint_dist = 0;
     if (!closed) {
-        start_endpoint_dist = std::min(max_endpoint_dist,
-            euclidean_distance(focus_x, focus_y, x[0], y[0]) - zero_endpoint_dist_start);
-        if(closest_idx == 0) {
-            start_endpoint_dist = 0;
-        }
-        end_endpoint_dist = std::min(max_endpoint_dist,
-            euclidean_distance(focus_x, focus_y, x[npoints-1], y[npoints-1]) - zero_endpoint_dist_start);
-        if(closest_idx == npoints-1) {
-            end_endpoint_dist = 0;
-        }
+        //in particular if closest_idx points to an endpoint, we get a zero distance and we can move the endpoint,
+        //otherwise we can't
+        start_endpoint_dist = std::min(max_endpoint_dist, polyline_dists[0]);
+        end_endpoint_dist = std::min(max_endpoint_dist, polyline_dists[npoints-1]);
     }
 
     // Use threshold as corner radius for determining corner effect range

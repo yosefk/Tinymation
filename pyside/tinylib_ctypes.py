@@ -63,8 +63,8 @@ tinylib.fitpack_splder.restype = ct.c_int
 #                    const double* curvature_maximums = nullptr, double corner_effect_strength = 0.5,
 #                    double threshold = 30.0, double smoothness = 0.6,
 #                    double pull_strength = 0.5, int num_neighbors = 1,
-#                    double max_endpoint_dist = 30.0, double zero_endpoint_dist_start = 5.0)
-tinylib.smooth_polyline.argtypes = [ct.c_int]*2+[ct.c_void_p]*4+[ct.c_double]*2+[ct.c_void_p]*2+[ct.c_int,ct.c_void_p]+[ct.c_double]*4+[ct.c_int]+[ct.c_double]*2
+#                    double max_endpoint_dist = 30.0)
+tinylib.smooth_polyline.argtypes = [ct.c_int]*2+[ct.c_void_p]*4+[ct.c_double]*2+[ct.c_void_p]*2+[ct.c_int,ct.c_void_p]+[ct.c_double]*4+[ct.c_int]+[ct.c_double]
 tinylib.smooth_polyline.restype = ct.c_int
 
 #void find_peaks(unsigned char* peaks, const double* y, int n, double height, int distance)

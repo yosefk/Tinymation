@@ -1360,7 +1360,7 @@ def polyline_corners(points, curvature_threshold=1, peak_distance=15):
     tinylib.find_peaks(arr_base_ptr(peaks), arr_base_ptr(curvature), len(curvature), curvature_threshold, peak_distance)
     return peaks
 
-def smooth_polyline(closed, points, focus, prev_closest_to_focus_idx=-1, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, zero_endpoint_dist_start=5, corner_stiffness=1, corner_vec=None):
+def smooth_polyline(closed, points, focus, prev_closest_to_focus_idx=-1, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, corner_stiffness=1, corner_vec=None):
     xarr = points[:, 0]
     yarr = points[:, 1]
     
@@ -1377,7 +1377,7 @@ def smooth_polyline(closed, points, focus, prev_closest_to_focus_idx=-1, thresho
     closest_idx = tinylib.smooth_polyline(closed, len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
             arr_base_ptr(first_diff), arr_base_ptr(last_diff), prev_closest_to_focus_idx,
             arr_base_ptr(corner_vec), corner_stiffness,
-            threshold, smoothness, pull_strength, num_neighbors, max_endpoint_dist, zero_endpoint_dist_start)
+            threshold, smoothness, pull_strength, num_neighbors, max_endpoint_dist)
 
     return new_arr, first_diff[0], last_diff[0]+1, closest_idx
 
@@ -1530,7 +1530,7 @@ class TweezersTool(Button):
             self.prev_closest_to_focus_idx = closest_idx - (len(changed_old_points)-len(simplified_new_points))
         else: # before first_diff 
             self.prev_closest_to_focus_idx = closest_idx
-
+        
         simplified_new_points_array = np.array(simplified_new_points, dtype=float)
         assert len(self.corners) == len(old_points), f'{len(self.corners)=} {len(old_points)=} {first_diff=} {last_diff=} {len(simplified_new_points)=}'
         self.update_corners(old_points, simplified_new_points_array, first_diff, last_diff)
@@ -1603,6 +1603,12 @@ class TweezersTool(Button):
             else:
                 try:
                     self.prev_closest_to_focus_idx = sample2polyline[self.prev_closest_to_focus_idx]
+                    if len(self.corners)>1:
+                        # avoid "jumping" onto endpoints due to sample2polyline remapping (causes sudden "snap-to-endpoint", specifically start point effects - annoying)
+                        if self.prev_closest_to_focus_idx == 0:
+                            self.prev_closest_to_focus_idx += 1
+                        elif self.prev_closest_to_focus_idx == len(self.corners)-1:
+                            self.prev_closest_to_focus_idx -= 1
                 except:
                     # not sure why this is happening; it's happening rarely. it's probably better
                     # to look for the closest point on the polyline at the next mouse move event than
