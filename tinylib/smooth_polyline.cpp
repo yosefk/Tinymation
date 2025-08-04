@@ -61,8 +61,6 @@ void compute_distances_to_closest_corner(std::vector<double>& dist_to_closest_co
     }
     
     if (closed) {
-        //TODO: make this faster by only considering the 2 corners closest to each point,
-        //instead of considering every corner from every point
         // Find all corner positions first
         std::vector<int> corner_positions;
         for (int i = 0; i < npoints; ++i) {
@@ -71,32 +69,74 @@ void compute_distances_to_closest_corner(std::vector<double>& dist_to_closest_co
             }
         }
         
-        // Compute minimum distance to any corner for each point
+        // Handle special cases
+        if (corner_positions.empty()) {
+            return; // All distances remain infinity
+        }
+        
+        // Precompute cumulative distances
+        std::vector<double> cumulative_dist(npoints + 1, 0.0);
         for (int i = 0; i < npoints; ++i) {
-            double min_dist = std::numeric_limits<double>::infinity();
-            for (int corner_pos : corner_positions) {
-                // Compute distance along polyline to this corner (both directions)
-                double dist_forward = 0, dist_backward = 0;
-                
-                // Forward distance
-                int curr = i;
-                while (curr != corner_pos) {
-                    int next = (curr + 1) % npoints;
-                    dist_forward += segment_length(curr, next);
-                    curr = next;
+            cumulative_dist[i + 1] = cumulative_dist[i] + segment_length(i, (i + 1) % npoints);
+        }
+        double total_perimeter = cumulative_dist[npoints];
+
+        if (corner_positions.size() == 1) {
+            // Only one corner - compute distance to it for all points
+            int corner_pos = corner_positions[0];
+            
+            
+            for (int i = 0; i < npoints; ++i) {
+                if (i == corner_pos) {
+                    dist_to_closest_corner[i] = 0.0;
+                } else {
+                    // Distance in forward direction
+                    double dist_forward = (i < corner_pos) ? 
+                        (cumulative_dist[corner_pos] - cumulative_dist[i]) :
+                        (cumulative_dist[i] - cumulative_dist[corner_pos]);
+                    
+                    // Distance in backward direction
+                    double dist_backward = total_perimeter - dist_forward;
+                    
+                    dist_to_closest_corner[i] = std::min(dist_forward, dist_backward);
                 }
-                
-                // Backward distance
-                curr = i;
-                while (curr != corner_pos) {
-                    int prev = (curr - 1 + npoints) % npoints;
-                    dist_backward += segment_length(prev, curr);
-                    curr = prev;
-                }
-                
-                min_dist = std::min(min_dist, std::min(dist_forward, dist_backward));
             }
-            dist_to_closest_corner[i] = min_dist;
+            return;
+        }
+        
+        // For each pair of consecutive corners, process all points between them
+        for (size_t k = 0; k < corner_positions.size(); ++k) {
+            int left_corner = corner_positions[k];
+            int right_corner = corner_positions[(k + 1) % corner_positions.size()];
+            
+            // Set corner distances to 0
+            dist_to_closest_corner[left_corner] = 0.0;
+            
+            // Process points between left_corner and right_corner
+            int curr = (left_corner + 1) % npoints;
+            double dist_to_left = 0.0;
+            
+            while (curr != right_corner) {
+                // Distance to left corner (accumulate as we go)
+                dist_to_left += segment_length((curr - 1 + npoints) % npoints, curr);
+                
+                // Distance to right corner (compute using cumulative distances)
+                double dist_to_right;
+                if (curr < right_corner) {
+                    dist_to_right = cumulative_dist[right_corner] - cumulative_dist[curr];
+                } else {
+                    // Wrap around case
+                    dist_to_right = total_perimeter - cumulative_dist[curr] + cumulative_dist[right_corner];
+                }
+                
+                // Take minimum distance to either corner
+                double min_corner_dist = std::min(dist_to_left, dist_to_right);
+                
+                // Update if this is better than previously computed distance
+                dist_to_closest_corner[curr] = std::min(dist_to_closest_corner[curr], min_corner_dist);
+                
+                curr = (curr + 1) % npoints;
+            }
         }
     } else {
         // Original open polyline logic

@@ -1406,7 +1406,8 @@ def simplify_polyline(points, threshold, remap_idx=None):
         dist_prev = ((curr[0] - result[-1][0])**2 + (curr[1] - result[-1][1])**2)**0.5
         dist_next = ((curr[0] - next[0])**2 + (curr[1] - next[1])**2)**0.5
         
-        if dist_prev >= threshold or dist_next >= threshold:
+        # throw a point away if it's close enough to both neighbors, or if it's identical to at least one of them
+        if (dist_prev >= threshold or dist_next >= threshold) and min(dist_prev, dist_next)>0:
             result.append(curr)
             
     result.append(points[-1])
@@ -2174,6 +2175,35 @@ def remove_duplicate_points_ordered(points):
     # Sort indices to maintain original order
     return points[np.sort(indices)]
 
+def filter_points_by_distance(points, threshold):
+    """
+    Filter 2D points that are further than threshold from their previous point.
+    Treats the array as circular (first point compared to last point).
+
+    Parameters:
+    points (np.ndarray): Array of 2D points with shape (N, 2)
+    threshold (float): Minimum distance threshold
+
+    Returns:
+    np.ndarray: Filtered array of points that meet the distance criterion
+    """
+    if len(points) <= 1:
+        return points
+
+    # Create circular differences: each point compared to its previous point
+    # For circular array: point[0] compared to point[-1], point[1] to point[0], etc.
+    prev_points = np.roll(points, 1, axis=0)  # Shift points: [last, p0, p1, ..., p(n-2)]
+    diffs = points - prev_points  # Shape: (N, 2)
+
+    # Calculate distances using L2 norm
+    distances = np.linalg.norm(diffs, axis=1)  # Shape: (N,)
+
+    # Find indices where distance >= threshold
+    valid_indices = np.where(distances >= threshold)[0]
+
+    return points[valid_indices]
+
+
 def close_polyline(points):
     # fit a curve thru the endpoints - for that, make them "not the endpoints" but put them
     # in the middle of the curve so that fitpack produces something smooth according to where
@@ -2203,10 +2233,9 @@ def close_polyline(points):
     new_points = splev(np.arange(ubegin, uend, step), tck)
     new_points = np.array(list(zip(new_points[0], new_points[1])), dtype=float, order='F')
 
-    # TODO: might want to call simplify_polyline or some such in order to avoid "wrinkles" where endpoints meet
-
-    # np.unique is necessary because having duplicate points has been known to trip splprep
-    return np.array(remove_duplicate_points_ordered(np.concatenate((orig_points, new_points))), dtype=float, order='F')
+    # we shouldn't really filter all of the original points, only ones close to new_points, but since the threshold
+    # is very small, it doesn't have an effect on anything except the part where the lines connect anyway
+    return np.array(filter_points_by_distance(np.concatenate((orig_points, new_points)), 0.1), dtype=float, order='F')
 
 def redraw_line(line, last_item, frame_without_line): 
     affected_bbox = points_bbox(line.points, margin=WIDTH*4)
