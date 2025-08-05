@@ -1342,6 +1342,11 @@ class PenTool(Button):
             
         self.prev_drawn = (x,y) 
 
+class LineColoringTool(PenTool):
+    def __init__(self, rgb):
+        PenTool.__init__(self, soft=True, width=20, zoom_changes_pixel_width=True, rgb=rgb)
+    def draw(self,*args): return
+
 def polyline_corners(points, curvature_threshold=1, peak_distance=15):
     # Fit a B-spline to the polyline
     points = np.column_stack([points[:,0],points[:,1]]) # array layout correction
@@ -2378,6 +2383,9 @@ DRAWING_LAYOUT = 1
 LAYERS_LAYOUT = 2
 ANIMATION_LAYOUT = 3
 
+PAINT_BUCKET_COLORING = 0
+LINE_COLORING = 1
+
 class Layout:
     def __init__(self):
         self.elems = []
@@ -2390,6 +2398,7 @@ class Layout:
         self.focus_elem = None
         self.restore_tool_on_mouse_up = False
         self.mode = ANIMATION_LAYOUT
+        self.color_mode = PAINT_BUCKET_COLORING
         self.pressure = 1
         self.event_time = 0
         self.update_roi = None
@@ -2409,7 +2418,16 @@ class Layout:
         # this is important for vertical_movie_on_horizontal_screen.
         self.elems_event_order = self.elems[1:] + [self.drawing_area()]
 
+    def switch_coloring_mode(self):
+        self.color_mode = 1 - self.color_mode
+
     def hidden(self, elem):
+        if isinstance(elem, ToolSelectionButton):
+            if self.color_mode == PAINT_BUCKET_COLORING and isinstance(elem.tool.tool, LineColoringTool):
+                return True
+            if self.color_mode == LINE_COLORING and isinstance(elem.tool.tool, PaintBucketTool):
+                return True
+
         if self.mode == ANIMATION_LAYOUT:
             return False
         if self.mode == LAYERS_LAYOUT:
@@ -4916,6 +4934,7 @@ def init_layout():
             if first_xy is None:
                 first_xy = (TOOLBAR_X_START+x,y)
             tool = None
+            line_coloring_tool = None
             if row == len(palette.colors):
                 if col == 0:
                     tool = TOOLS['zoom']
@@ -4926,9 +4945,11 @@ def init_layout():
             if not tool:
                 r = len(palette.colors)-row-1
                 tool = Tool(PaintBucketTool(palette.colors[r][col], palette.change_color_func(r,col)), palette.cursors[r][col], '')
+                line_coloring_tool = Tool(LineColoringTool(palette.colors[r][col][:-1]), pencil_cursor, '')
             if isinstance(tool.tool, PaintBucketTool):
                 PaintBucketTool.color2tool[tool.tool.color] = tool
-            layout.add((TOOLBAR_X_START+x,y,color_w,color_w), ToolSelectionButton(tool))
+            for t in [tool,line_coloring_tool] if line_coloring_tool else [tool]:
+                layout.add((TOOLBAR_X_START+x,y,color_w,color_w), ToolSelectionButton(t))
             i += 1
 
     palette_rect = (first_xy[0], first_xy[1], color_w*palette.columns, color_w*palette.rows)
@@ -4986,14 +5007,6 @@ def swap_width_height(from_history=False):
     movie.fit_to_resolution()
     if not from_history:
         history.append_item(SwapWidthHeightHistoryItem())
-
-def lock_all_layers():
-    items = []
-    for layer in movie.layers:
-        if not layer.locked:
-            layer.toggle_locked()
-            items.append(ToggleHistoryItem(layer.toggle_locked))
-    history.append_item(HistoryItemSet(items))
 
 # The history is "global" for all operations within a movie. In some (rare) animation programs
 # there's a history per frame. One problem with this is how to undo timeline
@@ -5321,7 +5334,7 @@ def process_keydown_event(event):
         return
 
     if ctrl and event.key() == Qt.Key_L:
-        lock_all_layers()
+        layout.switch_coloring_mode()
         return
 
     # Ctrl-P: dump profiling data

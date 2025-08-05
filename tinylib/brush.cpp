@@ -306,6 +306,9 @@ struct PixTraitsRGB
         }
         for(int i=0; i<3; ++i) {
             v.rgb[i] = (pixValChange*newColor.rgb[i] + (255-pixValChange)*oldVal.rgb[i] + (1<<7)) >> 8;
+            if(std::abs(v.rgb[i] - newColor.rgb[i]) < 20) {
+                v.rgb[i] = newColor.rgb[i];
+            }
         }
         return v;
     }
@@ -504,7 +507,7 @@ void ImagePainter::drawLineUsingWideSoftCiclesWithNoisyCenters(const SamplePoint
 
     if(_rgb) {
         maxCenterNoise = 0;
-        greatestPixValChange = 64;
+        greatestPixValChange = 72;
     }
 
     auto updatePressureParams = [&] {
