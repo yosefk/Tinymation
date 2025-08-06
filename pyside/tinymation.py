@@ -5464,7 +5464,8 @@ if UNDER_TEST:
         widget.tabletEvent(event)
 
 # Define the Windows MSG structure for ctypes
-class MSG(ct.Structure):
+if on_windows:
+  class MSG(ct.Structure):
     _fields_ = [
         ('hwnd', ct.wintypes.HWND),
         ('message', ct.wintypes.UINT),

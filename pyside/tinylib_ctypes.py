@@ -1,5 +1,7 @@
 import ctypes as ct
-import tbb # for tinylib.parallel_for_grain
+import os
+if os.name == 'nt':
+    import tbb # for tinylib.parallel_for_grain
 import numpy.ctypeslib as npct
 tinylib = npct.load_library('tinylib','.')
 

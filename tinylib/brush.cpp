@@ -204,7 +204,7 @@ class CoordSet
         bool valid=false;
     };
     void setRegion(int x, int y, int width, int height) {
-        if(_values.size() < width*height) {
+        if((int)_values.size() < width*height) {
             _values.resize(width*height);
         }
         _x = x;

@@ -28,6 +28,7 @@
     integer ll;
     doublereal te;
     integer nn;
+    (void)nn;
     doublereal sp;
     integer nk1, nk2;
     doublereal fac, arg;
