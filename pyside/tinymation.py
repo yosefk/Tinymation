@@ -269,24 +269,36 @@ class MovieData:
 
             res.set_resolution(movie_width, movie_height)
 
-            done = 0
-            total = len(layer_ids) * len(frame_ids)
-
             self.layers = []
+            frames_to_read = []
             for layer_index, layer_id in enumerate(layer_ids):
                 frames = []
                 for frame_index, frame_id in enumerate(frame_ids):
-                    frame = Frame(dir, layer_id, frame_id, read_pixels=read_pixels)
+                    frame = Frame(dir, layer_id, frame_id, read_pixels=False)
                     frame.hold = holds[layer_index][frame_index]
                     frames.append(frame)
-
-                    done += 1
-                    progress(done, total)
+                    frames_to_read.append(frame)
 
                 layer = Layer(frames, dir, layer_id)
                 layer.visible = visible[layer_index]
                 layer.locked = locked[layer_index]
                 self.layers.append(layer)
+
+            if read_pixels:
+                done = [] # the length of a list is a counter which should be thread-safe enough for our need here
+                @RangeFunc
+                def read_frame(start, finish):
+                    for i in range(start, finish):
+                        frames_to_read[i].read_pixels()
+                        done.append(i)
+                def read_frames():
+                    tinylib.parallel_for_grain(read_frame, 0, len(frames_to_read), 1)
+                future = executor.submit(read_frames)
+                while not future.done():
+                    progress(len(done), len(frames_to_read))
+                    time.sleep(0.1)
+                assert len(done) == len(frames_to_read)
+                progress(len(done), len(frames_to_read))
 
             self.pos = clip['frame_pos']
             self.layer_pos = clip['layer_pos']
