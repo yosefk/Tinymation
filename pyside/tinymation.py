@@ -1096,7 +1096,7 @@ def find_nearest(array, center_x, center_y, value):
     return tuple(points[nearest_idx])
 
 class PenTool(Button):
-    def __init__(self, eraser=False, soft=False, width=WIDTH, zoom_changes_pixel_width=True, rgb=None):
+    def __init__(self, eraser=False, soft=False, width=WIDTH, zoom_changes_pixel_width=True, color_id=None):
         Button.__init__(self)
         self.prev_drawn = None
         self.color = BACKGROUND if eraser else PEN
@@ -1115,7 +1115,7 @@ class PenTool(Button):
         self.history_time_period = 1000
         self.timer = None
         self.patching = False
-        self.rgb = rgb
+        self.color_id = color_id
 
     def brush_flood_fill_color_based_on_mask(self):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
@@ -1155,15 +1155,15 @@ class PenTool(Button):
         if smoothDist is None:
             smoothDist = self.smooth_dist
         ptr, ystride, width, height = greyscale_c_params(self.lines_array)
-        if self.rgb:
+        if self.color_id:
             color = surf.pixels3d(movie.edit_curr_frame().surf_by_id('lines'))
             color_ptr, color_stride, color_width, color_height = color_c_params(color)
             ptr = color_ptr
         lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
         self.brush = tinylib.brush_init_paint(x, y, layout.event_time, layout.pressure, lineWidth, smoothDist, dry,
                 1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
-        if self.rgb:
-            tinylib.brush_set_rgb(self.brush, (ct.c_uint8*3)(*self.rgb))
+        if self.color_id:
+            tinylib.brush_set_rgb(self.brush, (ct.c_uint8*3)(*palette.color(self.color_id)[:3]))
 
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
@@ -1342,10 +1342,38 @@ class PenTool(Button):
             
         self.prev_drawn = (x,y) 
 
-class LineColoringTool(PenTool):
-    def __init__(self, rgb):
-        PenTool.__init__(self, soft=True, width=20, zoom_changes_pixel_width=True, rgb=rgb)
+NEUTRAL_COLOR_ID = -1
+
+class ColorModifyingTool:
+    def do_modify(self):
+        if self.color_id == NEUTRAL_COLOR_ID:
+            return
+        widget.setEnabled(False)
+        try:
+            trace.event('modify-color')
+            old_color = palette.color(self.color_id)
+            color = QColorDialog.getColor(QColor(*old_color), options=QColorDialog.DontUseNativeDialog | QColorDialog.ShowAlphaChannel)
+            if color.isValid():
+                new_color = color.toTuple()
+                palette.change_color(self.color_id, new_color)
+                history.append_item(ChangeColorHistoryItem(self.color_id, old_color))
+                return True
+        finally:
+            widget.setEnabled(True)
+
+class MarkerTool(PenTool,ColorModifyingTool):
+    last_color_id = NEUTRAL_COLOR_ID
+    @staticmethod
+    def choose_last_color():
+        set_tool(palette.marker_tool(MarkerTool.last_color_id))
+    def __init__(self, color_id):
+        PenTool.__init__(self, soft=True, width=20, zoom_changes_pixel_width=True, color_id=color_id)
     def draw(self,*args): return
+    def on_mouse_up(self,*args):
+        PenTool.on_mouse_up(self,*args)
+        MarkerTool.last_color_id = self.color_id
+    def modify(self):
+        return self.do_modify()
 
 def polyline_corners(points, curvature_threshold=1, peak_distance=15):
     # Fit a B-spline to the polyline
@@ -1740,37 +1768,32 @@ def integer_points_near_line_segment(x1, y1, x2, y2, distance):
     
     return result_points.astype(np.int32)
 
-# FIXME: you can't keep paint_bucket_tool - when movies are closed and reopened the objects are recreated
 class ChangeColorHistoryItem(HistoryItemBase):
-    def __init__(self, paint_bucket_tool, new_color):
+    def __init__(self, color_id, new_color):
         HistoryItemBase.__init__(self)
-        self.paint_bucket_tool = paint_bucket_tool
+        self.color_id = color_id
         self.new_color = new_color
     def undo(self):
-        old_color = self.paint_bucket_tool.color
-        self.paint_bucket_tool.modify_color(self.new_color)
-        return ChangeColorHistoryItem(self.paint_bucket_tool, old_color)
+        old_color = palette.color(self.color_id)
+        palette.change_color(self.color_id, self.new_color)
+        return ChangeColorHistoryItem(self.color_id, old_color)
     def __str__(self):
-        return f'InsertLayerHistoryItem(removing layer {self.layer_pos_before_undo})'
+        return f'ChangeColorHistoryItem({self.color_id}, {self.new_color})'
 
-# FIXME: color2tool should be a part of the layout since it's reconstructed when we close/open movies
-# last_color should be per movie
-class PaintBucketTool(Button):
-    color2tool = {}
-    last_color = BACKGROUND+(0,)
+class PaintBucketTool(Button,ColorModifyingTool):
+    last_color_id = NEUTRAL_COLOR_ID
     @staticmethod
     def choose_last_color():
-        set_tool(PaintBucketTool.color2tool[PaintBucketTool.last_color])
+        set_tool(palette.bucket_tool(PaintBucketTool.last_color_id))
 
     def draw(self,*args):
-        if self.color[-1]:
+        if self.color_id != NEUTRAL_COLOR_ID:
             return
         Button.draw(self,*args)
 
-    def __init__(self,color,change_color=None):
+    def __init__(self,color_id):
         Button.__init__(self)
-        self.color = color
-        self.change_color = change_color
+        self.color_id = color_id
         self.px = None
         self.py = None
         self.bboxes = []
@@ -1792,13 +1815,13 @@ class PaintBucketTool(Button):
         self.py = y
         
         color_rgba = surf.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
-        bbox = flood_fill_color_based_on_mask_many_seeds(color_rgba, self.pen_mask, xs, ys, self.color)
+        bbox = flood_fill_color_based_on_mask_many_seeds(color_rgba, self.pen_mask, xs, ys, palette.color(self.color_id))
         if bbox:
             self.bboxes.append(bbox)
 
             layout.drawing_area().draw_region(bbox)
 
-        PaintBucketTool.last_color = self.color
+        PaintBucketTool.last_color_id = self.color_id
         
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
@@ -1839,28 +1862,7 @@ class PaintBucketTool(Button):
         self.history_item = None
         self.pen_mask = None
     def modify(self):
-        if self.change_color is None:
-            return
-        widget.setEnabled(False)
-        try:
-            trace.event('modify-color')
-            color = QColorDialog.getColor(QColor(*self.color), options=QColorDialog.DontUseNativeDialog | QColorDialog.ShowAlphaChannel)
-            if color.isValid():
-                new_color = color.toTuple()
-                old_color = self.color
-                self.modify_color(new_color)
-                history.append_item(ChangeColorHistoryItem(self, old_color))
-                return True
-        finally:
-            widget.setEnabled(True)
-
-    def modify_color(self, new_color):
-        tool = PaintBucketTool.color2tool[self.color]
-        del PaintBucketTool.color2tool[self.color]
-        self.color = new_color 
-        PaintBucketTool.color2tool[self.color] = tool
-        layout.full_tool.cursor = self.change_color(self.color)
-        layout.palette_area().generate_colors_image()
+        return self.do_modify()
 
 NO_PATH_DIST = 10**6
 
@@ -2384,7 +2386,7 @@ LAYERS_LAYOUT = 2
 ANIMATION_LAYOUT = 3
 
 PAINT_BUCKET_COLORING = 0
-LINE_COLORING = 1
+MARKER_COLORING = 1
 
 class Layout:
     def __init__(self):
@@ -2423,9 +2425,9 @@ class Layout:
 
     def hidden(self, elem):
         if isinstance(elem, ToolSelectionButton):
-            if self.color_mode == PAINT_BUCKET_COLORING and isinstance(elem.tool.tool, LineColoringTool):
+            if self.color_mode == PAINT_BUCKET_COLORING and isinstance(elem.tool.tool, MarkerTool):
                 return True
-            if self.color_mode == LINE_COLORING and isinstance(elem.tool.tool, PaintBucketTool):
+            if self.color_mode == MARKER_COLORING and isinstance(elem.tool.tool, PaintBucketTool):
                 return True
 
         if self.mode == ANIMATION_LAYOUT:
@@ -4660,8 +4662,6 @@ TOOLS = {
     'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
     'pen': Tool(PenTool(width=2.5, zoom_changes_pixel_width=False), pen_cursor, 'bB'),
     'pencil': Tool(PenTool(soft=True, width=4, zoom_changes_pixel_width=False), pencil_cursor, 'sS'),
-    # TODO: do a reasonable tool UI for this
-    'rgb4lines': Tool(PenTool(soft=True, width=20, zoom_changes_pixel_width=True, rgb=(255,80,192)), pencil_cursor, 'qQ'),
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
     'eraser-big': Tool(PenTool(eraser=True, soft=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
@@ -4686,6 +4686,10 @@ def help_screen():
         images[name.replace('-','_')] = scale_image(surf.rotate(load_image(f"{name}.png"), angle), height=height, best_quality=True).qimage()
     help.HelpDialog(images).exec()
 
+def choose_last_color():
+    Tool = {PAINT_BUCKET_COLORING:PaintBucketTool, MARKER_COLORING:MarkerTool}[layout.color_mode]
+    Tool.choose_last_color()
+
 FUNCTIONS = {
     'insert-frame': (insert_frame, '=+'),
     'remove-frame': (remove_frame, '-_'),
@@ -4697,7 +4701,7 @@ FUNCTIONS = {
     'toggle-frame-hold': (toggle_frame_hold, 'hH'),
     'toggle-layer-lock': (toggle_layer_lock, 'lL'),
     'zoom-to-film-res': (zoom_to_film_res, '1'),
-    'last-paint-bucket': (PaintBucketTool.choose_last_color, 'kKcC'),
+    'last-paint-bucket': (choose_last_color, 'kKcC'),
 }
 
 tool_change = 0
@@ -4788,24 +4792,43 @@ class Palette:
         return add_circle(color_image(paint_bucket_cursor[0], color), radius)[0]
 
     def init_cursors(self):
+        self.bucket_tools = {}
+        self.marker_tools = {}
+        for row in range(self.rows):
+            for col in range(self.columns):
+                self.bucket_tools[(row,col)] = Tool(PaintBucketTool((row,col)), None, '')
+                self.marker_tools[(row,col)] = Tool(MarkerTool((row,col)), None, '')
+
         radius = PAINT_BUCKET_WIDTH//2
         self.cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
         for row in range(self.rows):
             for col in range(self.columns):
-                self.change_color(row, col, self.colors[row][col])
+                self._change_color(row, col, self.colors[row][col])
 
         sc = self.bucket(self.bg_color)
         cursor = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], self.bg_color))
         self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width(), best_quality=True))
-        
-    def change_color_func(self, r, c): return lambda color: self.change_color(r, c, color)
-    def change_color(self, row, col, color):
+        self.bucket_tools[NEUTRAL_COLOR_ID] = Tool(PaintBucketTool(NEUTRAL_COLOR_ID), self.bg_cursor, '')
+
+    def color(self,color_id):
+        if color_id == NEUTRAL_COLOR_ID:
+            return self.bg_color
+        row, col = color_id
+        return self.colors[row][col]
+    def change_color(self, color_id, color):
+        assert color_id != NEUTRAL_COLOR_ID
+        self._change_color(*color_id, color)
+        layout.palette_area().generate_colors_image()
+    def _change_color(self, row, col, color):
         radius = PAINT_BUCKET_WIDTH//2
         self.colors[row][col] = color
         sc = self.bucket(color)
         self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(self.splashes[row*self.columns+col], color))
-        return self.cursors[row][col]
+        self.bucket_tools[(row,col)].cursor = self.cursors[row][col]
+        self.marker_tools[(row,col)].cursor = pencil_cursor # TODO: marker cursors
 
+    def bucket_tool(self, color_id): return self.bucket_tools[color_id]
+    def marker_tool(self, color_id): return self.marker_tools[color_id]
 
 class PaletteElem(LayoutElemBase):
     row_col_perm = [(row,col) for row in range(PALETTE_ROWS) for col in range(PALETTE_COLUMNS)]
@@ -4934,21 +4957,19 @@ def init_layout():
             if first_xy is None:
                 first_xy = (TOOLBAR_X_START+x,y)
             tool = None
-            line_coloring_tool = None
+            marker_tool = None
             if row == len(palette.colors):
                 if col == 0:
                     tool = TOOLS['zoom']
                 elif col == 1:
-                    tool = Tool(PaintBucketTool(palette.bg_color), palette.bg_cursor, '')
+                    tool = palette.bucket_tool(NEUTRAL_COLOR_ID)
                 else:
                     continue
             if not tool:
                 r = len(palette.colors)-row-1
-                tool = Tool(PaintBucketTool(palette.colors[r][col], palette.change_color_func(r,col)), palette.cursors[r][col], '')
-                line_coloring_tool = Tool(LineColoringTool(palette.colors[r][col][:-1]), pencil_cursor, '')
-            if isinstance(tool.tool, PaintBucketTool):
-                PaintBucketTool.color2tool[tool.tool.color] = tool
-            for t in [tool,line_coloring_tool] if line_coloring_tool else [tool]:
+                tool = palette.bucket_tool((r,col))
+                marker_tool = palette.marker_tool((r,col))
+            for t in [tool,marker_tool] if marker_tool else [tool]:
                 layout.add((TOOLBAR_X_START+x,y,color_w,color_w), ToolSelectionButton(t))
             i += 1
 
@@ -4971,7 +4992,9 @@ def init_layout():
 
     layout.freeze()
 
-    set_tool(last_tool if last_tool else TOOLS['pen'])
+    # one reason we always switch to pen is that keeping the last tool would require to deal with palette changes
+    # which might make the last tool refer to a color that is no longer in the palette
+    set_tool(TOOLS['pen'])
 
 def new_movie_clip_dir(): return os.path.join(WD, format_now())
 
