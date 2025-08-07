@@ -91,6 +91,8 @@ class Frame:
             fname = self.filename(surf_id)
             if os.path.exists(fname):
                 setattr(self,surf_id,fit_to_resolution(surf.load(fname)))
+        # only with the pixels read we know that our ID is not None
+        cache.update_id(self.cache_id(), self.version)
 
     def del_pixels(self):
         for surf_id in self.surf_ids():
@@ -663,6 +665,7 @@ WIDTH = 3 # the smallest width where you always have a pure pen color rendered a
 MEDIUM_ERASER_WIDTH = 5*WIDTH
 BIG_ERASER_WIDTH = 20*WIDTH
 PAINT_BUCKET_WIDTH = 3*WIDTH
+MARKER_WIDTH = 20
 CURSOR_SIZE = round(screen.get_width() * 0.055)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
 LIST_RECT_CORNER_RADIUS = round(screen.get_width() * 0.015)
@@ -804,15 +807,14 @@ def load_cursor(file, flip=False, size=CURSOR_SIZE, hot_spot=(0,1), min_alpha=19
   #return pg.cursors.Cursor((hotx, hoty), surface), non_transparent_surface
   return surf2cursor(surface, hotx, hoty), non_transparent_surface
 
-def add_circle(image, radius, offset=(0,1), color=(255,0,0,128), outline_color=(0,0,0,128)):
+def add_circle(image, radius, offset=(0,1), outline_color=(0,0,0,255)):
     new_width = max(image.get_width(), radius + round(image.get_width()*(1-offset[0])))
     new_height = max(image.get_height(), radius + round(image.get_height()*offset[1]))
     result = Surface((new_width, new_height))
     xoffset = round(offset[0]*image.get_width())
     yoffset = round(offset[1]*image.get_height())
     radius -= .5
-    surf.filled_circle(result, radius, yoffset, radius, outline_color)
-    surf.filled_circle(result, radius, yoffset, radius-WIDTH+1, color)
+    surf.unfilled_circle(result, radius, yoffset, radius, outline_color)
     result.blit(image, (radius-xoffset, 0))
     return result, (radius, yoffset)
 
@@ -831,7 +833,11 @@ eraser_big_cursor = (eraser_big_cursor[0], eraser_cursor[1])
 needle_cursor = load_cursor('needle.png', size=int(CURSOR_SIZE), hot_spot=(0.02,0.97))
 flashlight_cursor = needle_cursor
 flashlight_cursor = (flashlight_cursor[0], load_image('needle-tool.png')) 
-paint_bucket_cursor = (load_cursor('paint_bucket.png', size=int(CURSOR_SIZE*1.2))[1], load_image('splash-0.png')) #FIXME
+paint_bucket_cursor = (load_cursor('paint_bucket.png', size=int(CURSOR_SIZE*1.2))[1], load_image('bucket-tool.png'))
+bucket_tool_upper = load_image('bucket-tool-upper.png')
+marker_cursor = (load_cursor('marker.png', size=int(CURSOR_SIZE*1.5))[1], load_image('marker-tool.png'))
+marker_tool_upper = load_image('marker-tool-upper.png')
+marker_tool_upper.set_alpha(128)
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 zoom_cursor = (load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*1.5))[0], load_image('zoom-tool.png'))
@@ -1051,14 +1057,16 @@ class Button(LayoutElemBase):
     def __init__(self):
         LayoutElemBase.__init__(self)
         self.button_surface = None
+        self.cursor_surface = None
         self.only_hit_non_transparent = False
     def draw(self, rect, cursor_surface):
         left, bottom, width, height = rect
         _, _, w, h = cursor_surface.get_rect()
         scaled_width, scaled_height = scale_and_preserve_aspect_ratio(w, h, width, height)
-        if not self.button_surface:
+        if not self.button_surface or cursor_surface is not self.cursor_surface:
             surface = scale_image(cursor_surface, scaled_width, scaled_height, best_quality=True)
             self.button_surface = surface
+            self.cursor_surface = cursor_surface
         self.screen_left = int(left+(width-scaled_width)/2)
         self.screen_bottom = int(bottom+height-scaled_height)
         screen.blit(self.button_surface, (self.screen_left, self.screen_bottom))
@@ -1091,9 +1099,9 @@ def curr_layer_locked():
         # - for vertical layouts we draw within the left side of the drawing area which is not partially covered with timeline and layers area;
         # blits() wouldn't work for us to draw the entire surface if we veered into the right margin area
         fading_mask.blit(reason_image, ((fading_mask.get_width()-reason_image.get_width())//2, (fading_mask.get_height()-reason_image.get_height())//2))
-        full_fading_mask.set_alpha(192)
+        full_fading_mask.set_alpha(255)
         da.set_fading_mask(full_fading_mask, prescaled_fading_mask=True)
-        da.fade_per_frame = 192/(FADING_RATE*7)
+        da.fade_per_frame = 255/(FADING_RATE*7)
     return effectively_locked
 
 def find_nearest(array, center_x, center_y, value):
@@ -1379,8 +1387,7 @@ class MarkerTool(PenTool,ColorModifyingTool):
     def choose_last_color():
         set_tool(palette.marker_tool(MarkerTool.last_color_id))
     def __init__(self, color_id):
-        PenTool.__init__(self, soft=True, width=20, zoom_changes_pixel_width=True, color_id=color_id)
-    def draw(self,*args): return
+        PenTool.__init__(self, soft=True, width=MARKER_WIDTH, zoom_changes_pixel_width=True, color_id=color_id)
     def on_mouse_up(self,*args):
         PenTool.on_mouse_up(self,*args)
         MarkerTool.last_color_id = self.color_id
@@ -1799,8 +1806,6 @@ class PaintBucketTool(Button,ColorModifyingTool):
         set_tool(palette.bucket_tool(PaintBucketTool.last_color_id))
 
     def draw(self,*args):
-        if self.color_id != NEUTRAL_COLOR_ID:
-            return
         Button.draw(self,*args)
 
     def __init__(self,color_id):
@@ -2325,7 +2330,7 @@ class NeedleTool(Button):
 
         try_to_patch = ctrl_is_pressed()
 
-        if try_to_close_the_last_editable_line(x,y):
+        if try_to_patch and try_to_close_the_last_editable_line(x,y):
             return
 
         frame = movie.edit_curr_frame() if try_to_patch else movie.curr_frame()
@@ -2444,9 +2449,9 @@ class Layout:
 
         if self.mode == ANIMATION_LAYOUT:
             return False
-        if self.mode == LAYERS_LAYOUT:
+        elif self.mode == LAYERS_LAYOUT:
             return isinstance(elem, TimelineArea) or isinstance(elem, TogglePlaybackButton)
-        if self.mode == DRAWING_LAYOUT:
+        elif self.mode == DRAWING_LAYOUT:
             return isinstance(elem, TimelineArea) or isinstance(elem, LayersArea) or isinstance(elem, TogglePlaybackButton)
         assert False, "Layout: unknown mode"
 
@@ -2595,12 +2600,6 @@ class Layout:
     def movie_list_area(self):
         assert isinstance(self.elems[2], MovieListArea)
         return self.elems[2]
-
-    def palette_area(self):
-        for elem in self.elems:
-            if isinstance(elem, PaletteElem):
-                return elem
-        assert False, 'PaletteElem not found'
 
     def new_tool(self): return self.new_delete_tool() and self.tool.is_new
     def new_delete_tool(self): return isinstance(self.tool, NewDeleteTool) 
@@ -4750,10 +4749,6 @@ PALETTE_ROWS = 11
 PALETTE_COLUMNS = 3
 
 class Palette:
-    splashes = [load_image(f) for f in ['splash-%d.png'%n for n in range(PALETTE_COLUMNS*PALETTE_ROWS)]]
-    random.seed(time.time())
-    random.shuffle(splashes)
-
     def __init__(self, filename, rows=PALETTE_ROWS, columns=PALETTE_COLUMNS):
         s = load_image(filename)
         color_hist = {}
@@ -4779,7 +4774,7 @@ class Palette:
                     col += 1
                     row = 0
 
-        self.bg_color = BACKGROUND+(0,)
+        self.bg_color = PEN+(0,)
 
         self.rows = rows
         self.columns = columns
@@ -4802,6 +4797,8 @@ class Palette:
     def bucket(self,color):
         radius = PAINT_BUCKET_WIDTH//2
         return add_circle(color_image(paint_bucket_cursor[0], color), radius)[0]
+    def marker(self,color):
+        return add_circle(color_image(marker_cursor[0], color), MARKER_WIDTH//2)[0]
 
     def init_cursors(self):
         self.bucket_tools = {}
@@ -4813,6 +4810,7 @@ class Palette:
 
         radius = PAINT_BUCKET_WIDTH//2
         self.cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
+        self.marker_cursors = [[None for col in range(self.columns)] for row in range(self.rows)]
         for row in range(self.rows):
             for col in range(self.columns):
                 self._change_color(row, col, self.colors[row][col])
@@ -4821,7 +4819,15 @@ class Palette:
         cursor = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(paint_bucket_cursor[1], self.bg_color))
         self.bg_cursor = (cursor[0], scale_image(load_image('water-tool.png'), cursor[1].get_width(), best_quality=True))
         self.bucket_tools[NEUTRAL_COLOR_ID] = Tool(PaintBucketTool(NEUTRAL_COLOR_ID), self.bg_cursor, '')
+        sc = self.marker(PEN+(255,))
+        radius = MARKER_WIDTH//2
+        self.pen_marker_cursor = (surf2cursor(sc, radius,sc.get_height()-radius-1), self.add_upper(color_image(marker_cursor[1], PEN+(255,)), marker_tool_upper))
+        self.marker_tools[NEUTRAL_COLOR_ID] = Tool(MarkerTool(NEUTRAL_COLOR_ID), self.pen_marker_cursor, '')
 
+    def add_upper(self,s,upper):
+        out = s.empty_like()
+        s.blit(upper, into=out)
+        return out
     def color(self,color_id):
         if color_id == NEUTRAL_COLOR_ID:
             return self.bg_color
@@ -4830,47 +4836,19 @@ class Palette:
     def change_color(self, color_id, color):
         assert color_id != NEUTRAL_COLOR_ID
         self._change_color(*color_id, color)
-        layout.palette_area().generate_colors_image()
     def _change_color(self, row, col, color):
         radius = PAINT_BUCKET_WIDTH//2
         self.colors[row][col] = color
         sc = self.bucket(color)
-        self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), color_image(self.splashes[row*self.columns+col], color))
+        self.cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), self.add_upper(color_image(paint_bucket_cursor[1], color), bucket_tool_upper))
+        sc = self.marker(color)
+        radius = MARKER_WIDTH//2
+        self.marker_cursors[row][col] = (surf2cursor(sc, radius,sc.get_height()-radius-1), self.add_upper(color_image(marker_cursor[1], color), marker_tool_upper))
         self.bucket_tools[(row,col)].cursor = self.cursors[row][col]
-        self.marker_tools[(row,col)].cursor = pencil_cursor # TODO: marker cursors
+        self.marker_tools[(row,col)].cursor = self.marker_cursors[row][col]
 
     def bucket_tool(self, color_id): return self.bucket_tools[color_id]
     def marker_tool(self, color_id): return self.marker_tools[color_id]
-
-class PaletteElem(LayoutElemBase):
-    row_col_perm = [(row,col) for row in range(PALETTE_ROWS) for col in range(PALETTE_COLUMNS)]
-    random.shuffle(row_col_perm)
-
-    def init(self):
-        self.generate_colors_image()
-        
-    def generate_colors_image(self):
-        l,b,w,h = self.rect
-        col_width = w/palette.columns
-        row_height = h/palette.rows
-
-        self.colors_image = Surface((w,h))
-        for row,col in self.row_col_perm:
-            scale = 1.2 if row != 0 and row != palette.rows-1 else 1.1
-            img = palette.cursors[palette.rows-row-1][col][1]
-            w, h = scale_and_preserve_aspect_ratio(img.get_width(), img.get_height(), col_width*scale, row_height*scale)
-            s = scale_image(img, w, h, best_quality=True)
-            offsetx = (col_width*scale - w) / 2
-            offsety = (row_height*scale - h) / 2
-            if row == 0:
-                offsety += row_height*(scale-1)/2
-            elif row == palette.rows-1:
-                offsety -= row_height*(scale-1)/2
-            self.colors_image.blit(s, (offsetx + (col - (scale-1)/2)*col_width, offsety + (row - (scale-1)/2)*row_height))
-
-    def draw(self):
-        l,b,_,_ = self.rect
-        screen.blit(self.colors_image, (l,b))
 
 def get_clip_dirs(sort_by): # sort_by is a stat struct attribute (st_something)
     '''returns the clip directories sorted by last modification time (latest first)'''
@@ -4975,6 +4953,7 @@ def init_layout():
                     tool = TOOLS['zoom']
                 elif col == 1:
                     tool = palette.bucket_tool(NEUTRAL_COLOR_ID)
+                    marker_tool = palette.marker_tool(NEUTRAL_COLOR_ID)
                 else:
                     continue
             if not tool:
@@ -4984,9 +4963,6 @@ def init_layout():
             for t in [tool,marker_tool] if marker_tool else [tool]:
                 layout.add((TOOLBAR_X_START+x,y,color_w,color_w), ToolSelectionButton(t))
             i += 1
-
-    palette_rect = (first_xy[0], first_xy[1], color_w*palette.columns, color_w*palette.rows)
-    layout.add(palette_rect, PaletteElem())
 
     funcs_width = [
         ('insert-frame', 0.33),
@@ -5368,7 +5344,8 @@ def process_keydown_event(event):
         swap_width_height()
         return
 
-    if ctrl and event.key() == Qt.Key_L:
+    # Ctrl-M: switch markers on/off
+    if ctrl and event.key() == Qt.Key_M:
         layout.switch_coloring_mode()
         return
 

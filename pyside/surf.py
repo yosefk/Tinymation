@@ -368,8 +368,9 @@ def rect(surface, color, rect, width=0, border_radius=0):
         tinylib.fill_rounded_rectangle_negative(surface.base_ptr(), surface.bytes_per_line(), sw, sh, x, y, w, h,
                                                 float(width), border_radius, rgba)
 
-def filled_circle(surface, cx, cy, radius, color):
+def unfilled_circle(surface, cx, cy, radius, color):
     '''a very inefficient filled_circle, needn't do better atm since this is only done for cursors at init time'''
+    radius -= 1.5
     # Create output RGBA array, initialized to transparent (0, 0, 0, 0)
     tmp_surf = Surface(surface.get_size())
     img = tmp_surf._a
@@ -386,7 +387,7 @@ def filled_circle(surface, cx, cy, radius, color):
     # Fully opaque inside (distance <= radius - 0.5)
     # Linearly interpolated alpha between radius - 0.5 and radius + 0.5
     # Transparent outside (distance > radius + 0.5)
-    alpha = np.clip(0.5 - (distance - radius), 0, 1)
+    alpha = np.clip(0.5 - np.abs(distance - radius)/4, 0, 1)
     
     # Set color where alpha > 0
     mask = alpha > 0

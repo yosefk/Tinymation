@@ -1,10 +1,11 @@
 
 //a vectorized version of blit.cpp, with some additional optimizations
-//(the outputs might differ, firstly because of the use of a floating point reciprocal,
-//and secondly because of "255 - af" instead of 256 - af followed by min(out,255)
+//(the outputs might differ because of the use of a floating point reciprocal)
 
-static inline int round8b(int val) { return (val+(1<<7))>>8; }
-static inline int round16b(int val) { return (val+(1<<15))>>16; }
+//note that the clipping is needed even if we use 255-x instead of 256-x in some of the expressions below
+static inline int clip(int val) { return val > 255 ? 255 : val; }
+static inline int round8b(int val) { return clip((val+(1<<7))>>8); }
+static inline int round16b(int val) { return clip((val+(1<<15))>>16); }
 
 //we do this because ISPC aliasing rules say that pointers are always "restrict"/unaliased
 //and it thus sounds scary to have a helper inline function getting 2 pointers that might be
@@ -32,7 +33,7 @@ static inline int round16b(int val) { return (val+(1<<15))>>16; }
             int ab = ((bgpix>>24) * bg_alpha) >> 8; \
             int af = ((fgpix>>24) * fg_alpha) >> 8; \
             int af8 = af << 8; \
-            int ab1minusaf = ab*(255 - af); \
+            int ab1minusaf = ab*(256 - af); \
             int ao = round8b(af8 + ab1minusaf); \
  \
             uint32 opix = ao << 24; \
@@ -97,7 +98,7 @@ export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int
 }
 
 //blend between the RGB values of the input array with the given RGB value (giving it the weight a
-//and the input RGB values the weight 255-a), and copy the alpha as is from the input to the output
+//and the input RGB values the weight 256-a), and copy the alpha as is from the input to the output
 export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int start_y, uniform int finish_y,
                                  uniform int r, uniform int g, uniform int b, uniform int a)
 {
@@ -116,9 +117,9 @@ export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uni
             int gi = (pix >> 8) & 0xff;
             int bi = (pix >> 16) & 0xff;
 
-            int ro = round8b(r * a + ri * (255-a));
-            int go = round8b(g * a + gi * (255-a));
-            int bo = round8b(b * a + bi * (255-a));
+            int ro = round8b(r * a + ri * (256-a));
+            int go = round8b(g * a + gi * (256-a));
+            int bo = round8b(b * a + bi * (256-a));
 
             row[x] = ro | (go<<8) | (bo<<16) | (ai<<24);
         }
@@ -218,9 +219,9 @@ export void blit_combined_mask(uniform MaskAlphaParams mask_alphas[], uniform in
                     int fg_alpha = alpha[x];
                     int fg_weight = (ai == 0) ? 255 : (fg_alpha >> 1);
 
-                    int ro = round8b(r * fg_weight + ri * (255-fg_weight));
-                    int go = round8b(g * fg_weight + gi * (255-fg_weight));
-                    int bo = round8b(b * fg_weight + bi * (255-fg_weight));
+                    int ro = round8b(r * fg_weight + ri * (256-fg_weight));
+                    int go = round8b(g * fg_weight + gi * (256-fg_weight));
+                    int bo = round8b(b * fg_weight + bi * (256-fg_weight));
                     int ao = ai > fg_alpha ? ai : fg_alpha;
 
                     mask_row[x] = ro | (go<<8) | (bo<<16) | (ao<<24);
