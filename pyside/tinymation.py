@@ -3134,7 +3134,7 @@ class TimelineArea(LayoutElemBase):
     def _calc_factors(self):
         _, _, width, height = self.rect
         factors = [0.7,0.6,0.5,0.4,0.3,0.2,0.15]
-        self.mask_alpha = int(.3*255)
+        self.mask_alpha = int(.64*255)
         scale = 1
         mid_scale = 1
         step = 0.5
@@ -3216,6 +3216,11 @@ class TimelineArea(LayoutElemBase):
         
         self.scroll_indicator = ScrollIndicator(self.subsurface.get_width(), self.subsurface.get_height())
 
+    def hex2color(ls):
+        return [((x>>16)&0xff, (x>>8)&0xff, x&0xff) for x in ls]
+    pos_colors = hex2color([0xd803f1, 0x4557ff, 0x009ae7, 0x18ca00, 0xf3b600, 0xff7c00, 0xff4e2b])
+    neg_colors = hex2color([0x7000ca, 0x0606b7, 0x006294, 0x0e7a00, 0xb58801, 0xb05804, 0x961800])   
+
     def light_table_positions(self):
         # TODO: order 
         covered_positions = {movie.pos} # the current position is definitely covered,
@@ -3244,9 +3249,8 @@ class TimelineArea(LayoutElemBase):
                 curr = curr_neg
                 num = num_enabled_neg
                 curr_neg += 1
-            brightness = int((200 * (num - curr - 1) / (num - 1)) + 55 if num > 1 else 255)
-            color = (brightness,0,0) if pos_dist < 0 else (0,int(brightness*0.5),0)
-            transparency = 0.3
+            color = TimelineArea.pos_colors[pos_dist-1] if pos_dist>0 else TimelineArea.neg_colors[pos_dist+7] #(brightness,0,0) if pos_dist < 0 else (0,int(brightness*0.5),0)
+            transparency = 0.64
             yield (pos, color, transparency)
 
     def combined_light_table_mask(self, scaled_curr_layer=None):
@@ -3415,13 +3419,17 @@ class TimelineArea(LayoutElemBase):
         self.frame_boundaries = []
         self.eye_boundaries = []
 
+        def blend(color,transparency):
+            return tuple([int(c*transparency + 255*(1-transparency)) for c in color]) + (255,)
+        pos2color = dict([(pos,blend(color,transparency)) for (pos,color,transparency) in self.light_table_positions()])
+
         def draw_frame(pos, pos_dist, x, thumb_width):
             scaled = movie.get_thumbnail(pos, thumb_width, height)
             surface.blit(scaled, (x, bottom), (0, 0, thumb_width, height))
             list_rect(surface, (x, bottom, thumb_width, height), pos==movie.pos)
             self.frame_boundaries.append((x, x+thumb_width, pos))
             if pos != movie.pos:
-                eye = self.eye_open if self.on_light_table.get(pos_dist, False) else self.eye_shut
+                eye = color_image(self.eye_open, pos2color[pos]) if self.on_light_table.get(pos_dist, False) else self.eye_shut
                 eye_x = x + 2 if pos_dist < 0 else x+thumb_width-eye.get_width() - 2
                 surface.blit(eye, (eye_x, bottom), eye.get_rect())
                 self.eye_boundaries.append((eye_x, bottom, eye_x+eye.get_width(), bottom+eye.get_height(), pos_dist))
@@ -3589,8 +3597,8 @@ class LayersArea(LayoutElemBase):
         icon_height = min(int(screen.get_width() * 0.15*0.14), self.thumbnail_height / 2)
         self.eye_open = scale_image(load_image('eye_open.png'), height=icon_height, best_quality=True)
         self.eye_shut = scale_image(load_image('eye_shut.png'), height=icon_height, best_quality=True)
-        self.light_on = scale_image(load_image('light_on.png'), height=icon_height, best_quality=True)
-        self.light_off = scale_image(load_image('light_off.png'), height=icon_height, best_quality=True)
+        self.light_on = scale_image(load_image('light_on.png'), height=icon_height*1.3, best_quality=True)
+        self.light_off = scale_image(load_image('light_off.png'), height=icon_height*1.3, best_quality=True)
         self.locked = scale_image(load_image('locked.png'), height=icon_height*1.2, best_quality=True)
         self.unlocked = scale_image(load_image('unlocked.png'), height=icon_height*1.2, best_quality=True)
         self.eye_boundaries = []
@@ -3635,6 +3643,7 @@ class LayersArea(LayoutElemBase):
         left, bottom, width, height = self.rect
         blit_bottom = 0
 
+        light_table_on = bool(list(layout.timeline_area().light_table_positions()))
         for layer_pos, layer in reversed(list(enumerate(movie.layers))):
             border = 1 + (layer_pos == movie.layer_pos)*2
             image = self.cached_image(layer_pos, layer)
@@ -3644,7 +3653,7 @@ class LayersArea(LayoutElemBase):
             list_rect(surface, (image_left, blit_bottom, image.get_width(), image.get_height()), layer_pos == movie.layer_pos)
 
             max_border = 3
-            if len(movie.frames) > 1 and layer.visible and list(layout.timeline_area().light_table_positions()):
+            if len(movie.frames) > 1 and layer.visible and light_table_on:
                 lit = self.light_on if layer.lit else self.light_off
                 surface.blit(lit, (width - lit.get_width() - max_border, blit_bottom))
                 self.lit_boundaries.append((left + width - lit.get_width() - max_border, bottom, left+width, bottom+lit.get_height(), layer_pos))
