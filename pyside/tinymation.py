@@ -57,15 +57,6 @@ class Frame:
         self.dir = dir
         self.movie_name = os.path.basename(dir)
         self.layer_id = layer_id
-        if frame_id is not None: # id - load the surfaces from the directory
-            self.id = frame_id
-            self.del_pixels()
-            if read_pixels:
-                self.read_pixels()
-        else:
-            self.id = str(uuid.uuid1())
-            self.color = None
-            self.lines = None
 
         # we don't aim to maintain a "perfect" dirty flag such as "doing 5 things and undoing
         # them should result in dirty==False." The goal is to avoid gratuitous saving when
@@ -80,9 +71,19 @@ class Frame:
         self.version = 0
         self.hold = False
 
-        cache.update_id(self.cache_id(), self.version)
-
         self.compression_future = None
+
+        if frame_id is not None: # id - load the surfaces from the directory
+            self.id = frame_id
+            self.del_pixels()
+            if read_pixels:
+                self.read_pixels()
+        else:
+            self.id = str(uuid.uuid1())
+            self.color = None
+            self.lines = None
+
+        cache.update_id(self.cache_id(), self.version)
 
     def mark_as_garbage_in_cache(self):
         cache.delete_id(self.cache_id())
@@ -3400,7 +3401,8 @@ class TimelineArea(LayoutElemBase):
                 return mask
                 
         all_pos_mask = cache.fetch(AllPosMask())
-        all_pos_mask.set_blending_mode(BLEND_LIGHT_TABLE_MASK)
+        if all_pos_mask is not None:
+            all_pos_mask.set_blending_mode(BLEND_LIGHT_TABLE_MASK)
         return all_pos_mask
 
     def x2frame(self, x):

@@ -3,11 +3,10 @@
 //(the outputs might differ because of the use of a floating point reciprocal)
 
 //note that the clipping is needed even if we use 255-x instead of 256-x in some of the expressions below
-static inline int clip(int val) { return val > 255 ? 255 : val; }
-static inline int clip0(int val) { return val > 255 ? 255 : (val < 0 ? 0 : val); }
+static inline int clip(int val) { return min(val, 255); }
+static inline int clip0(int val) { return max(0, min(val, 255)); }
 static inline int round8b(int val) { return clip((val+(1<<7))>>8); }
 static inline int round16b(int val) { return clip((val+(1<<15))>>16); }
-static inline int abs(int val) { return val<0 ? -val : val; }
 
 //we do this because ISPC aliasing rules say that pointers are always "restrict"/unaliased
 //and it thus sounds scary to have a helper inline function getting 2 pointers that might be
@@ -30,8 +29,17 @@ static inline int abs(int val) { return val<0 ? -val : val; }
         const uint32* uniform fg = fg_base + (fg_stride*y>>2); \
  \
         foreach(x=0 ... width) { \
-            uint32 bgpix = bg[x]; \
             uint32 fgpix = fg[x]; \
+            int fga = fgpix >> 24; \
+            if(fg_alpha == 256 && all(fga == 255)) { \
+                out[x] = fgpix; \
+                continue; \
+            } \
+            uint32 bgpix = bg[x]; \
+            if(all(fga == 0)) { \
+                out[x] = bgpix; \
+                continue; \
+            } \
             int ab = ((bgpix>>24) * bg_alpha) >> 8; \
             int af = ((fgpix>>24) * fg_alpha) >> 8; \
             int af8 = af << 8; \
@@ -40,8 +48,8 @@ static inline int abs(int val) { return val<0 ? -val : val; }
  \
             uint32 opix = ao << 24; \
 \
-            ao = ao == 0 ? 1 : ao; \
-            float finv = 1.0f / ao; \
+            ao = max(1, ao); \
+            float finv = rcp_fast((float)ao); \
  \
             int rb = bgpix & 0xff; \
             int rf = fgpix & 0xff; \
@@ -139,6 +147,9 @@ export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uni
         foreach(x=0 ... width) {
             uint32 pix = row[x];
             int ai = pix >> 24;
+            if(all(ai == 0)) {
+                continue;
+            }
 
             int ri = pix & 0xff;
             int gi = (pix >> 8) & 0xff;
@@ -190,8 +201,12 @@ export void blit_layers_mask(uniform LayerParamsForMask layers[], uniform int n,
                     //in a fully transparent tank. you do benefit from a fish's tail hidden behind some water plant
                     //not appearing (remaining hidden) on the light table
                     uint8 mask_alpha = mask_row[x] * (int)(color_alpha < 255);
-                    mask_alpha = mask_alpha < lines_alpha ? lines_alpha : mask_alpha;
-                    mask_row[x] = mask_alpha;
+                    int ab = mask_alpha;
+                    int af = lines_alpha;
+                    int af8 = af << 8;
+                    int ab1minusaf = ab*(256 - af);
+                    int ao = round8b(af8 + ab1minusaf);
+                    mask_row[x] = ao;
                 }
             }
             else {
@@ -232,22 +247,28 @@ export void blit_combined_mask(uniform MaskAlphaParams mask_alphas[], uniform in
                 }
             }
             else {
-                //here, alpha is computed in the usual way for alpha blending (note that this makes copy/pasted
-                //lines look "more aliased" as they're blitted one onto another; it makes _nearby_ lines less
-                //aliased than taking the maximum of the alphas, however, and we're optimizing for hand-drawn
-                //changes, not for copy/paste); the color is the average
+                //here, alpha is computed as the maximum of the input alphas - if we have small changes between
+                //frames (or copy-pasted lines), we prefer aliasing effects to "thickening" lines when they are close
+                //which might make it harder to tell which frame is which. (when we combine the layers' masks into one,
+                //we do normal alpha blending for the alphas, since that's how the frame is rendered; here we are
+                //combining different frames so we don't mind aliasing artifacts which neither represent nor go
+                //into the final rendered movie, but we do mind about differentiating between frames.)
+                //
+                //the color is the average
                 //of foreground & background weighed by the fg & bg alpha - when masks intersect, we don't
                 //want one to occlude the other since for very similar frames, this way you "don't see much
                 //of the occluded ones"
                 foreach(x=0 ... width) {
+                    int af = alpha[x];
+                    if(all(af == 0)) {
+                        continue;
+                    }
+                    //we don't bother to check all(af == 255) since for masks [made from lines] this should be quite rare
                     uint32 bgpix = mask_row[x];
                     int ab = bgpix>>24;
-                    int af = alpha[x];
-                    int af8 = af << 8;
-                    int ab1minusaf = ab*(256 - af);
-                    int ao = round8b(af8 + ab1minusaf);
+                    int ao = max(ab, af);
 
-                    float finv = 256 * (1.0f / (af + ab + 1));
+                    float finv = 256 * rcp_fast((float)(max(1, af + ab)));
 
                     int rb = bgpix & 0xff;
                     int gb = (bgpix >> 8) & 0xff;
@@ -288,7 +309,7 @@ export void blit_held_mask(uniform uint32 mask_base[], uniform int mask_stride,
                 uint32 alpha = curr_layer[x] >> 24;
                 uint32 inside_pix = held_inside[x];
                 uint32 inside_alpha = inside_pix >> 24;
-                mask[x] = (inside_pix & color_bits) | ((alpha < inside_alpha ? alpha : inside_alpha) << 24);
+                mask[x] = (inside_pix & color_bits) | (min(alpha, inside_alpha) << 24);
             }
             initialized = 1;
         }
@@ -302,7 +323,7 @@ export void blit_held_mask(uniform uint32 mask_base[], uniform int mask_stride,
                 uint32 alpha = 255 - (curr_layer[x] >> 24);
                 uint32 outside_pix = held_outside[x];
                 uint32 outside_alpha = outside_pix >> 24;
-                row[x] = (outside_pix & color_bits) | ((alpha < outside_alpha ? alpha : outside_alpha) << 24);
+                row[x] = (outside_pix & color_bits) | (min(alpha, outside_alpha) << 24);
             }         
             if(initialized) {
                 blit_rgba8888_inplace(mask, tmp_row, 0, 0, width, 0, 1, 255, 255, BLEND_NORMAL);
