@@ -55,6 +55,7 @@ def load_image(fname):
 class Frame:
     def __init__(self, dir, layer_id=None, frame_id=None, read_pixels=True):
         self.dir = dir
+        self.movie_name = os.path.basename(dir)
         self.layer_id = layer_id
         if frame_id is not None: # id - load the surfaces from the directory
             self.id = frame_id
@@ -183,7 +184,8 @@ class Frame:
         # a frame is 2 RGBA surfaces
         return (self.get_width() * self.get_height() * 8) if not self.empty() else 0
 
-    def cache_id(self): return (self.id, self.layer_id) if not self.empty() else None
+    # since users can copy movie directories, id & layer_id might not be unique without the movie name
+    def cache_id(self): return (self.movie_name, self.id, self.layer_id) if not self.empty() else None
     def cache_id_version(self): return self.cache_id(), self.version
 
     def fit_to_resolution(self):
@@ -716,7 +718,7 @@ def make_color_int(rgba):
     r,g,b,a = rgba
     return r | (g<<8) | (b<<16) | (a<<24)
 
-from tinylib_ctypes import tinylib, LayerParamsForMask, MaskAlphaParams, RangeFunc
+from tinylib_ctypes import tinylib, LayerParamsForMask, MaskAlphaParams, RangeFunc, BLEND_LIGHT_TABLE_MASK
 import ctypes as ct
 
 def rgba_array(surface):
@@ -3397,7 +3399,9 @@ class TimelineArea(LayoutElemBase):
                 surf.held_mask_stat.stop(w*h*valid_count)
                 return mask
                 
-        return cache.fetch(AllPosMask())
+        all_pos_mask = cache.fetch(AllPosMask())
+        all_pos_mask.set_blending_mode(BLEND_LIGHT_TABLE_MASK)
+        return all_pos_mask
 
     def x2frame(self, x):
         for left, right, pos in self.frame_boundaries:

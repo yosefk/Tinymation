@@ -4,13 +4,15 @@
 
 //note that the clipping is needed even if we use 255-x instead of 256-x in some of the expressions below
 static inline int clip(int val) { return val > 255 ? 255 : val; }
+static inline int clip0(int val) { return val > 255 ? 255 : (val < 0 ? 0 : val); }
 static inline int round8b(int val) { return clip((val+(1<<7))>>8); }
 static inline int round16b(int val) { return clip((val+(1<<15))>>16); }
+static inline int abs(int val) { return val<0 ? -val : val; }
 
 //we do this because ISPC aliasing rules say that pointers are always "restrict"/unaliased
 //and it thus sounds scary to have a helper inline function getting 2 pointers that might be
 //the same pointers, as bg_base and out_base are in the in-place blitting case.
-#define BLIT_BODY(out_base,out_stride) \
+#define BLIT_BODY_WITH_SIMILARITY(out_base,out_stride,check_similarity) \
     if(bg_alpha == 255) { \
         bg_alpha = 256; \
     } \
@@ -47,6 +49,14 @@ static inline int round16b(int val) { return clip((val+(1<<15))>>16); }
             int gf = (fgpix >> 8) & 0xff; \
             int bb = (bgpix >> 16) & 0xff; \
             int bf = (fgpix >> 16) & 0xff; \
+\
+            if(check_similarity) { \
+                int similar = (abs(rb-rf) < 30) & (abs(gb-gf) < 30) & (abs(bb-bf) < 30); \
+                int brighten = ((rf + gf + bf) > 192*3) ? -60 : 60; \
+                rf = rf*(1-similar) + (clip0(rf+brighten))*similar; \
+                gf = gf*(1-similar) + (clip0(gf+brighten))*similar; \
+                bf = bf*(1-similar) + (clip0(bf+brighten))*similar; \
+            } \
  \
             int ro = round8b((int)((float)(af8*rf + ab1minusaf*rb) * finv)); \
             int go = round8b((int)((float)(af8*gf + ab1minusaf*gb) * finv)); \
@@ -56,19 +66,35 @@ static inline int round16b(int val) { return clip((val+(1<<15))>>16); }
         } \
     }
 
+//make sure we don't do needless work when check_similarity is 0 by checking its value once
+//before entering the loop
+#define BLIT_BODY(out_base, out_stride, check_similarity) \
+    if(check_similarity) { \
+        BLIT_BODY_WITH_SIMILARITY(out_base, out_stride, 1); \
+    } \
+    else { \
+        BLIT_BODY_WITH_SIMILARITY(out_base, out_stride, 0); \
+    }
+
+enum BlendingMode
+{
+    BLEND_NORMAL = 0,
+    BLEND_LIGHT_TABLE_MASK = 1,
+};
+
 export void blit_rgba8888_inplace(uniform uint32 bg_base[], const uniform uint32 fg_base[],
                           uniform int bg_stride, uniform int fg_stride, uniform int width, uniform int start_y, uniform int finish_y,
-                          uniform int bg_alpha, uniform int fg_alpha)
+                          uniform int bg_alpha, uniform int fg_alpha, uniform BlendingMode mode)
 {
-    BLIT_BODY(bg_base, bg_stride)
+    BLIT_BODY(bg_base, bg_stride, mode)
 }
 
 export void blit_rgba8888(uniform uint32 bg_base[], const uniform uint32 fg_base[], uniform uint32 out_base[],
                           uniform int bg_stride, uniform int fg_stride, uniform int out_stride,
                           uniform int width, uniform int start_y, uniform int finish_y,
-                          uniform int bg_alpha, uniform int fg_alpha)
+                          uniform int bg_alpha, uniform int fg_alpha, uniform BlendingMode mode)
 {
-    BLIT_BODY(out_base, out_stride)
+    BLIT_BODY(out_base, out_stride, mode)
 }
 
 struct SurfaceToBlit
@@ -76,6 +102,7 @@ struct SurfaceToBlit
     uint32* base;
     int stride;
     int alpha;
+    BlendingMode blending_mode;
 };
 
 export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int n, uniform int width, uniform int start_y, uniform int finish_y)
@@ -92,7 +119,7 @@ export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int
             //the for SurfaceToBlit& as opposed to SurfaceToBlit* to satisfy "uniform/
             //varying" type reqs is peculiar
             uniform uint32* uniform fg_base = fg.base + (fg.stride * y >> 2);
-            blit_rgba8888_inplace(bg_base, fg_base, 0, 0, width, 0, 1, bg.alpha, fg.alpha);
+            blit_rgba8888_inplace(bg_base, fg_base, 0, 0, width, 0, 1, bg.alpha, fg.alpha, fg.blending_mode);
         }
     }
 }
@@ -204,25 +231,31 @@ export void blit_combined_mask(uniform MaskAlphaParams mask_alphas[], uniform in
                     mask_row[x] = rgb | (fg_alpha << 24);
                 }
             }
-            else { //in fully transparent mask pixels, put the new rgb color and copy the alpha.
-                //in not entirely transparent mask pixels, blend the new rgb color with the existing
-                //color (weighed by the mask alpha - closer to the new color where it's less transparent,
-                //"50/50" where it's completely opaque) and take the maximum of the alpha 
+            else {
+                //here, alpha is computed in the usual way for alpha blending (note that this makes copy/pasted
+                //lines look "more aliased" as they're blitted one onto another; it makes _nearby_ lines less
+                //aliased than taking the maximum of the alphas, however, and we're optimizing for hand-drawn
+                //changes, not for copy/paste); the color is the average
+                //of foreground & background weighed by the fg & bg alpha - when masks intersect, we don't
+                //want one to occlude the other since for very similar frames, this way you "don't see much
+                //of the occluded ones"
                 foreach(x=0 ... width) {
-                    uint32 pix = mask_row[x];
+                    uint32 bgpix = mask_row[x];
+                    int ab = bgpix>>24;
+                    int af = alpha[x];
+                    int af8 = af << 8;
+                    int ab1minusaf = ab*(256 - af);
+                    int ao = round8b(af8 + ab1minusaf);
 
-                    int ri = pix & 0xff;
-                    int gi = (pix >> 8) & 0xff;
-                    int bi = (pix >> 16) & 0xff;
-                    int ai = pix >> 24;
+                    float finv = 256 * (1.0f / (af + ab + 1));
 
-                    int fg_alpha = alpha[x];
-                    int fg_weight = (ai == 0) ? 255 : (fg_alpha >> 1);
+                    int rb = bgpix & 0xff;
+                    int gb = (bgpix >> 8) & 0xff;
+                    int bb = (bgpix >> 16) & 0xff;
 
-                    int ro = round8b(r * fg_weight + ri * (256-fg_weight));
-                    int go = round8b(g * fg_weight + gi * (256-fg_weight));
-                    int bo = round8b(b * fg_weight + bi * (256-fg_weight));
-                    int ao = ai > fg_alpha ? ai : fg_alpha;
+                    int ro = round8b((int)((float)(af*r + ab*rb) * finv));
+                    int go = round8b((int)((float)(af*g + ab*gb) * finv));
+                    int bo = round8b((int)((float)(af*b + ab*bb) * finv));
 
                     mask_row[x] = ro | (go<<8) | (bo<<16) | (ao<<24);
                 }
@@ -272,14 +305,14 @@ export void blit_held_mask(uniform uint32 mask_base[], uniform int mask_stride,
                 row[x] = (outside_pix & color_bits) | ((alpha < outside_alpha ? alpha : outside_alpha) << 24);
             }         
             if(initialized) {
-                blit_rgba8888_inplace(mask, tmp_row, 0, 0, width, 0, 1, 255, 255);
+                blit_rgba8888_inplace(mask, tmp_row, 0, 0, width, 0, 1, 255, 255, BLEND_NORMAL);
             }
             initialized = 1;
         }
         if(rest_stride) {
             const uniform uint32* uniform rest = rest_base + (rest_stride * y >> 2);
             if(initialized) {
-                blit_rgba8888_inplace(mask, rest, 0, 0, width, 0, 1, 255, 255);
+                blit_rgba8888_inplace(mask, rest, 0, 0, width, 0, 1, 255, 255, BLEND_NORMAL);
             }
             else {
                 foreach(x=0 ... width) {

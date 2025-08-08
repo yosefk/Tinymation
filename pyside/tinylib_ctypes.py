@@ -72,12 +72,15 @@ tinylib.smooth_polyline.restype = ct.c_int
 #void find_peaks(unsigned char* peaks, const double* y, int n, double height, int distance)
 tinylib.find_peaks.argtypes = [ct.c_void_p]*2 + [ct.c_int] + [ct.c_double] + [ct.c_int]
 
+BLEND_NORMAL = 0
+BLEND_LIGHT_TABLE_MASK = 1
+
 #extern "C" void blit_rgba8888(uint8_t* __restrict bg_base, const uint8_t* __restrict fg_base,
 #                              int bg_stride, int fg_stride, int width, int start_y, int finish_y,
-#                              int bg_alpha, int fg_alpha)
+#                              int bg_alpha, int fg_alpha, BlendingMode mode)
 tinylib.blits_rgba8888_inplace.argtypes = [ct.c_void_p] + [ct.c_int]*3
-tinylib.blit_rgba8888_inplace.argtypes = [ct.c_void_p]*2 + [ct.c_int]*7
-tinylib.blit_rgba8888.argtypes = [ct.c_void_p]*3 + [ct.c_int]*8
+tinylib.blit_rgba8888_inplace.argtypes = [ct.c_void_p]*2 + [ct.c_int]*8
+tinylib.blit_rgba8888.argtypes = [ct.c_void_p]*3 + [ct.c_int]*9
 #export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int start_y, uniform int finish_y,
 #                                 uniform int r, uniform int g, uniform int b, uniform int a)
 tinylib.blend_rgb_copy_alpha.argtypes = [ct.c_void_p] + [ct.c_int]*8
@@ -87,6 +90,7 @@ class SurfaceToBlit(ct.Structure):
         ('base', ct.c_void_p),
         ('stride', ct.c_int),
         ('alpha', ct.c_int),
+        ('blending_mode', ct.c_int),
     ]
 
 class LayerParamsForMask(ct.Structure):

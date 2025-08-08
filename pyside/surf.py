@@ -1,7 +1,7 @@
 import numpy as np
 from PySide6.QtGui import QImage
 import ctypes as ct
-from tinylib_ctypes import tinylib, SurfaceToBlit, RangeFunc
+from tinylib_ctypes import tinylib, SurfaceToBlit, RangeFunc, BLEND_LIGHT_TABLE_MASK, BLEND_NORMAL
 
 import time
 
@@ -64,9 +64,10 @@ def surf_array(w, h):
 # from the typical (and pygame's) "width, height, channels" convention as it is, because our "non-standard"
 # (for numpy) strides hurt numpy ops throughput.
 class Surface:
-    def __init__(self, size_or_data, alpha=255, base=None, color=None):
+    def __init__(self, size_or_data, alpha=255, base=None, color=None, blending_mode=BLEND_NORMAL):
         self._alpha = alpha
         self._base = base
+        self._mode = blending_mode
         if type(size_or_data) is tuple:
             w, h = size_or_data
             w, h = round(w), round(h)
@@ -164,12 +165,12 @@ class Surface:
                 tinylib.blit_rgba8888_inplace(background._ptr_to(bgx, bgy), foreground._ptr_to(fgx, fgy),
                                               background.bytes_per_line(), foreground.bytes_per_line(),
                                               blitw, start_y, finish_y,
-                                              background.get_alpha(), foreground.get_alpha())
+                                              background._alpha, foreground._alpha, foreground._mode)
             else:
                 tinylib.blit_rgba8888(background._ptr_to(bgx, bgy), foreground._ptr_to(fgx, fgy), into._ptr_to(bgx, bgy),
                                       background.bytes_per_line(), foreground.bytes_per_line(), into.bytes_per_line(),
                                       blitw, start_y, finish_y,
-                                      background.get_alpha(), foreground.get_alpha())
+                                      background._alpha, foreground._alpha, foreground._mode)
 
         tinylib.parallel_for_grain(blit_tile, 0, blith, 0 if (blith*blitw > 500000) else blith)
 
@@ -202,6 +203,7 @@ class Surface:
             fg.base = foreground._ptr_to(fgx, fgy)
             fg.stride = foreground.bytes_per_line()
             fg.alpha = foreground._alpha
+            fg.blending_mode = foreground._mode
             i += 1
 
         blits_stat.start()
@@ -218,7 +220,7 @@ class Surface:
 
     def copy(self):
         copy_stat.start()
-        s = Surface(strides_preserving_copy(self._a), alpha=self._alpha)
+        s = Surface(strides_preserving_copy(self._a), alpha=self._alpha, blending_mode=self._mode)
         # interestingly this is slower, not faster:
         #s = Surface(self.get_size(), alpha=self._alpha, color=COLOR_UNINIT)
         #s.trans_unsafe()[...] = self.trans_unsafe()[...]
@@ -226,7 +228,7 @@ class Surface:
         return s
 
     def empty_like(self):
-        return Surface((self.get_width(), self.get_height()), alpha=self._alpha, color=COLOR_UNINIT)
+        return Surface((self.get_width(), self.get_height()), alpha=self._alpha, blending_mode=self._mode, color=COLOR_UNINIT)
 
     def subsurface(self, *args, clip=False):
         assert len(args) in [1, 4]
@@ -247,11 +249,15 @@ class Surface:
             y = 0
         w = max(w, 0)
         h = max(h, 0)
-        return Surface(self._a[x:x+w,y:y+h,:], alpha=self._alpha, base=self._ptr_to(x,y))
+        return Surface(self._a[x:x+w,y:y+h,:], alpha=self._alpha, blending_mode=self._mode, base=self._ptr_to(x,y))
 
     def set_alpha(self, alpha):
         assert alpha >= 0 and alpha < 256
         self._alpha = int(alpha)
+
+    def set_blending_mode(self, mode):
+        assert mode in [BLEND_NORMAL, BLEND_LIGHT_TABLE_MASK]
+        self._mode = mode
 
     def get_alpha(self):
         return self._alpha
