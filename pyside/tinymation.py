@@ -844,7 +844,7 @@ marker_tool_upper.set_alpha(128)
 blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 zoom_cursor = (load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*1.5))[0], load_image('zoom-tool.png'))
-finger_cursor = load_cursor('finger.png', hot_spot=(0.85, 0.17))
+finger_cursor = load_cursor('finger.png', size=int(CURSOR_SIZE*0.75), hot_spot=(0.25, 0))
 
 # for locked screen
 empty_cursor = surf2cursor(Surface((10,10)), 0, 0)
@@ -1139,6 +1139,7 @@ class PenTool(Button):
         self.timer = None
         self.patching = False
         self.color_id = color_id
+        self.frame_without_line = None
 
     def brush_flood_fill_color_based_on_mask(self):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
@@ -1199,6 +1200,7 @@ class PenTool(Button):
         self.polyline = []
         self.bucket_color = None
         self.lines_array = surf.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
+        self.frame_without_line = None
 
         cx, cy = layout.drawing_area().xy2frame(x, y)
         self.init_brush(cx, cy)
@@ -1211,12 +1213,10 @@ class PenTool(Button):
 
         self.prev_drawn = (x,y) # Krita feeds the first x,y twice - in init-paint and in paint, here we do, too
         self.on_mouse_move(x,y)
-        if self.eraser: # we split eraser gestures into 1-second parts since sometimes you erase for a lot of time
-            # without ever putting down the eraser and at some point erase too much and you don't want to undo all
-            # that time spend erasing. with drawing it's less like it (undoing a part of the line seems less likely
-            # to be what you want and you naturally break drawing into separate "gestures" making sense "as a whole";
-            # if we do decide to split lines into parts for undo purposes, we should not doing when not layout.subpixel
-            # since this doesn't work with smoothing)
+        if layout.subpixel: # we split gestures into 1-second parts since sometimes you draw/erase for a lot of time
+            # without ever putting down the stylus and at some point make a mistake and you don't want to undo all
+            # that time spend drawing/erasing. 
+            # we don't do it when not layout.subpixel since it gets "weird" with smoothing
             self.set_history_timer()
 
     def set_history_timer(self):
@@ -1252,15 +1252,18 @@ class PenTool(Button):
 
         self.draw_line(list(zip(px,py)), smoothDist=0) # don't smooth, bspline_interp already did
 
-    def end_paint(self, nsamples=0, get_sample2polyline=False):
-        tinylib.brush_end_paint(self.brush, self.region)
-        self.update_bbox()
-
+    def _get_polyline(self):
         polyline_length = tinylib.brush_get_polyline_length(self.brush)
         self.polyline = np.zeros((polyline_length, 2), dtype=float, order='F')
         polyline_x = self.polyline[:, 0]
         polyline_y = self.polyline[:, 1]
         tinylib.brush_get_polyline(self.brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, 0)
+
+    def end_paint(self, nsamples=0, get_sample2polyline=False):
+        tinylib.brush_end_paint(self.brush, self.region)
+        self.update_bbox()
+
+        self._get_polyline()
 
         if get_sample2polyline:
             self.sample2polyline = np.empty(nsamples, dtype=np.int32)
@@ -1321,17 +1324,29 @@ class PenTool(Button):
 
         self.lines_array = None
 
+    def editable(self):
+        return not self.soft and not self.eraser # pen rather than pencil or eraser
+
     def save_history_item(self):
         if self.bbox[-1] >= 0:
             history_item = HistoryItemSet([self.lines_history_item, self.color_history_item]) if self.eraser else self.lines_history_item
             history_item.optimize(self.bbox)
-
-            if not self.soft and not self.eraser: # pen rather than pencil or eraser
+            if self.editable():
+                if self.brush: # if it's 0 then end_paint already got the polyline
+                    self._get_polyline()
                 history_item.editable_pen_line = EditablePenLine(self.polyline) # can be edited with TweezersTool
+                history_item.editable_pen_line.frame_without_line = self.frame_without_line
 
             history.append_item(history_item)
 
+    def save_frame_without_line(self):
+        if self.frame_without_line is None:
+            # copy the full surface before it's trimmed to just the bbox
+            self.frame_without_line = self.lines_history_item.saved_surface.copy()
+
     def on_history_timer(self):
+        if self.editable():
+            self.save_frame_without_line()
         self.save_history_item()
         self.new_history_item()
         self.set_history_timer()
