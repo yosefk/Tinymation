@@ -3863,10 +3863,12 @@ class MovieListArea(LayoutElemBase):
 
         play_icon_size = int(screen.get_width() * 0.15*0.14)
         self.play = scale_image(load_image('play-small.png'), play_icon_size, best_quality=True)
+        self.pause = scale_image(load_image('pause-small.png'), play_icon_size, best_quality=True)
         self.buttons = []
         self.changed_cursor = False
         self.selected_xrange = (-1,-1)
         self.redraw = False
+        self.opening_pos = None
 
     def thumbnail_widths(self): 
         widths = [im.get_width() for im in movie_list.images]
@@ -3921,8 +3923,9 @@ class MovieListArea(LayoutElemBase):
             surface.blit(image, (startx, 0))
             selected = pos == movie_list.clip_pos
             if not selected:
-                button_start = (startx + image.get_width()-self.play.get_width(), image.get_height()-self.play.get_height())
-                surface.blit(self.play, button_start)
+                icon = self.play if pos != self.opening_pos else self.pause
+                button_start = (startx + image.get_width()-icon.get_width(), image.get_height()-icon.get_height())
+                surface.blit(icon, button_start)
                 self.buttons.append((pos,button_start))
             else:
                 self.selected_xrange = (startx, startx + image.get_width())
@@ -3947,7 +3950,10 @@ class MovieListArea(LayoutElemBase):
         for pos,(startx,starty) in self.buttons:
             if x>startx and y>starty and x<startx+self.play.get_height():
                 movie_list.opening = True
+                self.opening_pos = pos
+                self.draw()
                 movie_list.open_clip(pos)
+                self.opening_pos = None
                 movie_list.opening = False
                 return True
     def in_selected_xrange(self,x):
