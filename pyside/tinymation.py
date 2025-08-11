@@ -1088,7 +1088,7 @@ class Button(LayoutElemBase):
         return alpha > 0
 
 locked_image = load_image('lock-mask.png')
-invisible_image = load_image('eye_shut.png')
+invisible_image = load_image('invisible-mask.png')
 def curr_layer_locked():
     effectively_locked = movie.curr_layer().locked or not movie.curr_layer().visible
     if effectively_locked: # invisible layers are effectively locked but we show it differently
