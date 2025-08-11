@@ -3764,16 +3764,16 @@ class LayersArea(LayoutElemBase):
             movie.seek_layer(new_pos)
 
 class ProgressBar:
+    todo_image = scale_image(load_image('progress-todo.png'), screen.get_width() * 0.4, best_quality=True)
+    done_image = scale_image(load_image('progress-done.png'), screen.get_width() * 0.4, best_quality=True)
     def __init__(self, title):
         self.title = title
         self.done = 0
         self.total = 1
-        horz_margin = 0.32
-        vert_margin = 0.47
-        self.inner_rect = scale_rect((horz_margin, vert_margin, 1-horz_margin*2, 1-vert_margin*2))
-        left, bottom, width, height = self.inner_rect
-        margin = WIDTH
-        self.outer_rect = (left-margin, bottom-margin, width+margin*2, height+margin*2)
+        cx, cy = screen.get_width()//2, screen.get_height()//2
+        w, h = ProgressBar.todo_image.get_size()
+        self.rect = (cx-w//2, cy-h//2, w, h)
+        self.bg = screen.subsurface(self.rect).copy()
         self.draw()
         widget.setEnabled(False) # this works better than processEvents(QEventLoop.ExcludeUserInputEvents)
         # which queues the events and then you get them after the progress bar rendering is done
@@ -3789,16 +3789,12 @@ class ProgressBar:
         self.total = total
         self.draw()
     def draw(self):
-        surf.rect(screen, UNUSED, self.outer_rect)
-        surf.rect(screen, BACKGROUND, self.inner_rect)
-        left, bottom, full_width, height = self.inner_rect
-        done_width = min(full_width, int(full_width * (self.done/max(1,self.total))))
-        surf.rect(screen, PROGRESS, (left, bottom, done_width, height))
-
-        # FIXME
-#        text_surface = font.render(self.title, True, UNUSED)
-#        pos = ((full_width-text_surface.get_width())/2+left, (height-text_surface.get_height())/2+bottom)
-#        screen.blit(text_surface, pos)
+        sub = screen.subsurface(self.rect)
+        sub.blit(self.bg)
+        done_rect = (0, 0, round(self.rect[2]*(self.done/self.total)), self.rect[3])
+        sub.blit(ProgressBar.done_image.subsurface(done_rect))
+        todo_rect = (done_rect[2], 0, self.rect[2]-done_rect[2], self.rect[3])
+        sub.blit(ProgressBar.todo_image.subsurface(todo_rect), (done_rect[2], 0))
 
         widget.redrawScreen()
         QCoreApplication.processEvents()
