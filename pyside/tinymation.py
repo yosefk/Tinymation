@@ -987,8 +987,13 @@ class HistoryItem(HistoryItemBase):
             self.minx, self.maxx, self.miny, self.maxy = [int(c) for c in brect]
 
         # TODO: test that this actually reduces memory consumption
-        self.saved_surface = self.saved_surface.subsurface(self._subsurface_bbox()).copy()
-        self.optimized = True
+        try:
+            self.saved_surface = self.saved_surface.subsurface(self._subsurface_bbox()).copy()
+            self.optimized = True
+        except:
+            import traceback
+            traceback.print_exc()
+            print(f'WARNING: failed to optimize a history item {bbox=} {self._subsurface_bbox()=} {self.saved_surface.get_size()=}')
 
     def __str__(self):
         return f'HistoryItem(pos={self.pos}, rect=({self.minx}, {self.miny}, {self.maxx}, {self.maxy}))'
@@ -1402,13 +1407,14 @@ class ColorModifyingTool:
 class MarkerTool(PenTool,ColorModifyingTool):
     last_color_id = NEUTRAL_COLOR_ID
     @staticmethod
-    def choose_last_color():
-        set_tool(palette.marker_tool(MarkerTool.last_color_id))
+    def choose_color(color_id):
+        set_tool(palette.marker_tool(color_id))
     def __init__(self, color_id):
         PenTool.__init__(self, soft=True, width=MARKER_WIDTH, zoom_changes_pixel_width=True, color_id=color_id)
     def on_mouse_up(self,*args):
         PenTool.on_mouse_up(self,*args)
-        MarkerTool.last_color_id = self.color_id
+        if self.color_id != NEUTRAL_COLOR_ID:
+            MarkerTool.last_color_id = self.color_id
     def modify(self):
         return self.do_modify()
 
@@ -1820,8 +1826,8 @@ class ChangeColorHistoryItem(HistoryItemBase):
 class PaintBucketTool(Button,ColorModifyingTool):
     last_color_id = NEUTRAL_COLOR_ID
     @staticmethod
-    def choose_last_color():
-        set_tool(palette.bucket_tool(PaintBucketTool.last_color_id))
+    def choose_color(color_id):
+        set_tool(palette.bucket_tool(color_id))
 
     def draw(self,*args):
         Button.draw(self,*args)
@@ -1856,7 +1862,8 @@ class PaintBucketTool(Button,ColorModifyingTool):
 
             layout.drawing_area().draw_region(bbox)
 
-        PaintBucketTool.last_color_id = self.color_id
+        if self.color_id != NEUTRAL_COLOR_ID:
+            PaintBucketTool.last_color_id = self.color_id
         
     def on_mouse_down(self, x, y):
         if curr_layer_locked():
@@ -4731,7 +4738,11 @@ def help_screen():
 
 def choose_last_color():
     Tool = {PAINT_BUCKET_COLORING:PaintBucketTool, MARKER_COLORING:MarkerTool}[layout.color_mode]
-    Tool.choose_last_color()
+    Tool.choose_color(Tool.last_color_id)
+
+def choose_neutral_color():
+    Tool = {PAINT_BUCKET_COLORING:PaintBucketTool, MARKER_COLORING:MarkerTool}[layout.color_mode]
+    Tool.choose_color(NEUTRAL_COLOR_ID)
 
 FUNCTIONS = {
     'insert-frame': (insert_frame, '=+'),
@@ -4745,6 +4756,7 @@ FUNCTIONS = {
     'toggle-layer-lock': (toggle_layer_lock, 'lL'),
     'zoom-to-film-res': (zoom_to_film_res, '1'),
     'last-paint-bucket': (choose_last_color, 'kKcC'),
+    'neutral-color': (choose_neutral_color, 'dD'),
 }
 
 tool_change = 0

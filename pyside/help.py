@@ -13,9 +13,9 @@ icons = [
     ('eraser-tool', -90, 32),
     ('water-tool', 0, 30),
     ('paint_bucket', 0, 60),
-    ('splash-1', 0, 40),
-    ('splash-14', 0, 40),
-    ('splash-11', 0, 40),
+    ('bucket-tool', 0, 40),
+    ('marker', 0, 60),
+    ('marker-tool', 0, 40),
     ('hold_yellow', 0, 25),
     ('no_hold', 0, 45),
     ]
@@ -60,11 +60,11 @@ You can similarly <b>Delete</b> the selected movie, frame or layer %(garbage)s. 
   <li><tt>W</tt> - a smaller eraser, a key to the left of E</li> 
   <li><tt>R</tt> - a bigger eraser, a key to the right of E</li>
 </ul>
-<li><tt>D</tt> - selects the water bucket like the water <b>drops</b> button %(water_tool)s to <b>delete</b> color in closed shapes</li>
-<li><tt>C</tt> or <tt>K</tt> - the paint bu<b>ck</b>et %(paint_bucket)s with the last used <b>color</b></li>
+<li><tt>C</tt> or <tt>K</tt> - the paint bu<b>ck</b>et %(paint_bucket)s (or marker %(marker)s - see Ctrl-M) with the last used <b>color</b></li>
 <ul>
-<li><tt>Shift-Click</tt> on a color splash icon %(splash_1)s %(splash_14)s %(splash_11)s to change its color (each movie keeps its own palette)</li>
+<li><tt>Shift-Click</tt> on a color tube icon %(bucket_tool)s or a marker icon %(marker_tool)s to change its color (each movie keeps its own palette)</li>
 </ul>
+<li><tt>D</tt> - selects the water bucket like the water <b>drops</b> button %(water_tool)s does, to <b>delete</b> color in closed shapes. In marker mode, selects the marker with the <b>default</b> pen color</li>
 <li><tt>L</tt> - <b>Lock %(locked)s</b> / unlock %(unlocked)s the current layer. Locking shows "the real <b>look</b>" of <i>all</i> layers (lower & upper layers no longer tinted in blue/orange)</li>
 </ul>
 <li><tt>Z</tt> - <b>Zoom</b> %(zoom_tool)s around the clicked point (drag up to zoom in/down to zoom out)</li>
@@ -87,10 +87,11 @@ You can similarly <b>Delete</b> the selected movie, frame or layer %(garbage)s. 
 <li>"Advanced" shortcuts enabled by default (no need for Ctrl-A):</li>
 <ul>
 <li><tt>Ctrl-C/X/V</tt> - <b>Copy/Cut/Paste</b> the drawing (current frame & layer.) Helps move stuff around when students draw into the wrong frames. You can paste <i>into</i> (but not <i>from</i>) other programs - Paint/Krita/...</li>
-<li><tt>Ctrl-R</tt> - <b>Rotate</b> the movie (from 1920x1080 to 1080x1920 or back.) Works at any time (though you usually decide up front...)
-<li><tt>Ctrl-N</tt> - <b>Name</b> the movie's folder (by default, named by the creation date)
+<li><tt>Ctrl-M</tt> - switch to <b>markers</b> %(marker_tool)s or back to paint tubes/buckets %(bucket_tool)s %(paint_bucket)s. Markers color lines; hidden by default since for young beginners, best to animate first and color lines at the end, if at all</li>
+<li><tt>Ctrl-R</tt> - <b>Rotate</b> the movie (from 1920x1080 to 1080x1920 or back.) Works at any time (though you usually decide up front...)</li>
+<li><tt>Ctrl-N</tt> - <b>Name</b> the movie's folder (by default, named by the creation date)</li>
 <li><tt>Ctrl-E</tt> - <b>Export</b> the movie (into MP4 & GIF - or PNG for still drawings), and show the exported files in a file viewer. File appear <i>near</i> the movie folder, sharing its name. <i>Inside</i> the movie folder, a transparent PNG sequence appears (frame0000.png, frame0001.png...) which you can import into Krita/Photoshop/...</li>
-<li><tt>Ctrl-O</tt> - <b>Open</b> a "main" folder to put movies into. Tinymation shows all the movies in a folder - Ctrl-E shows this folder; Ctrl-O lets you open another one. Useful to open a student's folderyou've copied, or to create a separate folder for each of several people using a computer</li>
+<li><tt>Ctrl-O</tt> - <b>Open</b> a "main" folder to put movies into. Tinymation shows all the movies in a folder - Ctrl-E shows this folder; Ctrl-O lets you open another one. Useful to open a student's folder you've copied, or to create a separate folder for each of several people using a computer</li>
 <li><tt>Ctrl-2/3/4</tt> - <b>Switch to drawing / layers / animation (default) layout</b>. Ctrl-3 hides the timeline; Ctrl-2 also hides the layers. Useful to avoid distractions in first beginners' lessons</li>
 </ul>
 </html>

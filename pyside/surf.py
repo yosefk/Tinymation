@@ -80,7 +80,7 @@ class Surface:
             assert color is None
             assert channels == 4
             assert size_or_data.strides[0] == 4
-            assert size_or_data.strides[1] >= w * 4
+            assert size_or_data.strides[1] >= w * 4, f'{size_or_data.shape=} {size_or_data.strides=}'
             assert size_or_data.strides[2] == 1
 
     def get_width(self):
