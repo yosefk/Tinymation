@@ -271,6 +271,7 @@ class MovieData:
             holds = clip['hold']
             visible = clip.get('layer_visible', [True]*len(layer_ids))
             locked = clip.get('layer_locked', [False]*len(layer_ids))
+            lit = clip.get('layer_lit', [True]*len(layer_ids))
 
             res.set_resolution(movie_width, movie_height)
 
@@ -287,6 +288,7 @@ class MovieData:
                 layer = Layer(frames, dir, layer_id)
                 layer.visible = visible[layer_index]
                 layer.locked = locked[layer_index]
+                layer.lit = lit[layer_index]
                 self.layers.append(layer)
 
             if read_pixels:
@@ -340,6 +342,7 @@ class MovieData:
             'layer_order':[layer.id for layer in self.layers],
             'layer_visible':[layer.visible for layer in self.layers],
             'layer_locked':[layer.locked for layer in self.layers],
+            'layer_lit':[layer.lit for layer in self.layers],
             'hold':[[frame.hold for frame in layer.frames] for layer in self.layers],
             'on_light_table':layout.timeline_area().on_light_table,
             'zoom':da.zoom,
@@ -845,6 +848,7 @@ blank_page_cursor = load_cursor('sheets.png', hot_spot=(0.5, 0.5))
 garbage_bin_cursor = load_cursor('garbage.png', hot_spot=(0.5, 0.5))
 zoom_cursor = (load_cursor('zoom.png', hot_spot=(0.75, 0.5), size=int(CURSOR_SIZE*1.5))[0], load_image('zoom-tool.png'))
 finger_cursor = load_cursor('finger.png', size=int(CURSOR_SIZE*0.75), hot_spot=(0.25, 0))
+eye_dropper_cursor = load_cursor('eye-dropper.png', min_alpha=255, hot_spot=(0,1))
 
 # for locked screen
 empty_cursor = surf2cursor(Surface((10,10)), 0, 0)
@@ -1822,6 +1826,26 @@ class ChangeColorHistoryItem(HistoryItemBase):
         return ChangeColorHistoryItem(self.color_id, old_color)
     def __str__(self):
         return f'ChangeColorHistoryItem({self.color_id}, {self.new_color})'
+
+class EyeDropperTool(Button):
+    def __init__(self):
+        Button.__init__(self)
+        self.redraw = False
+    def on_mouse_down(self,x,y):
+        x, y = layout.drawing_area().xy2frame(x,y)
+        x, y = round(x), round(y)
+        color = movie.curr_frame().surf_by_id('color')
+        rgba = color.get_at((x,y))
+        color_id = palette.bucket_color_to_id(rgba)
+        if color_id is not None: # this is one of the palette colors
+            PaintBucketTool.choose_color(color_id)
+        elif shift_is_pressed(): # not one of the palette colors - the user is asking to change the last used palette color
+            last_color_id = PaintBucketTool.last_color_id
+            if last_color_id != NEUTRAL_COLOR_ID:
+                old_color = palette.color(last_color_id)
+                palette.change_color(last_color_id, rgba)
+                history.append_item(ChangeColorHistoryItem(last_color_id, old_color))
+                PaintBucketTool.choose_color(last_color_id)
 
 class PaintBucketTool(Button,ColorModifyingTool):
     last_color_id = NEUTRAL_COLOR_ID
@@ -4717,6 +4741,7 @@ TOOLS = {
     'eraser-big': Tool(PenTool(eraser=True, soft=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
     'tweezers': Tool(TweezersTool(), tweezers_cursor, 'mM'),
     'needle': Tool(NeedleTool(), flashlight_cursor, 'nN'), # needle
+    'eye-dropper': Tool(EyeDropperTool(), eye_dropper_cursor, 'iIpP'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
     # meaning, when it's used thru a keyboard shortcut, a frame is inserted/removed
     # without any more ceremony. but when it's used thru a button, the user needs to
@@ -4825,6 +4850,14 @@ class Palette:
         self.colors = colors
 
         self.init_cursors()
+        
+    def bucket_color_to_id(self, rgba):
+        if rgba[3] == 0:
+            return NEUTRAL_COLOR_ID
+        for row in range(self.rows):
+            for col in range(self.columns):
+                if self.colors[row][col] == rgba:
+                    return (row, col)
 
     def save(self, filename):
         pix = 20

@@ -16,6 +16,7 @@ icons = [
     ('bucket-tool', 0, 40),
     ('marker', 0, 60),
     ('marker-tool', 0, 40),
+    ('eye-dropper', 0, 40),
     ('hold_yellow', 0, 25),
     ('no_hold', 0, 45),
     ]
@@ -65,6 +66,10 @@ You can similarly <b>Delete</b> the selected movie, frame or layer %(garbage)s. 
 <li><tt>Shift-Click</tt> on a color tube icon %(bucket_tool)s or a marker icon %(marker_tool)s to change its color (each movie keeps its own palette)</li>
 </ul>
 <li><tt>D</tt> - selects the water bucket like the water <b>drops</b> button %(water_tool)s does, to <b>delete</b> color in closed shapes. In marker mode, selects the marker with the <b>default</b> pen color</li>
+<li><tt>I</tt> or <tt>P</tt> - selects the eye dropper %(eye_dropper)s which chooses the paint bucket (never the marker!) of the clicked pixel fill color (not line color!) Does nothing if the color is no longer in the palette</li>
+<ul>
+<li>Holding <tt>Shift</tt> when clicking with the eye dropper will change the last used palette color to the clicked pixel's color if the color is no longer in the palette</li>
+</ul>
 <li><tt>L</tt> - <b>Lock %(locked)s</b> / unlock %(unlocked)s the current layer. Locking shows "the real <b>look</b>" of <i>all</i> layers (lower & upper layers no longer tinted in blue/orange)</li>
 </ul>
 <li><tt>Z</tt> - <b>Zoom</b> %(zoom_tool)s around the clicked point (drag up to zoom in/down to zoom out)</li>
