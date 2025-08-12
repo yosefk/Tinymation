@@ -5327,9 +5327,8 @@ def patching_tool_selected():
 needle_cursor_selected = False
 
 def process_keyup_event(event):
-    ctrl = event.modifiers() & Qt.ControlModifier
     global needle_cursor_selected
-    if not ctrl and needle_cursor_selected:
+    if needle_cursor_selected:
         try_set_cursor(layout.full_tool.cursor[0])
         needle_cursor_selected = False
 
@@ -5346,12 +5345,6 @@ def run_repl():
     window.show()
     widget.repl = window # keep a reference
 
-    # note that this only helps "partially" - we lose the ability to set cursors
-    # after _closing_ the REPL window for some reason. it works as long as it's open...
-    global needle_cursor_selected
-    try_set_cursor(layout.full_tool.cursor[0])
-    needle_cursor_selected = False
-
 # TODO: proper test for modifiers; less use of Ctrl
 def process_keydown_event(event):
     if event.key() in [ord('/'),ord('?'),Qt.Key_F1]:
@@ -5361,10 +5354,17 @@ def process_keydown_event(event):
     ctrl = event.modifiers() & Qt.ControlModifier
     shift = event.modifiers() & Qt.ShiftModifier
 
+    # when Ctrl is pressed and we're using a patching tool, show the needle cursor
     global needle_cursor_selected
-    if ctrl and not needle_cursor_selected and patching_tool_selected():
+    if event.key() == Qt.Key_Control and not needle_cursor_selected and patching_tool_selected():
         try_set_cursor(needle_cursor[0])
         needle_cursor_selected = True
+    
+    # when another key is pressed with (after) Ctrl is pressed, the user must not mean to patch,
+    # so remove the needle cursor
+    if ctrl and event.key() != Qt.Key_Control and needle_cursor_selected:
+        try_set_cursor(layout.full_tool.cursor[0])
+        needle_cursor_selected = False
 
     # Like Escape, Undo/Redo and Delete History are always available thru the keyboard [and have no other way to access them]
     if event.key() == Qt.Key_Space:
