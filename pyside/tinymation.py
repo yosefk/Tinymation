@@ -1143,7 +1143,8 @@ class PenTool(Button):
         self.lines_array = None
         self.rect = np.zeros(4, dtype=np.int32)
         self.region = arr_base_ptr(self.rect)
-        self.bbox = None
+        self.bbox = (1000000, 1000000, -1, -1)
+        self.short_term_bbox = (1000000, 1000000, -1, -1)
         self.history_time_period = 1000
         self.timer = None
         self.patching = False
@@ -2350,16 +2351,7 @@ def try_to_close_the_last_editable_line(x,y):
     if not last_item or not last_item.editable_pen_line or last_item.editable_pen_line.closed or len(last_item.editable_pen_line.points) < 8:
         return False
 
-    def dist(point):
-        px, py = point
-        return math.sqrt((px-x)**2 + (py-y)**2)
-
-    hole_radius = math.sqrt(HOLE_REGION_W**2 + HOLE_REGION_H**2)/2
-
     line = last_item.editable_pen_line
-    if dist(line.points[0]) > hole_radius or dist(line.points[-1]) > hole_radius:
-        return False
-
     new_line = EditablePenLine(close_polyline(line.points), closed=True)
     redraw_line(new_line, last_item, line.frame_without_line)
     return True
@@ -2378,10 +2370,6 @@ class NeedleTool(Button):
         x, y = round(x), round(y)
 
         try_to_patch = ctrl_is_pressed()
-
-        if try_to_patch and try_to_close_the_last_editable_line(x,y):
-            return
-
         frame = movie.edit_curr_frame() if try_to_patch else movie.curr_frame()
 
         color = surf.pixels3d(frame.surf_by_id('color'))
@@ -4590,6 +4578,11 @@ def insert_frame():
     movie.insert_frame()
     history.append_item(InsertFrameHistoryItem())
 
+def insert_held_frame():
+    movie.insert_frame()
+    movie.toggle_hold()
+    history.append_item(HistoryItemSet([ToggleHoldHistoryItem(), InsertFrameHistoryItem()]))
+
 def insert_layer():
     movie.insert_layer()
     history.append_item(InsertLayerHistoryItem())
@@ -4739,7 +4732,7 @@ TOOLS = {
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
     'eraser-big': Tool(PenTool(eraser=True, soft=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
-    'tweezers': Tool(TweezersTool(), tweezers_cursor, 'mM'),
+    'tweezers': Tool(TweezersTool(), tweezers_cursor, 'tT'),
     'needle': Tool(NeedleTool(), flashlight_cursor, 'nN'), # needle
     'eye-dropper': Tool(EyeDropperTool(), eye_dropper_cursor, 'iIpP'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
@@ -4771,6 +4764,7 @@ def choose_neutral_color():
 
 FUNCTIONS = {
     'insert-frame': (insert_frame, '=+'),
+    'insert-held-frame': (insert_held_frame, [Qt.Key_F5]),
     'remove-frame': (remove_frame, '-_'),
     'next-frame': (next_frame, ['>','.',Qt.Key_Right]),
     'prev-frame': (prev_frame, ['<',',',Qt.Key_Left]),
