@@ -7,6 +7,7 @@ def cmd(c):
         raise Exception(f'`{c}` failed with status {status}')
 
 cmd('pyinstaller --exclude viztracer --name Tinymation --windowed --icon assets/icon.ico tinymation.py')
+cmd('cp -a ../gifski/gifski-win.exe dist/Tinymation/_internal')
 cmd('cp -a assets dist/Tinymation')
 cmd('cp -a tinylib.dll dist/Tinymation')
 

@@ -1,6 +1,12 @@
 import numpy as np
 import sys
 import os
+
+os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
+os.environ["QT_SCALE_FACTOR"] = "1"
+os.environ["QT_SCREEN_SCALE_FACTORS"] = "1"
+os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
+
 from PySide6.QtGui import QImage
 
 on_windows = os.name == 'nt'
@@ -445,6 +451,15 @@ def transpose_xy(image):
     return np.transpose(image, [1,0,2]) if len(image.shape)==3 else np.transpose(image, [1,0])
 
 import cv2
+import subprocess
+
+def gifski_path():
+    dirs_to_check = ['../gifski', '_internal']
+    binary = 'gifski-win.exe' if on_windows else 'gifski-linux'
+    for d in dirs_to_check:
+        f = os.path.join(d, binary)
+        if os.path.exists(f):
+            return os.path.realpath(f)
 
 def interruptible_export(movie):
     check_if_interrupted()
@@ -508,9 +523,10 @@ def interruptible_export(movie):
         # that can be converted into any format, including transparent GIF/WebP/APNG. someone who just wants to get a GIF to upload is probably better
         # served by a WYSIWYG non-transparent GIF with the same background color they see when viewing the clip in Tinymation
  
-        # FIXME proper path
-        gifski = '..\\gifski\\gifski-win.exe' if on_windows else '../gifski/gifski-linux'
-        os.system(f'{gifski} --width 1920 -r {FRAME_RATE} --quiet {movie.png_wildcard()+opaque_ext} --output {movie.gif_path()}')
+        cmd = f'{gifski_path()} --width {res.IWIDTH} -r {FRAME_RATE} --quiet {movie.png_wildcard()+opaque_ext} --output {movie.gif_path()}'
+        doneproc = subprocess.run(cmd, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        if doneproc.returncode:
+            print(f'`{cmd}` failed with status {doneproc.returncode}')
  
     finally:
         # remove the non-transparent PNGs created for GIF generation
@@ -605,7 +621,6 @@ def format_now(): return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 print('>>> STARTING',format_now())
 
 
-import subprocess
 import math
 import io
 import shutil
@@ -679,7 +694,8 @@ create_lock_file()
 #screen = pg.display.set_mode((350, 800), pg.RESIZABLE)
 #screen = pg.display.set_mode((1200, 350), pg.RESIZABLE)
 #screen = pg.display.set_mode((0, 0), pg.FULLSCREEN)
-screen = Surface((1920, 1200), color=BACKGROUND)#pg.display.set_mode((0, 0), pg.FULLSCREEN)
+screenRect = QGuiApplication.primaryScreen().geometry()
+screen = Surface((screenRect.width(), screenRect.height()), color=BACKGROUND)#pg.display.set_mode((0, 0), pg.FULLSCREEN)
 #pg.display.flip()
 #pg.display.set_caption("Tinymation")
 
@@ -5099,6 +5115,8 @@ def load_clips_dir():
     movie_dir, is_new_dir = default_clip_dir()
     global movie
     movie = Movie(movie_dir) if is_new_dir else open_movie_with_progress_bar(movie_dir)
+    if is_new_dir:
+        movie.render_and_save_current_frame() # for movie list...
 
     init_layout()
     movie.restore_viewing_params()
