@@ -585,10 +585,13 @@ import io
 import shutil
 
 from PySide6.QtWidgets import QApplication, QWidget, QFileDialog, QLineEdit, QVBoxLayout, QPushButton, QHBoxLayout, QDialog, QMessageBox, QColorDialog
-from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor, QPixmap
+from PySide6.QtGui import QImage, QPainter, QPen, QColor, QGuiApplication, QCursor, QPixmap, QIcon
 from PySide6.QtCore import Qt, QPoint, QEvent, QTimer, QCoreApplication, QEventLoop, QSize
 
 app = QApplication(sys.argv)
+if on_windows:
+    app_icon = QIcon(os.path.join(ASSETS, 'icon.ico'))
+    app.setWindowIcon(app_icon)
 
 import psutil
 
@@ -696,7 +699,8 @@ def tdiff():
     prevts = now
     return diff
 
-from trace import trace
+import functrace
+trace = functrace.trace
 
 # interface with tinylib
 
@@ -5547,6 +5551,8 @@ class TinymationWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
+        if on_windows:
+            self.setWindowIcon(app_icon)
 
     def initUI(self):
         self.setWindowTitle('Tinymation')

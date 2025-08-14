@@ -1,4 +1,8 @@
-import viztracer
+try:
+    import viztracer
+    has_trace = True
+except:
+    has_trace = False
 import collections
 import shutil
 import time
@@ -17,7 +21,8 @@ class EventData:
     def average(self):
         return self.sum_total / self.sum_calls
 
-class Trace:
+if has_trace:
+  class Trace:
     '''collect trace data per event type in start()/stop(); save the
     trace of the slowest event per type in save()'''
     def __init__(self):
@@ -142,6 +147,21 @@ class Trace:
             # prints "Loading finish", apparently from C code, despite verbose=0
             if data.tracer is not None:
                 data.tracer.save(os.path.join(dir, event+'.json'), verbose=0)
+
+else: # no viztracer
+  class Trace:
+    def __init__(self): pass
+    def clear(self): pass
+    def start(self, event):
+        class TraceStopper:
+            def __enter__(s): pass
+            def __exit__(s, *args): pass
+        return TraceStopper()
+    def stop(self): pass
+    def context(self, context): pass
+    def event(self, event): pass
+    def class_context(self, obj): pass 
+    def save(self, dir): pass
 
 trace = Trace()
 
