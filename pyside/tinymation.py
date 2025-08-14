@@ -572,6 +572,32 @@ def set_wd(wd):
     
 set_wd(os.path.join(MY_DOCUMENTS if MY_DOCUMENTS else '.', 'Tinymation'))
 
+import logging
+from logging.handlers import RotatingFileHandler
+
+# allegedly there's no function like logger.warning() but one that doesn't add a newline,
+# so we need to strip it instead:
+# Create a custom formatter that doesn't add a newline
+class NoNewlineFormatter(logging.Formatter):
+    def format(self, record): return super().format(record).rstrip('\n')
+
+logger = logging.getLogger('TinymationLogger')
+loggerHandler = RotatingFileHandler(os.path.join(WD,'_debug_.txt'), maxBytes=1024**2, backupCount=1) # 1MB a user might be willing to attach to a bug report maybe...
+loggerHandler.terminator = ''
+logger.addHandler(loggerHandler) # 1MB a user might be willing to attach to a bug report maybe...
+
+class LogOutput:
+    def __init__(self, stream): self.stream = stream
+    def write(self, text):
+        logger.warning(text)
+        if self.stream is not None:
+            self.stream.write(text)
+    def flush(self):
+        if self.stream is not None:
+            self.stream.flush()
+
+sys.stdout = LogOutput(sys.stdout)
+sys.stderr = LogOutput(sys.stderr)
 
 import datetime, time
 def format_now(): return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
