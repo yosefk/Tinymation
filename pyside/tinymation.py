@@ -18,6 +18,7 @@ ASSETS = 'assets'
 from concurrent.futures import ThreadPoolExecutor
 executor = ThreadPoolExecutor(max_workers=1)
 
+import traceback
 import signal
 import uuid
 import json
@@ -545,7 +546,6 @@ def export(movie):
         print('INTERRUPTED')
         pass
     except:
-        import traceback
         traceback.print_exc()
 
 def get_last_modified(filenames):
@@ -1041,7 +1041,6 @@ class HistoryItem(HistoryItemBase):
             self.saved_surface = self.saved_surface.subsurface(self._subsurface_bbox()).copy()
             self.optimized = True
         except:
-            import traceback
             traceback.print_exc()
             print(f'WARNING: failed to optimize a history item {bbox=} {self._subsurface_bbox()=} {self.saved_surface.get_size()=}')
 
@@ -1470,6 +1469,15 @@ class MarkerTool(PenTool,ColorModifyingTool):
         return self.do_modify()
 
 def polyline_corners(points, curvature_threshold=1, peak_distance=15):
+    try:
+        return polyline_corners_impl(points, curvature_threshold, peak_distance)
+    except:
+        print('polyline_corners - exception:')
+        traceback.print_exc()
+        print('failed to find corners for',points)
+        return np.zeros(len(points), dtype=np.uint8)
+
+def polyline_corners_impl(points, curvature_threshold, peak_distance):
     # Fit a B-spline to the polyline
     points = np.column_stack([points[:,0],points[:,1]]) # array layout correction
     tck, u = splprep(points, smoothing=0)
@@ -2558,7 +2566,6 @@ class Layout:
                 try:
                     elem.draw()
                 except:
-                    import traceback
                     traceback.print_exc()
                     surf.rect(screen, (255,0,0), elem.rect, 3, 3)
                     continue
@@ -2741,7 +2748,7 @@ class DrawingArea(LayoutElemBase):
             self.lmargin = xmargin
             self.rmargin = xmargin
 
-        w, h = ((self.iwidth+self.lmargin+self.rmargin + self.iheight+self.ymargin*2)//2,)*2
+        w, h = (round((self.iwidth+self.lmargin+self.rmargin + self.iheight+self.ymargin*2)*0.6),)*2
         self.zoom_surface = Surface((w,h ), color=([(a+b)//2 for a,b in zip(MARGIN[:3], BACKGROUND[:3])]))
         rgb = surf.pixels3d(self.zoom_surface)
         alpha = surf.pixels_alpha(self.zoom_surface)

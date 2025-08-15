@@ -786,6 +786,12 @@ void Brush::initPaint(const SamplePoint& p)
     _prevP = p;
     _history.clear();
     _distHist.clear();
+    //this avoids occasional artifacts when smoothing "suddenly" kicks in at history.size()>3
+    //and the line goes back/sideways and takes time to recover.
+    for(int i=0; i<2; ++i) {
+        _history.push_back(p);
+        _distHist.push_back(0);
+    }
 }
 
 void Brush::paint(SamplePoint& p, double zoomCoeff)
@@ -803,7 +809,9 @@ void Brush::paint(SamplePoint& p, double zoomCoeff)
         double x=0, y=0;
 
         if(_history.size() > 3) {
-            //we always use "smoothing distance"; Krita has this as a parameter
+            //we always use "smoothing distance"; Krita has this as a parameter.
+            //Krita also supports interpolating between min and max smoothing distance by drawing speed; not sure
+            //if its UI exposes the option to set a minimum different from the maximum
             double sigma = _smoothDist * zoomCoeff / 3.0;
 
             double gaussianWeight = 1 / (sqrt(2 * M_PI) * sigma);
@@ -888,7 +896,7 @@ void Brush::paint(SamplePoint& p, double zoomCoeff)
                 }
             }
             else {
-                //printf("paintBezierSegment %f %f -> %f %f\n", _olderP.pos.x, _olderP.pos.y, _prevP.pos.x, _prevP.pos.y);
+                //printf("paintBezierSegment %f %f -> %f %f (%f %f, %f %f)\n", _olderP.pos.x, _olderP.pos.y, _prevP.pos.x, _prevP.pos.y, _prevTangent.x, _prevTangent.y, newTangent.x, newTangent.y);
                 paintBezierSegment(_olderP, _prevP, _prevTangent, newTangent);
             }
             _prevTangent = newTangent;
