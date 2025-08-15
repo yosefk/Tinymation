@@ -872,9 +872,9 @@ def add_circle(image, radius, offset=(0,1), outline_color=(0,0,0,255)):
     result.blit(image, (radius-xoffset, 0))
     return result, (radius, yoffset)
 
-pen_cursor = load_cursor('pen.png', size=int(CURSOR_SIZE*1.3), hot_spot=(0.02,0.97))
+pen_cursor = load_cursor('pen.png', size=int(CURSOR_SIZE*1.3), hot_spot=(0,1))
 pen_cursor = (pen_cursor[0], load_image('pen-tool.png'))
-pencil_cursor = load_cursor('pencil.png', size=int(CURSOR_SIZE*1.3), hot_spot=(0.02,0.97))
+pencil_cursor = load_cursor('pencil.png', size=int(CURSOR_SIZE*1.3), hot_spot=(0,1))
 pencil_cursor = (pencil_cursor[0], load_image('pencil-tool.png'))
 tweezers_cursor = load_cursor('tweezers.png', size=int(CURSOR_SIZE*1.5), hot_spot=(0.03,0.97))
 tweezers_cursor = (tweezers_cursor[0], load_image('tweezers-tool.png'))
