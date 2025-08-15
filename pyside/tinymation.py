@@ -1815,9 +1815,11 @@ def flood_fill_color_based_on_mask_many_seeds(color_rgba, pen_mask, xs, ys, buck
     rect = np.zeros(4, dtype=np.int32)
     region = arr_base_ptr(rect)
 
-    assert len(xs) == len(ys)
-    assert xs.strides == (4,)
-    assert ys.strides == (4,)
+    assert len(xs) == len(ys), f'{len(xs)=} {len(ys)=}'
+    # for some reason we're seeing arrays of shape (1,) with the strides of (8,) which of course
+    # is meaningless given the size but fails the assertion absent the or
+    assert xs.strides == (4,) or xs.shape == (1,), f'{xs.strides=} {xs.shape=} {xs.dtype=}'
+    assert ys.strides == (4,) or ys.shape == (1,), f'{ys.strides=} {xs.shape=} {xs.dtype=}'
     x_ptr = arr_base_ptr(xs)
     y_ptr = arr_base_ptr(ys)
 
