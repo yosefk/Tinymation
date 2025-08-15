@@ -1497,7 +1497,7 @@ def polyline_corners_impl(points, curvature_threshold, peak_distance):
     tinylib.find_peaks(arr_base_ptr(peaks), arr_base_ptr(curvature), len(curvature), curvature_threshold, peak_distance)
     return peaks
 
-def smooth_polyline(closed, points, focus, prev_closest_to_focus_idx=-1, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, corner_stiffness=1, corner_vec=None):
+def smooth_polyline(closed, points, focus, prev_closest_to_focus_idx=-1, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, corner_stiffness=1, corner_vec=None, snap_to_endpoints_below_dist=5):
     xarr = points[:, 0]
     yarr = points[:, 1]
     
@@ -1514,7 +1514,7 @@ def smooth_polyline(closed, points, focus, prev_closest_to_focus_idx=-1, thresho
     closest_idx = tinylib.smooth_polyline(closed, len(xarr), *[arr_base_ptr(a) for a in [newx,newy,xarr,yarr]], focus[0], focus[1],
             arr_base_ptr(first_diff), arr_base_ptr(last_diff), prev_closest_to_focus_idx,
             arr_base_ptr(corner_vec), corner_stiffness,
-            threshold, smoothness, pull_strength, num_neighbors, max_endpoint_dist)
+            threshold, smoothness, pull_strength, num_neighbors, max_endpoint_dist, snap_to_endpoints_below_dist)
 
     return new_arr, first_diff[0], last_diff[0]+1, closest_idx
 
@@ -1638,7 +1638,7 @@ class TweezersTool(Button):
 
         new_points, first_diff, last_diff, closest_idx = smooth_polyline(closed, old_points, (cx,cy), self.prev_closest_to_focus_idx,
                                                                          threshold=dist_thresh, pull_strength=p, num_neighbors=neighbors, max_endpoint_dist=endpoint_dist,
-                                                                         corner_stiffness=min(1,1.7-p*2), corner_vec=self.corners)
+                                                                         corner_stiffness=min(1,1.7-p*2), corner_vec=self.corners, snap_to_endpoints_below_dist=10/drawing_area.zoom)
 
         if first_diff < 0:
             assert last_diff == len(old_points)+1

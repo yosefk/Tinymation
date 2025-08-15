@@ -325,7 +325,7 @@ int smooth_polyline(int closed, int npoints, double* new_x, double* new_y, const
                     const unsigned char* is_corner = nullptr, double corner_effect_strength = 0.5,
                     double threshold = 30.0, double smoothness = 0.6,
                     double pull_strength = 0.5, int num_neighbors = 1,
-                    double max_endpoint_dist = 30.0) {
+                    double max_endpoint_dist = 30.0, double snap_to_endpoints_below_dist = 5) {
     *first_diff = -1;
     *last_diff = npoints;
     if (npoints < 2) {
@@ -349,6 +349,18 @@ int smooth_polyline(int closed, int npoints, double* new_x, double* new_y, const
         //short closed curves "collapse into dots under high pressure" - limiting the threshold to affect a bit less than
         //half the curve (or a quarter to each side of the point) prevents this
         threshold = std::min(threshold, 0.8 * total_closed_perimeter/4);
+    }
+    else if(closest_idx != 0 && closest_idx != npoints-1) {
+        // if the point at closest_idx is close enough to an endpoint (according to the polyline distances), snap to that endpoint
+        // (set closest_idx to the endpoint index) and recompute polyline distances
+        if(polyline_dists[0] < snap_to_endpoints_below_dist) {
+            closest_idx = 0;
+            compute_polyline_distances(polyline_dists, npoints, segment_length, closest_idx, closed);
+        }
+        else if(polyline_dists[npoints-1] < snap_to_endpoints_below_dist) {
+            closest_idx = npoints-1;
+            compute_polyline_distances(polyline_dists, npoints, segment_length, closest_idx, closed);
+        }
     }
 
     // Compute distances from endpoints
