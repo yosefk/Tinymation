@@ -7,6 +7,8 @@ os.environ["QT_SCALE_FACTOR"] = "1"
 os.environ["QT_SCREEN_SCALE_FACTORS"] = "1"
 os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
 
+os.chdir(os.path.dirname(os.path.realpath(sys.argv[0])))
+
 from PySide6.QtGui import QImage
 
 on_windows = os.name == 'nt'
@@ -618,7 +620,7 @@ sys.stderr = LogOutput(sys.stderr)
 import datetime, time
 def format_now(): return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
-print('>>> STARTING',format_now())
+print('>>> STARTING',format_now(),os.getcwd())
 
 
 import math
