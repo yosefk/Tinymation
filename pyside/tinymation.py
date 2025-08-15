@@ -4863,8 +4863,6 @@ def color_image(s, rgba):
         pixels[:,:,ch] = (pixels[:,:,ch].astype(int)*rgba[ch])//255
     return sc
 
-import random
-
 PALETTE_ROWS = 11
 PALETTE_COLUMNS = 3
 
