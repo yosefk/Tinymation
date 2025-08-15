@@ -3294,14 +3294,14 @@ class TimelineArea(LayoutElemBase):
         for pos_dist in range(-len(self.factors),len(self.factors)+1):
             self.on_light_table[pos_dist] = False
         self.on_light_table[-1] = True
+
         # the order in which we traverse the masks matters, for one thing,
         # because we might cover the same position distance from movie.pos twice
         # due to wraparound, and we want to decide if it's covered as being
-        # "before" or "after" movie pos [it affects the mask color]
-        self.traversal_order = []
-        for pos_dist in range(1,len(self.factors)+1):
-            self.traversal_order.append(-pos_dist)
-            self.traversal_order.append(pos_dist)
+        # "before" or "after" movie pos [it affects the mask color].
+        # currently if it's covered twice we simply choose the "before" color
+        # (with other color schemes it might make sense to choose eg "the closest color")
+        self.traversal_order = [-pos_dist for pos_dist in range(1,len(self.factors)+1)] + [pos_dist for pos_dist in range(1,len(self.factors)+1)]
 
         self.loop_mode = False
 
