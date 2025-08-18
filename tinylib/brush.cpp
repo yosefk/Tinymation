@@ -1071,13 +1071,13 @@ void Brush::paintAt(const SamplePoint& p)
 
 //extern "C" API
 
-extern "C" Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double smoothDist, int dry, int erase, int softLines,
+extern "C" Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double highestPressureLineWidth, double smoothDist, int dry, int erase, int softLines,
                                    unsigned char* image, int width, int height, int xstride, int ystride, const int* paintWithinRegion)
 {
     Brush& brush = *new Brush;
     brush._smoothing = Smoothing::WEIGHTED;
     brush._lineWidth = lineWidth;
-    brush._highestPressureLineWidth = lineWidth*2;
+    brush._highestPressureLineWidth = highestPressureLineWidth;
     brush._smoothDist = smoothDist;
     brush._tailAggressiveness = 0; //TODO: for soft lines/pencil, might want to experiment with this parameter
     brush._softLines = softLines;

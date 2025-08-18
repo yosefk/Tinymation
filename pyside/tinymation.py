@@ -714,7 +714,8 @@ PROGRESS = (192-45, 255-25, 192-45)
 LAYERS_BELOW = (128,192,255)
 LAYERS_ABOVE = (255,192,0)
 WIDTH = 3 # the smallest width where you always have a pure pen color rendered along
-# the line path, making our naive flood fill work well...
+# the line path, making our naive flood fill work well... (NOTE: it's now actually 2.5,
+# we keep the 3 for various places where it still makes sense)
 MEDIUM_ERASER_WIDTH = 5*WIDTH
 BIG_ERASER_WIDTH = 20*WIDTH
 PAINT_BUCKET_WIDTH = 3*WIDTH
@@ -1175,13 +1176,14 @@ def find_nearest(array, center_x, center_y, value):
     return tuple(points[nearest_idx])
 
 class PenTool(Button):
-    def __init__(self, eraser=False, soft=False, width=WIDTH, zoom_changes_pixel_width=True, color_id=None):
+    def __init__(self, eraser=False, soft=False, width=WIDTH, maxPressureWidth=None, zoom_changes_pixel_width=True, color_id=None):
         Button.__init__(self)
         self.prev_drawn = None
         self.color = BACKGROUND if eraser else PEN
         self.eraser = eraser
         self.soft = soft
         self.width = width
+        self.maxPressureWidth = maxPressureWidth
         self.zoom_changes_pixel_width = zoom_changes_pixel_width
         self.circle_width = (width//2)*2
         self.smooth_dist = 40
@@ -1245,7 +1247,8 @@ class PenTool(Button):
             color_ptr, color_stride, color_width, color_height = color_c_params(color)
             ptr = color_ptr
         lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
-        self.brush = tinylib.brush_init_paint(x, y, time, pressure, lineWidth, smoothDist, dry,
+        maxPressureWidth = self.maxPressureWidth if self.maxPressureWidth is not None else lineWidth
+        self.brush = tinylib.brush_init_paint(x, y, time, pressure, lineWidth, maxPressureWidth, smoothDist, dry,
                 1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
         if self.color_id:
             tinylib.brush_set_rgb(self.brush, (ct.c_uint8*3)(*palette.color(self.color_id)[:3]))
@@ -1684,7 +1687,7 @@ class TweezersTool(Button):
         new_points = np.asfortranarray(np.concatenate((old_points[:first_diff], simplified_new_points_array, old_points[last_diff:])))
         assert len(self.corners) == len(new_points), f'{len(self.corners)=} {len(old_points)=} {first_diff=} {last_diff=} {len(simplified_new_points)=}'
 
-        affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), WIDTH*4)
+        affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), pen.maxPressureWidth+3)
 
         minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
         minx, miny = res.clip(minx, miny)
@@ -2292,7 +2295,8 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     history_item = HistoryItem('lines', bbox=(minx, miny, maxx, maxy))
 
     ptr, ystride, width, height = greyscale_c_params(lines)
-    brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, 2.5, 0, 0, 0, 0, ptr, width, height, 4, ystride, 0)
+    lineWidth = TOOLS['pen'].tool.width
+    brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, lineWidth, lineWidth, 0, 0, 0, 0, ptr, width, height, 4, ystride, 0)
     tinylib.brush_use_max_blending(brush)
 
     xarr = np.array(px, dtype=float)
@@ -2385,7 +2389,8 @@ def close_polyline(points):
     return np.array(filter_points_by_distance(np.concatenate((orig_points, new_points)), 0.1), dtype=float, order='F')
 
 def redraw_line(line, last_item, frame_without_line): 
-    affected_bbox = points_bbox(line.points, margin=WIDTH*4)
+    pen = TOOLS['pen'].tool
+    affected_bbox = points_bbox(line.points, margin=pen.maxPressureWidth+3)
 
     minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
     minx, miny = res.clip(minx, miny)
@@ -2400,7 +2405,6 @@ def redraw_line(line, last_item, frame_without_line):
 
     rgba_array(lines)[minx:maxx,miny:maxy] = rgba_array(frame_without_line)[minx:maxx,miny:maxy]
 
-    pen = TOOLS['pen'].tool
     pen.lines_array = surf.pixels_alpha(lines)
     pen.draw_line(line.points, smoothDist=0, closed=True)
     pen.lines_array = None
@@ -4793,7 +4797,7 @@ def zoom_to_film_res():
 
 TOOLS = {
     'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
-    'pen': Tool(PenTool(width=2.5, zoom_changes_pixel_width=False), pen_cursor, 'bB'),
+    'pen': Tool(PenTool(width=2.5, maxPressureWidth=2.5*2, zoom_changes_pixel_width=False), pen_cursor, 'bB'),
     'pencil': Tool(PenTool(soft=True, width=4, zoom_changes_pixel_width=False), pencil_cursor, 'sS'),
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
@@ -4828,6 +4832,22 @@ def choose_neutral_color():
     Tool = {PAINT_BUCKET_COLORING:PaintBucketTool, MARKER_COLORING:MarkerTool}[layout.color_mode]
     Tool.choose_color(NEUTRAL_COLOR_ID)
 
+def change_pen_width(direction):
+    pen = TOOLS['pen'].tool
+    if layout.tool is not pen:
+        return
+    step = 1./3
+    next_width = pen.width + direction*step 
+    if direction == -1 and next_width < 1:
+        return
+    if direction == 1 and next_width > 20:
+        return
+    pen.maxPressureWidth *= next_width/pen.width
+    pen.width = next_width
+
+def thicker_pen(): change_pen_width(1)
+def thinner_pen(): change_pen_width(-1)
+
 FUNCTIONS = {
     'insert-frame': (insert_frame, '=+'),
     'insert-held-frame': (insert_held_frame, [Qt.Key_F5]),
@@ -4842,6 +4862,8 @@ FUNCTIONS = {
     'zoom-to-film-res': (zoom_to_film_res, '1'),
     'last-paint-bucket': (choose_last_color, 'kKcC'),
     'neutral-color': (choose_neutral_color, 'dD'),
+    'thicker-pen': (thicker_pen, ']'),
+    'thinner-pen': (thinner_pen, '['),
 }
 
 tool_change = 0

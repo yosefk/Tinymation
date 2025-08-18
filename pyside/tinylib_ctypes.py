@@ -9,9 +9,9 @@ import os
 WORKERS = min(os.cpu_count(), 8)
 
 
-#Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double smoothDist, int dry, int erase, int softLines,
+#Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double highestPressureLineWidth, double smoothDist, int dry, int erase, int softLines,
 #                        unsigned char* image, int width, int height, int xstride, int ystride, const int* paintWithinRegion)
-tinylib.brush_init_paint.argtypes = [ct.c_double]*6 + [ct.c_int]*3 + [ct.c_void_p] + [ct.c_int]*4 + [ct.c_void_p]
+tinylib.brush_init_paint.argtypes = [ct.c_double]*7 + [ct.c_int]*3 + [ct.c_void_p] + [ct.c_int]*4 + [ct.c_void_p]
 tinylib.brush_init_paint.restype = ct.c_void_p
 
 #void brush_set_rgb(Brush* brush, const unsigned char* rgb)
