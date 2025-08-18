@@ -1232,16 +1232,20 @@ class PenTool(Button):
             self.bucket_color = movie.curr_frame().surf_by_id('color').get_at((nx+l,ny+b))
             break
 
-    def init_brush(self, x, y, smoothDist=None, dry=False, paintWithin=None):
+    def init_brush(self, x, y, time=None, pressure=None, smoothDist=None, dry=False, paintWithin=None):
         if smoothDist is None:
             smoothDist = self.smooth_dist
+        if time is None:
+            time = layout.event_time
+        if pressure is None:
+            pressure = layout.pressure
         ptr, ystride, width, height = greyscale_c_params(self.lines_array)
         if self.color_id:
             color = surf.pixels3d(movie.edit_curr_frame().surf_by_id('lines'))
             color_ptr, color_stride, color_width, color_height = color_c_params(color)
             ptr = color_ptr
         lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
-        self.brush = tinylib.brush_init_paint(x, y, layout.event_time, layout.pressure, lineWidth, smoothDist, dry,
+        self.brush = tinylib.brush_init_paint(x, y, time, pressure, lineWidth, smoothDist, dry,
                 1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
         if self.color_id:
             tinylib.brush_set_rgb(self.brush, (ct.c_uint8*3)(*palette.color(self.color_id)[:3]))
@@ -1311,10 +1315,11 @@ class PenTool(Button):
 
     def _get_polyline(self):
         polyline_length = tinylib.brush_get_polyline_length(self.brush)
-        self.polyline = np.zeros((polyline_length, 2), dtype=float, order='F')
+        self.polyline = np.zeros((polyline_length, 3), dtype=float, order='F')
         polyline_x = self.polyline[:, 0]
         polyline_y = self.polyline[:, 1]
-        tinylib.brush_get_polyline(self.brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, 0)
+        polyline_p = self.polyline[:, 2]
+        tinylib.brush_get_polyline(self.brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, arr_base_ptr(polyline_p))
 
     def end_paint(self, nsamples=0, get_sample2polyline=False):
         tinylib.brush_end_paint(self.brush, self.region)
@@ -1340,15 +1345,16 @@ class PenTool(Button):
         else:
             arr = xys
 
-        x0, y0 = arr[0]
-        self.init_brush(x0, y0, smoothDist=smoothDist, dry=dry, paintWithin=paintWithin)
+        x0, y0, p = arr[0]
+        self.init_brush(x0, y0, 0, p, smoothDist=smoothDist, dry=dry, paintWithin=paintWithin)
         if closed:
             tinylib.brush_set_closed(self.brush)
 
         xarr = arr[1:, 0]
         yarr = arr[1:, 1]
+        parr = arr[1:, 2]
 
-        tinylib.brush_paint(self.brush, len(xys)-1, arr_base_ptr(xarr), arr_base_ptr(yarr), 0, 0, zoom, self.region)
+        tinylib.brush_paint(self.brush, len(xys)-1, arr_base_ptr(xarr), arr_base_ptr(yarr), 0, arr_base_ptr(parr), zoom, self.region)
         self.update_bbox()
 
         self.end_paint(nsamples=len(xys)+int(closed), get_sample2polyline=get_sample2polyline)
@@ -1504,6 +1510,7 @@ def smooth_polyline(closed, points, focus, prev_closest_to_focus_idx=-1, thresho
     new_arr = np.zeros(points.shape, order='F', dtype=float)
     newx = new_arr[:, 0]
     newy = new_arr[:, 1]
+    new_arr[:, 2] = points[:, 2] # we only smooth the coordinates - pressure is copied as is
 
     first_diff = np.zeros(1, dtype=np.int32)
     last_diff = np.zeros(1, dtype=np.int32)
@@ -1523,7 +1530,7 @@ def points_bbox(xys, margin):
     ys = [xy[1] for xy in xys]
     return min(xs)-margin, min(ys)-margin, max(xs)+margin, max(ys)+margin
 
-def simplify_polyline(points, threshold, remap_idx=None):
+def simplify_polyline(points, threshold, remap_idx=None, pthresh=0.3):
     if len(points) < 100:
         return points, remap_idx if (remap_idx is not None and remap_idx < len(points) and remap_idx >= 0) else None
         
@@ -1542,9 +1549,11 @@ def simplify_polyline(points, threshold, remap_idx=None):
         
         dist_prev = ((curr[0] - result[-1][0])**2 + (curr[1] - result[-1][1])**2)**0.5
         dist_next = ((curr[0] - next[0])**2 + (curr[1] - next[1])**2)**0.5
+        pd_prev = abs(curr[2] - result[-1][2])
+        pd_next = abs(curr[2] - next[2])
         
         # throw a point away if it's close enough to both neighbors, or if it's identical to at least one of them
-        if (dist_prev >= threshold or dist_next >= threshold) and min(dist_prev, dist_next)>0:
+        if (dist_prev >= threshold or dist_next >= threshold or pd_prev >= pthresh or pd_next >= pthresh) and min(dist_prev, dist_next)>0:
             result.append(curr)
             
     result.append(points[-1])
@@ -2295,7 +2304,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     tinylib.brush_end_paint(brush, region)
 
     polyline_length = tinylib.brush_get_polyline_length(brush)
-    polyline = np.zeros((polyline_length, 2), dtype=float, order='F')
+    polyline = np.zeros((polyline_length, 3), dtype=float, order='F')
     polyline_x = polyline[:, 0]
     polyline_y = polyline[:, 1]
     tinylib.brush_get_polyline(brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, 0)
@@ -2331,7 +2340,7 @@ def filter_points_by_distance(points, threshold):
     # Create circular differences: each point compared to its previous point
     # For circular array: point[0] compared to point[-1], point[1] to point[0], etc.
     prev_points = np.roll(points, 1, axis=0)  # Shift points: [last, p0, p1, ..., p(n-2)]
-    diffs = points - prev_points  # Shape: (N, 2)
+    diffs = points[:,:2] - prev_points[:,:2]  # Shape: (N, 2)
 
     # Calculate distances using L2 norm
     distances = np.linalg.norm(diffs, axis=1)  # Shape: (N,)
@@ -2363,13 +2372,13 @@ def close_polyline(points):
     ubegin = u[orig_last_ind]
     uend = u[orig_first_ind]
 
-    sx, sy = orig_points[0,:]
-    ex, ey = orig_points[-1,:]
+    sx, sy, sp = orig_points[0,:]
+    ex, ey, ep = orig_points[-1,:]
     endpoints_dist = math.sqrt((sx-ex)**2 + (sy-ey)**2)
     step = (uend-ubegin) / (2*endpoints_dist)
 
     new_points = splev(np.arange(ubegin, uend, step), tck)
-    new_points = np.array(list(zip(new_points[0], new_points[1])), dtype=float, order='F')
+    new_points = np.array(list(zip(new_points[0], new_points[1], np.arange(ep, sp, (sp-ep)/len(new_points[0])))), dtype=float, order='F')
 
     # we shouldn't really filter all of the original points, only ones close to new_points, but since the threshold
     # is very small, it doesn't have an effect on anything except the part where the lines connect anyway

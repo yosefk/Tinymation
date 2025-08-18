@@ -347,7 +347,7 @@ class ImagePainter
     void getROI(int* region);
     void paintWithin(const int* region);
     //this is a "pen" line - solid with sharp antialised edges
-    void drawLine(const Point2D& start, const Point2D& end, double width, const unsigned char* rgb=nullptr);
+    void drawLine(const Point2D& start, const Point2D& end, double startWidth, double endWidth, const unsigned char* rgb=nullptr);
 
     //this is inspired by Krita's "Pencil-2"; it draws circles with the diameter equaling the line width,
     //placing them not too close to each other (it remembers the last center across calls)
@@ -596,16 +596,16 @@ void ImagePainter::paintWithin(const int* region)
     _maxPainted.y = region[3];
 }
 
-void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double width, const unsigned char* rgb)
+void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double startWidth, double endWidth, const unsigned char* rgb)
 {
     double raw_u = 0;
     auto projOntoLine = projectPointOntoLineSegument(start, end);
 
-    int startx = std::max(floor(std::min(start.x,end.x) - width), _minPainted.x);
-    int starty = std::max(floor(std::min(start.y,end.y) - width), _minPainted.y);
-    int endx = std::min(ceil(std::max(start.x,end.x) + width), _maxPainted.x);
-    int endy = std::min(ceil(std::max(start.y,end.y) + width), _maxPainted.y);
-    double halfWidth = width * 0.5;
+    double maxWidth = std::max(startWidth, endWidth);
+    int startx = std::max(floor(std::min(start.x,end.x) - maxWidth), _minPainted.x);
+    int starty = std::max(floor(std::min(start.y,end.y) - maxWidth), _minPainted.y);
+    int endx = std::min(ceil(std::max(start.x,end.x) + maxWidth), _maxPainted.x);
+    int endy = std::min(ceil(std::max(start.y,end.y) + maxWidth), _maxPainted.y);
 
     double w = 2; //empirically, things get grainy below w=2 (say at 1.5), and at w=2,
     //the narrowest line width where we're guaranteed to have 255s all along it
@@ -632,7 +632,7 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
     }
     _lastStart = start;
 
-    _aroundCurrEndpoint.setRegion(end, halfWidth+w+2);
+    _aroundCurrEndpoint.setRegion(end, endWidth*0.5+w+2);
 
     for(int y = starty; y < endy; y++) {
         for(int x = startx; x < endx; x++) {
@@ -642,7 +642,10 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double wid
                 continue;
             }
             Point2D p{double(x),double(y)};
-            double dist = distance(p, projOntoLine(p, raw_u));
+            Point2D proj = projOntoLine(p, raw_u);
+            double width = raw_u <= 0 ? startWidth : (raw_u >= 1 ? endWidth : raw_u*endWidth + (1-raw_u)*startWidth); 
+            double halfWidth = width * 0.5;
+            double dist = distance(p, proj);
 
             if(dist > halfWidth+w+1) {
                 continue;
@@ -745,6 +748,7 @@ class Brush
     double _tailAggressiveness = 0;
     bool _smoothPressure = false;
     double _lineWidth = 3;
+    double _highestPressureLineWidth = 3;
     bool _softLines = false;
     bool _closed = false;
 
@@ -759,6 +763,10 @@ class Brush
     const std::vector<SamplePoint>& polyline() const { return _polyline; }
     const std::vector<int>& sample2polyline() const { return _sample2polyline; }
   private:
+    double pressure2lineWidth(double pressure) const {
+        pressure *= pressure;
+        return _lineWidth*(1-pressure) + _highestPressureLineWidth*pressure;
+    }
     void paintAt(const SamplePoint& p);
     void paintLine(const SamplePoint& p1, const SamplePoint& p2);
     void paintBezierSegment(const SamplePoint& p1, const SamplePoint& p2, const Point2D& tangent1, const Point2D& tangent2);
@@ -1049,7 +1057,7 @@ void Brush::paintLine(const SamplePoint& p1, const SamplePoint& p2)
           _painter->drawLineUsingWideSoftCiclesWithNoisyCenters(p1, p2, _lineWidth);
         }
         else {
-          _painter->drawLine(p1.pos, p2.pos, _lineWidth);
+          _painter->drawLine(p1.pos, p2.pos, pressure2lineWidth(p1.pressure), pressure2lineWidth(p2.pressure));
         }
     }
 }
@@ -1069,6 +1077,7 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double press
     Brush& brush = *new Brush;
     brush._smoothing = Smoothing::WEIGHTED;
     brush._lineWidth = lineWidth;
+    brush._highestPressureLineWidth = lineWidth*2;
     brush._smoothDist = smoothDist;
     brush._tailAggressiveness = 0; //TODO: for soft lines/pencil, might want to experiment with this parameter
     brush._softLines = softLines;
@@ -1151,13 +1160,14 @@ extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, con
         if(i == maxBlendAt) {
             brush->_painter->useMaxBlending();
         }
-        SamplePoint s{{x[i],y[i]},time ? time[i] : (i+1)*7, pressure ? pressure[i] : 1};
+        //the default pressure is 0 since we assume it's for pens, not soft pencils, and 0 is the thinnest line
+        SamplePoint s{{x[i],y[i]},time ? time[i] : (i+1)*7, pressure ? pressure[i] : 0};
         brush->paint(s, zoom);
         x[i] = s.pos.x;
         y[i] = s.pos.y;
     }
     if(brush->_closed) {
-        SamplePoint s{{x[0],y[0]},time ? time[i-1]+7 : (i+1)*7, pressure ? pressure[i-1] : 1};
+        SamplePoint s{{x[0],y[0]},time ? time[i-1]+7 : (i+1)*7, pressure ? pressure[0] : 0};
         brush->paint(s, zoom);
     }
     if(brush->_painter) {
