@@ -4815,7 +4815,7 @@ def zoom_to_film_res():
 
 TOOLS = {
     'zoom': Tool(ZoomTool(), zoom_cursor, 'zZ'),
-    'pen': Tool(PenTool(width=2.5, maxPressureWidth=2.5*2, zoom_changes_pixel_width=False), pen_cursor, 'bB'),
+    'pen': Tool(PenTool(width=1.5, maxPressureWidth=15, zoom_changes_pixel_width=False), pen_cursor, 'bB'),
     'pencil': Tool(PenTool(soft=True, width=4, zoom_changes_pixel_width=False), pencil_cursor, 'sS'),
     'eraser': Tool(PenTool(eraser=True, soft=True, width=4, zoom_changes_pixel_width=False), eraser_cursor, 'wW'),
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
@@ -4863,8 +4863,22 @@ def change_pen_width(direction):
     pen.maxPressureWidth *= next_width/pen.width
     pen.width = next_width
 
+def change_pressed_pen_width(direction):
+    pen = TOOLS['pen'].tool
+    if layout.tool is not pen:
+        return
+    step = 1./3
+    next_width = pen.maxPressureWidth + direction*step 
+    if direction == -1 and next_width <= pen.width:
+        return
+    if direction == 1 and next_width > 40:
+        return
+    pen.maxPressureWidth = next_width 
+
 def thicker_pen(): change_pen_width(1)
 def thinner_pen(): change_pen_width(-1)
+def thicker_pressed_pen(): change_pressed_pen_width(1)
+def thinner_pressed_pen(): change_pressed_pen_width(-1)
 
 FUNCTIONS = {
     'insert-frame': (insert_frame, '=+'),
@@ -4882,6 +4896,8 @@ FUNCTIONS = {
     'neutral-color': (choose_neutral_color, 'dD'),
     'thicker-pen': (thicker_pen, ']'),
     'thinner-pen': (thinner_pen, '['),
+    'thicker-pressed-pen': (thicker_pressed_pen, '}'),
+    'thinner-pressed-pen': (thinner_pressed_pen, '{'),
 }
 
 tool_change = 0

@@ -1278,6 +1278,7 @@ extern "C" void brush_flood_fill_color_based_on_mask(Brush* brush, int* color, u
     painter->_xstride = brush->_painter->_xstride;
     painter->_ystride = brush->_painter->_ystride;
     painter->_erase = brush->_painter->_erase;
+    painter->_eraserLineThresh = brush->_painter->_eraserLineThresh;
 
     painter->_color = color;
     painter->_mask = mask;
