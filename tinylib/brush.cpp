@@ -328,11 +328,12 @@ class ImagePainter
     int _xstride = 0;
     int _ystride = 0;
     bool _erase = false;
+    int _eraserLineThresh = 0;
 
-    int _xmin;
-    int _ymin;
-    int _xmax;
-    int _ymax;
+    int _xmin = 0;
+    int _ymin = 0;
+    int _xmax = 0;
+    int _ymax = 0;
 
     bool _rgb = false;
     PixTraitsRGB _pixTraitsRGB;
@@ -466,16 +467,9 @@ void ImagePainter::drawSoftCircle(const Point2D& center, double radius, int grea
             int pixValChange = round(double(greatestPixValChange) * intensity);
             typename PixTraits::PixVal newVal;
             if(greatestPixValChange > 0) {
-                //newVal = std::max(0, std::min(oldVal + pixValChange, 255));
-                //newVal = (pixValChange*255 + (255-pixValChange)*oldVal + (1<<7)) >> 8;
-                //newVal = std::max(newVal, oldVal); //otherwise newVal can get smaller by 1 which adds up badly
-                //if(newVal >= 255-10) {
-                //    newVal = 255;
-                //}
                 newVal = pix.blend(pixValChange, oldVal);
             }
             else {
-                //newVal = std::max(0, std::min(int(oldVal * ((1-pressure) * intensity) + oldVal * (1-intensity)), 255));
                 newVal = pix.erase(pressure, intensity, oldVal);
             }
 
@@ -654,9 +648,6 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double sta
             int grey = 255;
             double c = std::max(-w, std::min(w, dist - halfWidth));
             grey = (1-sigmoid(c*6/w)) * 255;
-            if(grey >= 255 - 30) {
-                grey = 255;
-            }
             int newVal;
             if(_erase) {
                 newVal = std::min(255-grey, oldVal);
@@ -691,11 +682,6 @@ void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double sta
                 newVal = (grey*255 + (255-grey)*oldVal + (1<<7)) >> 8;
                 newVal = std::max(newVal, valAfterLastDrawLine);
 
-                //if we wanted to paint a pixel stopping flood fill, let's do it regardless
-                //of what came before us
-                if(grey >= 255-30) {
-                    newVal = 255;
-                }
                 if(distance(p, end) <= halfWidth+w+1) {
                     _aroundCurrEndpoint.addPixel(x,y,oldVal);
                 }
@@ -1071,7 +1057,7 @@ void Brush::paintAt(const SamplePoint& p)
 
 //extern "C" API
 
-extern "C" Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double highestPressureLineWidth, double smoothDist, int dry, int erase, int softLines,
+extern "C" Brush* brush_init_paint(double x, double y, double time, double pressure, double lineWidth, double highestPressureLineWidth, double smoothDist, int dry, int eraserLineThresh, int softLines,
                                    unsigned char* image, int width, int height, int xstride, int ystride, const int* paintWithinRegion)
 {
     Brush& brush = *new Brush;
@@ -1089,7 +1075,8 @@ extern "C" Brush* brush_init_paint(double x, double y, double time, double press
         painter._height = height;
         painter._xstride = xstride;
         painter._ystride = ystride;
-        painter._erase = erase;
+        painter._erase = eraserLineThresh > 0;
+        painter._eraserLineThresh = eraserLineThresh;
         painter.paintWithin(paintWithinRegion);
         brush._painter = &painter;
     }
@@ -1254,7 +1241,7 @@ class FloodFillingPainter : public ImagePainter
 
     void onPixelPainted(int x, int y, int value) override
     {
-        if(value < 255) {
+        if(value < _eraserLineThresh) {
             _mask[_mask_stride*y + x] = 0;
             _seeds_x.push_back(x);
             _seeds_y.push_back(y);

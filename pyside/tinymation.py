@@ -38,6 +38,12 @@ CURRENT_FRAME_FILE = 'current_frame.png'
 PALETTE_FILE = 'palette.png'
 BACKGROUND = (240, 235, 220)
 PEN = (20, 20, 20)
+BUCKET_THRESH = 255-0x50 # the paint bucket stops at pixels with line alpha >= BUCKET_THRESH.
+# the paint bucket would work best if this was 255, otherwise you have "corners which it doesn't fill"
+# and you need to hit these "dark but still transparent line pixels" repeatedly to color them.
+# but to set this to 255 we would have to limit minimal line width to 2.5 (and set pixels above 255-30
+# to 255 in the brush code). the current tradeoff is a somewhat gnarlier paint bucket in exchange for
+# thinner lines
 
 from cache import Cache, CachedItem
 cache = Cache()
@@ -718,7 +724,7 @@ WIDTH = 3 # the smallest width where you always have a pure pen color rendered a
 # we keep the 3 for various places where it still makes sense)
 MEDIUM_ERASER_WIDTH = 5*WIDTH
 BIG_ERASER_WIDTH = 20*WIDTH
-PAINT_BUCKET_WIDTH = 3*WIDTH
+PAINT_BUCKET_WIDTH = 2.5*WIDTH
 MARKER_WIDTH = 20
 CURSOR_SIZE = round(screen.get_width() * 0.055)
 MAX_HISTORY_BYTE_SIZE = 1*1024**3
@@ -936,9 +942,10 @@ def bounding_rectangle_of_a_boolean_mask(mask):
     return minx, maxx, miny, maxy
 
 class EditablePenLine:
-    def __init__(self, points, start_time=None, closed=False):
+    def __init__(self, points, brush_config, start_time=None, closed=False):
         self.points = points
         self.closed = closed
+        self.brush_config = brush_config
         self.frame_without_line = None
         self.start_time = start_time
 
@@ -1200,6 +1207,14 @@ class PenTool(Button):
         self.color_id = color_id
         self.frame_without_line = None
 
+    def get_brush_config(self):
+        return (self.width, self.maxPressureWidth)
+
+    def set_brush_config(self, config):
+        prev_config = self.get_brush_config()
+        (self.width, self.maxPressureWidth) = config
+        return prev_config
+
     def brush_flood_fill_color_based_on_mask(self):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
         flood_code = 2
@@ -1249,7 +1264,7 @@ class PenTool(Button):
         lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
         maxPressureWidth = self.maxPressureWidth if self.maxPressureWidth is not None else lineWidth
         self.brush = tinylib.brush_init_paint(x, y, time, pressure, lineWidth, maxPressureWidth, smoothDist, dry,
-                1 if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
+                BUCKET_THRESH if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
         if self.color_id:
             tinylib.brush_set_rgb(self.brush, (ct.c_uint8*3)(*palette.color(self.color_id)[:3]))
 
@@ -1269,7 +1284,7 @@ class PenTool(Button):
         cx, cy = layout.drawing_area().xy2frame(x, y)
         self.init_brush(cx, cy)
         if self.eraser:
-            self.pen_mask = self.lines_array == 255
+            self.pen_mask = self.lines_array >= BUCKET_THRESH
             self.find_bucket_color(cx, cy)
             self.brush_flood_fill_color_based_on_mask()
 
@@ -1400,7 +1415,7 @@ class PenTool(Button):
             if self.editable():
                 if self.brush: # if it's 0 then end_paint already got the polyline
                     self._get_polyline()
-                history_item.editable_pen_line = EditablePenLine(self.polyline) # can be edited with TweezersTool
+                history_item.editable_pen_line = EditablePenLine(self.polyline, self.get_brush_config()) # can be edited with TweezersTool
                 history_item.editable_pen_line.frame_without_line = self.frame_without_line
 
             history.append_item(history_item)
@@ -1587,6 +1602,7 @@ class TweezersTool(Button):
             last_item.copy_saved_subsurface_into(self.frame_without_line)
 
         pen = TOOLS['pen'].tool
+        self.prev_brush_config = pen.set_brush_config(self.editable_pen_line.brush_config)
         pen.lines_array = surf.pixels_alpha(self.lines)
 
         self.history_item = HistoryItem('lines')
@@ -1608,6 +1624,7 @@ class TweezersTool(Button):
         history.append_item(self.history_item)
 
         pen = TOOLS['pen'].tool
+        pen.set_brush_config(self.prev_brush_config)
         self.lines = None
         pen.lines_array = None
         self.editable_pen_line = None
@@ -1709,7 +1726,7 @@ class TweezersTool(Button):
         polylen = len(pen.polyline)-int(closed)
         self.update_indexes(pen.sample2polyline, polylen)
 
-        self.editable_pen_line = EditablePenLine(pen.polyline[:polylen], start_time, closed=closed)
+        self.editable_pen_line = EditablePenLine(pen.polyline[:polylen], self.editable_pen_line.brush_config, start_time, closed=closed)
         self.editable_pen_line.frame_without_line = self.frame_without_line
 
         #self.draw_corners(red=255)
@@ -1972,7 +1989,7 @@ class PaintBucketTool(Button,ColorModifyingTool):
         self.px = None
         self.py = None
         lines = surf.pixels_alpha(movie.curr_frame().surf_by_id('lines'))
-        self.pen_mask = lines == 255
+        self.pen_mask = lines >= BUCKET_THRESH
 
         self.fill(x,y)
     def on_mouse_move(self, x, y):
@@ -2063,7 +2080,7 @@ def close_diagonal_holes(mask):
     mask[1:,:-1] |= diag2 
 
 def skeletonize_color_based_on_lines(color, lines, x, y):
-    pen_mask = lines == 255
+    pen_mask = lines >= BUCKET_THRESH
     if pen_mask[x,y]:
         return
 
@@ -2235,7 +2252,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     found = tinylib.patch_hole(lines_ptr, lines_stride, sk_ptr, sk_stride, width, height, y-sky.start, x-skx.start,
                                HOLE_REGION_H, HOLE_REGION_W, arr_base_ptr(ys), arr_base_ptr(xs), npoints,
                                arr_base_ptr(ys1), arr_base_ptr(xs1), arr_base_ptr(n1),
-                               arr_base_ptr(ys2), arr_base_ptr(xs2), arr_base_ptr(n2))
+                               arr_base_ptr(ys2), arr_base_ptr(xs2), arr_base_ptr(n2), BUCKET_THRESH)
 
     if found < 3:
         return False
@@ -2295,7 +2312,8 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
     history_item = HistoryItem('lines', bbox=(minx, miny, maxx, maxy))
 
     ptr, ystride, width, height = greyscale_c_params(lines)
-    lineWidth = TOOLS['pen'].tool.width
+    pen = TOOLS['pen'].tool
+    lineWidth = pen.width
     brush = tinylib.brush_init_paint(px[0], py[0], 0, 1, lineWidth, lineWidth, 0, 0, 0, 0, ptr, width, height, 4, ystride, 0)
     tinylib.brush_use_max_blending(brush)
 
@@ -2315,7 +2333,7 @@ def patch_hole(lines, x, y, skeleton, skx, sky):
 
     tinylib.brush_free(brush)
 
-    history_item.editable_pen_line = EditablePenLine(polyline)
+    history_item.editable_pen_line = EditablePenLine(polyline, pen.get_brush_config())
     history.append_item(history_item)
 
     return True
@@ -2423,7 +2441,7 @@ def try_to_close_the_last_editable_line(x,y):
         return False
 
     line = last_item.editable_pen_line
-    new_line = EditablePenLine(close_polyline(line.points), closed=True)
+    new_line = EditablePenLine(close_polyline(line.points), line.brush_config, closed=True)
     redraw_line(new_line, last_item, line.frame_without_line)
     return True
 
@@ -2445,7 +2463,7 @@ class NeedleTool(Button):
 
         color = surf.pixels3d(frame.surf_by_id('color'))
         lines = surf.pixels_alpha(frame.surf_by_id('lines'))
-        if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1] or lines[x,y] == 255:
+        if x < 0 or y < 0 or x >= color.shape[0] or y >= color.shape[1] or lines[x,y] >= BUCKET_THRESH:
             return
 
         if try_to_patch:
@@ -4838,7 +4856,7 @@ def change_pen_width(direction):
         return
     step = 1./3
     next_width = pen.width + direction*step 
-    if direction == -1 and next_width < 1:
+    if direction == -1 and next_width < 1.4999:
         return
     if direction == 1 and next_width > 20:
         return

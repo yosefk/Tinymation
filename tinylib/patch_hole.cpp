@@ -67,7 +67,7 @@ extern "C" void skeletonize(const uint8_t* image, int im_stride, uint8_t* skelet
 //and there was enough room in xs[] and ys[] for the output
 extern "C" int patch_hole(uint8_t* lines, int lines_stride, uint8_t* skeleton, int sk_stride, int width, int height, int cx, int cy,
 	       int patch_region_w, int patch_region_h, int* xs, int* ys, int max_coord,
-	       int* xs1, int* ys1, int *max1, int* xs2, int* ys2, int *max2)
+	       int* xs1, int* ys1, int *max1, int* xs2, int* ys2, int *max2, int bucket_thresh)
 {
 	if(max_coord < 3) {
 		return NotEnoughCoordinates;
@@ -126,7 +126,7 @@ extern "C" int patch_hole(uint8_t* lines, int lines_stride, uint8_t* skeleton, i
 	ys[1] = closest_y;
 	for(int c=0; c<2; ++c) {
 		found = find_closest_point(width, height, cx, cy, xs[c*2], ys[c*2], [&](int x, int y) {
-			return lines[lines_stride*y + x] == 255 && skeleton[sk_stride*y + x] == region_color[c];
+			return lines[lines_stride*y + x] >= bucket_thresh && skeleton[sk_stride*y + x] == region_color[c];
 		});
 		if(!found) {
 			return NoClosestPointOnLines;
@@ -140,7 +140,7 @@ extern "C" int patch_hole(uint8_t* lines, int lines_stride, uint8_t* skeleton, i
 	for(int y=0; y<height; ++y) {
 		for(int x=0; x<width; ++x) {
 			int i = lines_stride*y + x;
-			lines[i] = lines[i] == 255; //skeletonize expects a binary image
+			lines[i] = lines[i] >= bucket_thresh; //skeletonize expects a binary image
 		}
 	}
 
@@ -151,7 +151,7 @@ extern "C" int patch_hole(uint8_t* lines, int lines_stride, uint8_t* skeleton, i
 		for(int x=0; x<width; ++x) {
 			if(x==0 || y==0 || x==width-1 || y==height-1) {
 				int i = lines_stride*y + x;
-				lines[i] = lines[i] == 255;
+				lines[i] = lines[i] >= bucket_thresh;
 			}
 		}
 	}
