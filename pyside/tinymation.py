@@ -1803,6 +1803,7 @@ class TweezersTool(Button):
         self.rgba_frame_without_line = rgba_array(self.frame_without_line)
     
         self.corners = polyline_corners(self.editable_pen_line.points)
+        self.xyp_hist = []
 
         self.prev_closest_to_focus_idx = -1
 
@@ -1825,7 +1826,7 @@ class TweezersTool(Button):
         self.rgba_lines = None
         self.rgba_frame_without_line = None
 
-    def _pressure_on_mouse_move(self, x, y, start_time):
+    def _pressure_on_mouse_move(self, x, y, pressure, start_time):
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
         pen = TOOLS['pen'].tool
@@ -1834,11 +1835,20 @@ class TweezersTool(Button):
         points = surf.strides_preserving_copy(old_points)
         closed = self.editable_pen_line.closed
 
-        p = pen.pressure_func(layout.pressure)
+        p = pen.pressure_func(pressure)
 
         xarr = points[:, 0]
         yarr = points[:, 1]
-        closest_idx = tinylib.find_closest_to_focus(len(xarr), arr_base_ptr(xarr), arr_base_ptr(yarr), cx, cy, closed, self.prev_closest_to_focus_idx)
+        closest_idx = tinylib.find_closest_to_focus(len(xarr), arr_base_ptr(xarr), arr_base_ptr(yarr), cx, cy, closed, self.prev_closest_to_focus_idx, 0)
+
+        if closed: # roll the points so that closest_idx is in the middle
+            middle = len(points)//23
+            shift = middle-closest_idx
+            points = np.roll(points, shift, axis=0)
+            self.editable_pen_line.points = points # for a closed curve this doesn't change it, so we're not "changing the history" here
+            closest_idx += shift # set to middle
+            if self.prev_closest_to_focus_idx >= 0:
+                self.prev_closest_to_focus_idx += shift
 
         prev = self.prev_closest_to_focus_idx if self.prev_closest_to_focus_idx >= 0 else closest_idx
 
@@ -1846,17 +1856,17 @@ class TweezersTool(Button):
         maxind = max(prev, closest_idx)
         # TODO: currently this is seemingly a workaround for blend_signal_gaussian eventually converging to
         # setting the entire affected area to the new pressure value where we probably want less impact further
-        # from the center. when we basically only apply the logic upon motion, this problem appears less pronounced,
-        # but it's there
-
-        # another kind of problem is that when we take off the stylus we get low pressure values but unlike normally
-        # this tool is actually most sensitive to the lowest pressure values where the line is thick... need a way
-        # to ignore this, probably by a lag (or backtracing on mouse up?..)
+        # from the center. when we basically only apply the logic upon motion, this problem appears less pronounced.
+        # (currently this also serves another function, namely, you can touch the line with the stylus and set the pressure where you want
+        # it to be before you start moving and at the end you can stop and lift the stylus, without having the low pressure
+        # values affecting the line width which at the beginning and end you don't want.)
         if minind == maxind:
             self.prev_closest_to_focus_idx = closest_idx
             return
 
-        new_points, min_pt, max_pt = blend_signal_gaussian(points, minind, maxind, p, 0.3, 0.2, 0.05, 5)
+        index_weight = 0.17 - 0.07*(1 - (drawing_area.zoom - MIN_ZOOM)/(MAX_ZOOM - MIN_ZOOM))
+
+        new_points, min_pt, max_pt = blend_signal_gaussian(points, minind, maxind, p, 0.2, 0.15, 0.03, 5)
         min_pt = max(min_pt-1, 0)
         max_pt = min(max_pt+1, len(points))
         points[min_pt:max_pt] = smooth_signal_gradient(new_points[min_pt:max_pt], threshold=0.05, this_weight=0.8)
@@ -1884,7 +1894,11 @@ class TweezersTool(Button):
         #self.draw_corners(red=0)
 
         if self.edit_pressure:
-            self._pressure_on_mouse_move(x,y,start_time)
+            # this is a crude way to ignore low pressure values when lifting the stylus (normally low pressure
+            # values don't matter but in this tool they make the line thinner and the lowest values have the highest impact...)
+            self.xyp_hist = [(x,y,layout.pressure)]+self.xyp_hist
+            if len(self.xyp_hist) > 2:
+                self._pressure_on_mouse_move(*self.xyp_hist.pop(),start_time)
             return
 
         drawing_area = layout.drawing_area()
