@@ -69,6 +69,10 @@ tinylib.fitpack_splder.restype = ct.c_int
 tinylib.smooth_polyline.argtypes = [ct.c_int]*2+[ct.c_void_p]*4+[ct.c_double]*2+[ct.c_void_p]*2+[ct.c_int,ct.c_void_p]+[ct.c_double]*4+[ct.c_int]+[ct.c_double]*2
 tinylib.smooth_polyline.restype = ct.c_int
 
+#int find_closest_to_focus(int npoints, const double* x, const double* y, double focus_x, double focus_y, int closed, int prev_closest_to_focus_idx = -1, int stick_to_endpoints=1)
+tinylib.find_closest_to_focus.argtypes = [ct.c_int] + [ct.c_void_p]*2 + [ct.c_double]*2 + [ct.c_int]*3
+tinylib.find_closest_to_focus.restype = ct.c_int
+
 #void find_peaks(unsigned char* peaks, const double* y, int n, double height, int distance)
 tinylib.find_peaks.argtypes = [ct.c_void_p]*2 + [ct.c_int] + [ct.c_double] + [ct.c_int]
 

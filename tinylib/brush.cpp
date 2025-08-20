@@ -750,7 +750,6 @@ class Brush
     const std::vector<int>& sample2polyline() const { return _sample2polyline; }
   private:
     double pressure2lineWidth(double pressure) const {
-        pressure *= pressure;
         return _lineWidth*(1-pressure) + _highestPressureLineWidth*pressure;
     }
     void paintAt(const SamplePoint& p);

@@ -244,7 +244,7 @@ int find_closest_local_minimum(F&& f, int npoints, int p, int closed) {
     return p;
 }
 
-int find_closest_to_focus(int npoints, const double* x, const double* y, double focus_x, double focus_y, int closed, int prev_closest_to_focus_idx = -1)
+extern "C" int find_closest_to_focus(int npoints, const double* x, const double* y, double focus_x, double focus_y, int closed, int prev_closest_to_focus_idx = -1, int stick_to_endpoints=1)
 {
     auto focus_dist = [=](int i) {
         return euclidean_distance(x[i], y[i], focus_x, focus_y);
@@ -262,10 +262,10 @@ int find_closest_to_focus(int npoints, const double* x, const double* y, double 
         }
         return closest_idx;
     }
-    else if(!closed && prev_closest_to_focus_idx <= 0) {
+    else if(!closed && stick_to_endpoints && prev_closest_to_focus_idx <= 0) {
         return 0;
     }
-    else if(!closed && prev_closest_to_focus_idx >= npoints-1) {
+    else if(!closed && stick_to_endpoints && prev_closest_to_focus_idx >= npoints-1) {
         return npoints-1; //stick to endpoints once you reach them
                                           //(the user can always lift the stylus and click again to "get out of this"; OTOH
                                           //sliding away from endpoints makes it hard to pull them anywhere

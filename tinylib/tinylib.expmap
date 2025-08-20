@@ -21,6 +21,7 @@
     fitpack_splder;
     fitpack_parcur;
     smooth_polyline;
+    find_closest_to_focus;
     find_peaks;
     blit_rgba8888;
     blit_rgba8888_inplace;

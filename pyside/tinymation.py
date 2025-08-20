@@ -38,7 +38,7 @@ CURRENT_FRAME_FILE = 'current_frame.png'
 PALETTE_FILE = 'palette.png'
 BACKGROUND = (240, 235, 220)
 PEN = (20, 20, 20)
-BUCKET_THRESH = 255-0x50 # the paint bucket stops at pixels with line alpha >= BUCKET_THRESH.
+BUCKET_THRESH = 255-0x52 # the paint bucket stops at pixels with line alpha >= BUCKET_THRESH.
 # the paint bucket would work best if this was 255, otherwise you have "corners which it doesn't fill"
 # and you need to hit these "dark but still transparent line pixels" repeatedly to color them.
 # but to set this to 255 we would have to limit minimal line width to 2.5 (and set pixels above 255-30
@@ -1215,6 +1215,10 @@ class PenTool(Button):
         (self.width, self.maxPressureWidth) = config
         return prev_config
 
+    def pressure_func(self, pressure):
+        pressure = min(0.7, pressure)
+        return pressure if self.soft else pressure*pressure
+
     def brush_flood_fill_color_based_on_mask(self):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
         flood_code = 2
@@ -1452,7 +1456,7 @@ class PenTool(Button):
             xarr = np.array([cx], dtype=float)
             yarr = np.array([cy], dtype=float)
             tarr = np.array([layout.event_time], dtype=float)
-            parr = np.array([min(layout.pressure,0.7) if layout.subpixel else 0.35], dtype=float)
+            parr = np.array([self.pressure_func(layout.pressure) if layout.subpixel else 0.35], dtype=float)
             tinylib.brush_paint(self.brush, 1, *[arr_base_ptr(arr) for arr in [xarr, yarr, tarr, parr]], drawing_area.xscale, self.region)
             self.update_bbox()
 
@@ -1521,6 +1525,192 @@ def polyline_corners_impl(points, curvature_threshold, peak_distance):
     tinylib.find_peaks(arr_base_ptr(peaks), arr_base_ptr(curvature), len(curvature), curvature_threshold, peak_distance)
     return peaks
 
+def smooth_signal_gradient(data, threshold, this_weight):
+    """
+    Smooth signal values where gradient exceeds threshold.
+    
+    Parameters:
+    -----------
+    data : numpy.ndarray
+        Nx3 array where columns are [x, y, signal]
+    threshold : float
+        Threshold for d(signal)/d(distance) above which smoothing occurs
+    this_weight : float
+        Weight for current point in weighted average (0 < this_weight < 1)
+        other_weight = 1 - this_weight
+    
+    Returns:
+    --------
+    numpy.ndarray
+        Smoothed data array with same shape as input
+    """
+    if data.shape[1] != 3:
+        raise ValueError("Input array must have exactly 3 columns (x, y, signal)")
+    
+    if not (0 < this_weight < 1):
+        raise ValueError("this_weight must be between 0 and 1")
+    
+    # Work with a copy to avoid modifying original data
+    result = data.copy()
+    n_points = len(data)
+    
+    if n_points < 2:
+        return result
+    
+    x, y, signal = data[:, 0], data[:, 1], data[:, 2]
+    other_weight = 1 - this_weight
+    
+    # Calculate distances between consecutive points
+    dx = np.diff(x)
+    dy = np.diff(y)
+    distances = np.sqrt(dx**2 + dy**2)
+    
+    # Calculate signal differences
+    dsignal = np.diff(signal)
+    
+    # Avoid division by zero - set very small distances to a small positive value
+    distances = np.where(distances == 0, 1e-10, distances)
+    
+    # Calculate gradients (d(signal)/d(distance))
+    gradients = np.abs(dsignal / distances)
+    
+    # Find adjacent pairs where gradient exceeds threshold
+    exceed_mask = gradients > threshold
+    
+    # Apply weighted averaging for each pair of adjacent points that exceeded threshold
+    for i in np.where(exceed_mask)[0]:
+        idx1, idx2 = i, i + 1
+        
+        # Calculate weighted average of the two signals
+        signal1, signal2 = signal[idx1], signal[idx2]
+        avg_signal1 = this_weight * signal1 + other_weight * signal2
+        avg_signal2 = this_weight * signal2 + other_weight * signal1
+
+        # Update both points with their respective weighted averages
+        result[idx1, 2] = avg_signal1
+        result[idx2, 2] = avg_signal2
+    
+    return result
+
+def blend_signal_gaussian(data, idx1, idx2, new_value, max_weight, index_weight, min_weight, min_idx_dist):
+    """
+    Blend a new signal value along a polyline using Gaussian weight distribution.
+    
+    Parameters:
+    -----------
+    data : numpy.ndarray
+        Nx3 array where columns are [x, y, signal]
+    idx1, idx2 : int
+        Two indices into the array that define the curve endpoints
+    new_value : float
+        New signal value to blend with existing values
+    max_weight : float
+        Maximum weight of the new value (0 < max_weight <= 1)
+    index_weight : float
+        Weight at the constraint points (0 < index_weight <= max_weight)
+    min_weight : float
+        Minimum weight threshold - no blending occurs below this value
+    min_idx_dist : float, optional
+        Minimum distance between constraint points for Gaussian fitting.
+        Used when idx1 == idx2 or when |distances[idx2] - distances[idx1]| < min_idx_dist
+        
+    Returns:
+    --------
+    tuple: (updated_data, min_change, max_change)
+        updated_data : numpy.ndarray - Array with blended signal values
+        min_change : int - First index that was modified (inclusive)
+        max_change : int - Last index that was modified + 1 (exclusive)
+    """
+    if data.shape[1] != 3:
+        raise ValueError("Input array must have exactly 3 columns (x, y, signal)")
+    
+    if not (0 < max_weight <= 1):
+        raise ValueError("max_weight must be between 0 and 1")
+    
+    if not (0 < index_weight <= max_weight):
+        raise ValueError("index_weight must be between 0 and max_weight")
+    
+    if idx1 < 0 or idx2 < 0 or idx1 >= len(data) or idx2 >= len(data):
+        raise ValueError("Indices must be valid array indices")
+    
+    # Work with a copy
+    result = data.copy()
+    n_points = len(data)
+    
+    # Compute polyline distances (cumulative distance from first point)
+    x, y = data[:, 0], data[:, 1]
+    distances = np.zeros(n_points)
+    
+    for i in range(1, n_points):
+        dx = x[i] - x[i-1]
+        dy = y[i] - y[i-1]
+        distances[i] = distances[i-1] + np.sqrt(dx**2 + dy**2)
+    
+    # Get distances at the specified indices
+    x0 = distances[idx1]
+    x1 = distances[idx2]
+    actual_distance = abs(x1 - x0)
+    
+    # Determine if we need to use min_idx_dist logic
+    use_min_dist = (idx1 == idx2) or (actual_distance < min_idx_dist)
+    
+    if use_min_dist:
+        # Special case: use min_idx_dist logic
+        # Center is at the midpoint between the indices (or the single point if idx1==idx2)
+        x_center = (x0 + x1) / 2
+        
+        # Constraint points are at center ± min_idx_dist/2
+        # This creates a minimum spread for the Gaussian curve
+        mu = x_center
+        a = max_weight
+        
+        # The constraint points where we want index_weight
+        distance_from_center = min_idx_dist / 2
+        
+        if index_weight >= max_weight * 0.999:
+            sigma = min_idx_dist * 2  # Wide Gaussian to avoid numerical issues
+        else:
+            sigma = distance_from_center / np.sqrt(-2 * np.log(index_weight / max_weight))
+    else:
+        # Normal case: constraint points are at the actual indices
+        x_center = (x0 + x1) / 2
+        mu = x_center
+        a = max_weight
+        
+        distance_from_center = abs(x0 - x_center)
+        if index_weight >= max_weight * 0.999:
+            sigma = abs(x1 - x0) * 10  # Very wide Gaussian
+        else:
+            if distance_from_center == 0:
+                sigma = 1e-6  # Very narrow peak
+            else:
+                sigma = distance_from_center / np.sqrt(-2 * np.log(index_weight / max_weight))
+    
+    def gaussian_weight(x):
+        """Compute Gaussian weight at position x"""
+        return a * np.exp(-((x - mu)**2) / (2 * sigma**2))
+    
+    # Apply blending to all points where weight >= min_weight
+    weights = gaussian_weight(distances)
+    valid_mask = weights >= min_weight
+    
+    if not np.any(valid_mask):
+        # No points meet the minimum weight criteria
+        return result, 0, 0
+    
+    # Find the range of modified indices
+    valid_indices = np.where(valid_mask)[0]
+    min_change = int(valid_indices[0])
+    max_change = int(valid_indices[-1] + 1)  # +1 for exclusive end
+    
+    # Apply weighted blending: new_signal = weight * new_value + (1 - weight) * old_signal
+    for i in valid_indices:
+        weight = weights[i]
+        old_signal = result[i, 2]
+        result[i, 2] = weight * new_value + (1 - weight) * old_signal
+    
+    return result, min_change, max_change
+
 def smooth_polyline(closed, points, focus, prev_closest_to_focus_idx=-1, threshold=30, smoothness=0.6, pull_strength=0.5, num_neighbors=1, max_endpoint_dist=30, corner_stiffness=1, corner_vec=None, snap_to_endpoints_below_dist=5):
     xarr = points[:, 0]
     yarr = points[:, 1]
@@ -1548,7 +1738,7 @@ def points_bbox(xys, margin):
     ys = [xy[1] for xy in xys]
     return min(xs)-margin, min(ys)-margin, max(xs)+margin, max(ys)+margin
 
-def simplify_polyline(points, threshold, remap_idx=None, pthresh=0.3):
+def simplify_polyline(points, threshold, remap_idx=None, pthresh=0.1):
     if len(points) < 100:
         return points, remap_idx if (remap_idx is not None and remap_idx < len(points) and remap_idx >= 0) else None
         
@@ -1567,8 +1757,9 @@ def simplify_polyline(points, threshold, remap_idx=None, pthresh=0.3):
         
         dist_prev = ((curr[0] - result[-1][0])**2 + (curr[1] - result[-1][1])**2)**0.5
         dist_next = ((curr[0] - next[0])**2 + (curr[1] - next[1])**2)**0.5
-        pd_prev = abs(curr[2] - result[-1][2])
-        pd_next = abs(curr[2] - next[2])
+        # currently we care about p**2 since that's how width is computed; this might need to change`
+        pd_prev = 0#abs(curr[2]**2 - result[-1][2]**2)
+        pd_next = 0#abs(curr[2]**2 - next[2]**2)
         
         # throw a point away if it's close enough to both neighbors, or if it's identical to at least one of them
         if (dist_prev >= threshold or dist_next >= threshold or pd_prev >= pthresh or pd_next >= pthresh) and min(dist_prev, dist_next)>0:
@@ -1578,9 +1769,10 @@ def simplify_polyline(points, threshold, remap_idx=None, pthresh=0.3):
     return result, remapped_idx
 
 class TweezersTool(Button):
-    def __init__(self):
+    def __init__(self, edit_pressure=False):
         Button.__init__(self)
         self.editable_pen_line = None
+        self.edit_pressure = edit_pressure
 
     def on_mouse_down(self, x, y):
         if ctrl_is_pressed():
@@ -1633,6 +1825,47 @@ class TweezersTool(Button):
         self.rgba_lines = None
         self.rgba_frame_without_line = None
 
+    def _pressure_on_mouse_move(self, x, y, start_time):
+        drawing_area = layout.drawing_area()
+        cx, cy = drawing_area.xy2frame(x, y)
+        pen = TOOLS['pen'].tool
+
+        old_points = self.editable_pen_line.points
+        points = surf.strides_preserving_copy(old_points)
+        closed = self.editable_pen_line.closed
+
+        p = pen.pressure_func(layout.pressure)
+
+        xarr = points[:, 0]
+        yarr = points[:, 1]
+        closest_idx = tinylib.find_closest_to_focus(len(xarr), arr_base_ptr(xarr), arr_base_ptr(yarr), cx, cy, closed, self.prev_closest_to_focus_idx)
+
+        prev = self.prev_closest_to_focus_idx if self.prev_closest_to_focus_idx >= 0 else closest_idx
+
+        minind = min(prev, closest_idx)
+        maxind = max(prev, closest_idx)
+        # TODO: currently this is seemingly a workaround for blend_signal_gaussian eventually converging to
+        # setting the entire affected area to the new pressure value where we probably want less impact further
+        # from the center. when we basically only apply the logic upon motion, this problem appears less pronounced,
+        # but it's there
+
+        # another kind of problem is that when we take off the stylus we get low pressure values but unlike normally
+        # this tool is actually most sensitive to the lowest pressure values where the line is thick... need a way
+        # to ignore this, probably by a lag (or backtracing on mouse up?..)
+        if minind == maxind:
+            self.prev_closest_to_focus_idx = closest_idx
+            return
+
+        new_points, min_pt, max_pt = blend_signal_gaussian(points, minind, maxind, p, 0.3, 0.2, 0.05, 5)
+        min_pt = max(min_pt-1, 0)
+        max_pt = min(max_pt+1, len(points))
+        points[min_pt:max_pt] = smooth_signal_gradient(new_points[min_pt:max_pt], threshold=0.05, this_weight=0.8)
+
+        affected_bbox = points_bbox(points[min_pt:max_pt], pen.maxPressureWidth+3)
+        self.redraw_line(pen, points, closed, affected_bbox, start_time)
+
+        self.prev_closest_to_focus_idx = closest_idx
+
     def on_mouse_move(self, x, y):
         if self.editable_pen_line is None:
             return
@@ -1649,6 +1882,10 @@ class TweezersTool(Button):
             # much repainting it takes) - so we ignore old events
 
         #self.draw_corners(red=0)
+
+        if self.edit_pressure:
+            self._pressure_on_mouse_move(x,y,start_time)
+            return
 
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
@@ -1698,14 +1935,21 @@ class TweezersTool(Button):
             self.prev_closest_to_focus_idx = closest_idx
         
         simplified_new_points_array = np.array(simplified_new_points, dtype=float)
+        simplified_new_points_array = smooth_signal_gradient(simplified_new_points_array, 0.05, 0.8)
         assert len(self.corners) == len(old_points), f'{len(self.corners)=} {len(old_points)=} {first_diff=} {last_diff=} {len(simplified_new_points)=}'
         self.update_corners(old_points, simplified_new_points_array, first_diff, last_diff)
 
         new_points = np.asfortranarray(np.concatenate((old_points[:first_diff], simplified_new_points_array, old_points[last_diff:])))
         assert len(self.corners) == len(new_points), f'{len(self.corners)=} {len(old_points)=} {first_diff=} {last_diff=} {len(simplified_new_points)=}'
 
+
+        # FIXME with width changes we need to go back maybe?..
         affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), pen.maxPressureWidth+3)
 
+        self.redraw_line(pen, new_points, closed, affected_bbox, start_time)
+
+
+    def redraw_line(self, pen, new_points, closed, affected_bbox, start_time):
         minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
         minx, miny = res.clip(minx, miny)
         maxx, maxy = res.clip(maxx, maxy)
@@ -2400,7 +2644,8 @@ def close_polyline(points):
     step = (uend-ubegin) / (2*endpoints_dist)
 
     new_points = splev(np.arange(ubegin, uend, step), tck)
-    new_points = np.array(list(zip(new_points[0], new_points[1], np.arange(ep, sp, (sp-ep)/len(new_points[0])))), dtype=float, order='F')
+    new_pressure = np.arange(ep, sp, (sp-ep)/len(new_points[0])) if sp != ep else [sp]*len(new_points[0])
+    new_points = np.array(list(zip(new_points[0], new_points[1], new_pressure)), dtype=float, order='F')
 
     # we shouldn't really filter all of the original points, only ones close to new_points, but since the threshold
     # is very small, it doesn't have an effect on anything except the part where the lines connect anyway
@@ -4821,6 +5066,7 @@ TOOLS = {
     'eraser-medium': Tool(PenTool(eraser=True, soft=True, width=MEDIUM_ERASER_WIDTH), eraser_medium_cursor, 'eE'),
     'eraser-big': Tool(PenTool(eraser=True, soft=True, width=BIG_ERASER_WIDTH), eraser_big_cursor, 'rR'),
     'tweezers': Tool(TweezersTool(), tweezers_cursor, 'tT'),
+    'tweezers-pressure': Tool(TweezersTool(edit_pressure=True), tweezers_cursor, 'gG'),
     'needle': Tool(NeedleTool(), flashlight_cursor, 'nN'), # needle
     'eye-dropper': Tool(EyeDropperTool(), eye_dropper_cursor, 'iIpP'),
     # insert/remove frame are both a "tool" (with a special cursor) and a "function."
@@ -5344,8 +5590,8 @@ timer_events = [
     HISTORY_TIMER_EVENT,
 ]
 
-keyboard_shortcuts_enabled = False # enabled by Ctrl-A; disabled by default to avoid "surprises"
-# upon random banging on the keyboard
+keyboard_shortcuts_enabled = 'python' in sys.executable # enabled by Ctrl-A; disabled by default to avoid "surprises"
+# upon random banging on the keyboard (but enabled when running under the interpreter to make development easier)
 
 def set_clipboard_image(surface):
   QApplication.clipboard().setPixmap(QPixmap.fromImage(surface.qimage()))
