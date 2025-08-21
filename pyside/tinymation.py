@@ -29,6 +29,7 @@ import res
 
 import surf
 from surf import Surface
+import curve
 
 FRAME_RATE = 12
 CLIP_FILE = 'movie.json' # on Windows, this starting with 'm' while frame0000.png starts with 'f'
@@ -49,7 +50,10 @@ from cache import Cache, CachedItem
 cache = Cache()
 
 def fit_to_resolution(surface):
-    w,h = surface.get_width(), surface.get_height()
+    try:
+        w,h = surface.get_width(), surface.get_height()
+    except:
+        w,h = surface.shape # alpha array
     if w == res.IWIDTH and h == res.IHEIGHT:
         return surface
     elif w == res.IHEIGHT and h == res.IWIDTH:
@@ -97,6 +101,9 @@ class Frame:
             self.id = str(uuid.uuid1())
             self.color = None
             self.lines = None
+            self.raster_alpha = None
+            self.vector_alpha = None
+            self.curve_set = None
 
         cache.update_id(self.cache_id(), self.version)
 
@@ -108,11 +115,31 @@ class Frame:
             fname = self.filename(surf_id)
             if os.path.exists(fname):
                 setattr(self,surf_id,fit_to_resolution(surf.load(fname)))
+        fcurves = self.curves_filename()
+
+        if os.path.exists(fcurves):
+            self.curve_set = curve.CurveSet.load(fcurves)
+        else:
+            self.curve_set = curve.CurveSet()
+
+        if not self.empty():
+            self.raster_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
+            # tools such as the pencil edit raster_alpha, from which pixels_alpha(lines) is then produced
+            # (it is a cache of the blending of raster_alpha and vector_alpha; it becomes raster_alpha when
+            # saved into the lines file)
+            self.raster_alpha[:] = self.lines.get_alpha_channel()
+
+            self.vector_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
+            self.vector_alpha[:] = 0
+        else:
+            self.raster_alpha = None
+            self.vector_alpha = None
+
         # only with the pixels read we know that our ID is not None
         cache.update_id(self.cache_id(), self.version)
 
     def del_pixels(self):
-        for surf_id in self.surf_ids():
+        for surf_id in self.mem_surf_ids():
             setattr(self,surf_id,None)
 
     def empty(self): return self.color is None
@@ -123,15 +150,26 @@ class Frame:
         self.color = new_frame()
         self.lines = Surface((self.color.get_width(), self.color.get_height()), color=PEN)
         surf.pixels_alpha(self.lines)[:] = 0
+        self.raster_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
+        self.vector_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
+        self.raster_alpha[:] = 0
+        self.vector_alpha[:] = 0
+        self.curve_set = curve.CurveSet()
 
-    def get_content(self): return self.color.copy(), self.lines.copy()
+    def get_content(self): return self.color.copy(), self.lines.copy(), self.raster_alpha.copy(), self.vector_alpha.copy(), self.curve_set.copy()
     def set_content(self, content):
-        color, lines = content
+        color, lines, raster, vector, curves = content
         self.color = fit_to_resolution(color.copy())
         self.lines = fit_to_resolution(lines.copy())
+        self.raster_alpha = fit_to_resolution(raster.copy())
+        self.vector_alpha = fit_to_resolution(vector.copy())
+        self.curve_set = curves.copy()
     def clear(self):
         self.color = None
         self.lines = None
+        self.raster_alpha = None
+        self.vector_alpha = None
+        self.curve_set = None
 
     def increment_version(self):
         self._create_surfaces_if_needed()
@@ -139,7 +177,8 @@ class Frame:
         self.version += 1
         cache.update_id(self.cache_id(), self.version)
 
-    def surf_ids(self): return ['lines','color']
+    def surf_ids(self): return ['lines','color'] # these are the ones saved into files
+    def mem_surf_ids(self): return self.surf_ids() + ['raster_alpha','vector_alpha'] # these are the ones kept in RAM
     def get_width(self): return res.IWIDTH
     def get_height(self): return res.IHEIGHT
     def get_rect(self): return empty_frame().color.get_rect()
@@ -176,18 +215,25 @@ class Frame:
             fname = os.path.join(f'layer-{self.layer_id}', fname)
         fname = os.path.join(self.dir, fname)
         return fname+'png'
+    def curves_filename(self):
+        return os.path.join(self.dir, f'layer-{self.layer_id}', f'{self.id}-curves.msgpack')
     def wait_for_compression_to_finish(self):
         if self.compression_future:
             self.compression_future.result()
         self.compression_future = None
-    def _save_to_files(self, fnames_and_surfaces):
-        for fname, surface in fnames_and_surfaces:
-            surf.save(surface, fname)
+    def _save_to_files(self, content, filenames):
+        flines, fcolor, fcurves = filenames
+        color, lines, raster_alpha, curves = content
+        lines.set_alpha_channel(raster_alpha) # we don't want to save raster_alpha blended with vector_alpha - just raster_alpha
+        surf.save(lines, flines)
+        surf.save(color, fcolor)
+        curves.save(fcurves)
     def save(self):
         if self.dirty:
             self.wait_for_compression_to_finish()
-            to_save = [(self.filename(surf_id), self.surf_by_id(surf_id).copy()) for surf_id in self.surf_ids()]
-            self.compression_future = executor.submit(self._save_to_files, to_save)
+            content = self.color.copy(), self.lines.copy(), self.raster_alpha.copy(), self.curve_set.copy()
+            filenames = [self.filename(surf_id) for surf_id in self.surf_ids()] + [self.curves_filename()]
+            self.compression_future = executor.submit(self._save_to_files, content, filenames)
             self.dirty = False
     def delete(self):
         self.wait_for_compression_to_finish()
@@ -207,7 +253,7 @@ class Frame:
     def fit_to_resolution(self):
         if self.empty():
             return
-        for surf_id in self.surf_ids():
+        for surf_id in self.mem_surf_ids():
             setattr(self, surf_id, fit_to_resolution(self.surf_by_id(surf_id)))
 
 _empty_frame = Frame('')

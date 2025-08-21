@@ -59,6 +59,10 @@ rotate_stat = stat('rotate')
 def surf_array(w, h):
     return np.ndarray((w, h, 4), strides=(4, w*4, 1), dtype=np.uint8)
 
+def alpha_array(w, h):
+    # order='F' gives us the strides (1,w) and "survives" copying (you don't need strides_preserving_copy)
+    return np.empty((w, h), order='F', dtype=np.uint8)
+
 # if the code were written from scratch, rather than adapted from a pygame.Surface-based implementation,
 # it might have made sense to stick with the numpy "height, width, channels" convention, different
 # from the typical (and pygame's) "width, height, channels" convention as it is, because our "non-standard"
@@ -296,6 +300,14 @@ class Surface:
         ibuffer = ct.cast(self.base_ptr(), ct.POINTER(ct.c_uint32 * (h * bytes_per_line))).contents
         return np.ndarray((w,h), buffer=ibuffer, strides=(4,bytes_per_line), dtype=np.uint32)
 
+    def get_alpha_channel(self):
+        alpha = alpha_array(*self.get_size())
+        alpha[:] = self._a[:,:,3]
+        return alpha
+
+    def set_alpha_channel(self, alphas):
+        self._a[:,:,3] = alphas
+
 def load(fname):
 
     load_stat.start()
@@ -339,12 +351,20 @@ def rotate(surface, angle):
         return surface
     assert angle in [90, -90]
     rotate_stat.start()
-    rotated = np.rot90(surface._a, {90:1,-90:-1}[angle])
-    width,height = surface.get_size()
-    arr = surf_array(height, width)
-    arr[...] = rotated[...]
-    rotate_stat.stop(width*height)
-    return Surface(arr, surface.get_alpha())
+    if isinstance(surface, Surface):
+        rotated = np.rot90(surface._a, {90:1,-90:-1}[angle])
+        width,height = surface.get_size()
+        arr = surf_array(height, width)
+        arr[...] = rotated[...]
+        rotate_stat.stop(width*height)
+        return Surface(arr, surface.get_alpha(), blending_mode=surface._mode)
+    else: # alpha array
+        rotated = np.rot90(surface, {90:1,-90:-1}[angle])
+        width,height = surface.shape
+        arr = alpha_array(height, width)
+        arr[...] = rotated[...]
+        rotate_stat.stop(width*height)
+        return arr
 
 def pixels3d(surface):
     return surface._a[:,:,0:3]
