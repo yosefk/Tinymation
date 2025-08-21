@@ -131,6 +131,8 @@ class Frame:
 
             self.vector_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
             self.vector_alpha[:] = 0
+            # FIXME should go into vector_alpha
+            self.curve_set.render(surf.pixels_alpha(self.lines))
         else:
             self.raster_alpha = None
             self.vector_alpha = None
@@ -1252,6 +1254,8 @@ class PenTool(Button):
         self.patching = False
         self.color_id = color_id
         self.frame_without_line = None
+        # this is not hard to fix but currently this is the case; maxPressureWidth is not affected by zoom
+        assert soft or not zoom_changes_pixel_width, f'{soft=} {zoom_changes_pixel_width=} currently only soft brushes support zoom-dependent width'
 
     def get_brush_config(self):
         return (self.width, self.maxPressureWidth)
@@ -1448,6 +1452,10 @@ class PenTool(Button):
         # the "ripple effect" on color the way our erasers work)
         if not layout.subpixel and not self.eraser and not self.soft:
             self.smooth_line()
+
+        if not self.soft:
+            # add a vector curve
+            movie.curr_frame().curve_set.add_curve(curve.Curve(self.polyline, closed=False, brushConfig=curve.BrushConfig(self.width, self.maxPressureWidth)))
 
         self.prev_drawn = None
 

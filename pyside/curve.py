@@ -1,5 +1,7 @@
 import math
 import numpy as np
+import ctypes as ct
+from tinylib_ctypes import tinylib
 import msgpack
 
 class BrushConfig:
@@ -40,24 +42,28 @@ def compress_polyline(polyline, bbox=None):
 
     arr = polyline_array(len(polyline), dtype=np.uint16)
     maxval = 2**16-1
-    arr[:,0] = maxval*np.round(polyline[:,0] - xmin)/(xmax - xmin)
-    arr[:,1] = maxval*np.round(polyline[:,1] - ymin)/(ymax - ymin)
+    arr[:,0] = np.round(maxval*(polyline[:,0] - xmin)/(xmax - xmin))
+    arr[:,1] = np.round(maxval*(polyline[:,1] - ymin)/(ymax - ymin))
     arr[:,2] = maxval*polyline[:,2] # pressure is between 0 and 1
 
     return arr.tobytes(order='F'), bbox
 
 def uncompress_polyline(polyline_bytes, bbox):
     polyline = np.frombuffer(polyline_bytes, dtype=np.uint16)
-    polyline = polyline.reshape((len(polyline)//3, 3), order='F')
+    polyline = polyline.reshape((len(polyline)//3, 3), order='F').astype(float)
 
     arr = polyline_array(len(polyline))
     imaxval = 1/(2**16-1)
 
-    arr[:,0] = imaxval*polyline*(xmax - xmin) + xmin
-    arr[:,1] = imaxval*polyline*(ymax - ymin) + ymin
+    xmin, ymin, xmax, ymax = bbox
+
+    arr[:,0] = imaxval*polyline[:,0]*(xmax - xmin) + xmin
+    arr[:,1] = imaxval*polyline[:,1]*(ymax - ymin) + ymin
     arr[:,2] = imaxval*polyline[:,2]
 
-    return arr, bbox
+    return arr
+
+def arr_base_ptr(arr): return arr.ctypes.data_as(ct.c_void_p)
 
 class Curve:
     def __init__(self, polyline, closed, brushConfig):
@@ -65,9 +71,11 @@ class Curve:
         self.closed = closed
         self.brushConfig = brushConfig
 
+    def calc_bbox(self): return polyline_bbox(self.polyline)
+
     def to_dict(self, bbox=None):
         arr, bbox = compress_polyline(self.polyline, bbox)
-        return dict(closed=self.closed, brush=self.brushConfig, bbox=bbox, polyline=arr)
+        return dict(closed=self.closed, brush=self.brushConfig.to_dict(), bbox=bbox, polyline=arr)
 
     @staticmethod
     def from_dict(d):
@@ -76,10 +84,33 @@ class Curve:
         c.brushConfig = BrushConfig.from_dict(d['brush'])
         bbox = d['bbox']
         c.polyline = uncompress_polyline(d['polyline'], bbox)
-        return c
+        return c, bbox
 
     def copy(self):
         return Curve(self.polyline.copy(), self.closed, self.brushConfig.copy())
+
+    def render(self, alpha, paintWithin=None):
+        n = len(self.polyline)
+        if n == 0:
+            return
+
+        arr = self.polyline
+        x, y, p = arr[0]
+        ptr = arr_base_ptr(alpha)
+        width, height = alpha.shape
+        brush = tinylib.brush_init_paint(x, y, 0, p, self.brushConfig.minPressureWidth, self.brushConfig.maxPressureWidth, 0, 0, 0, 0, # smoothDist, dry, eraser and soft are all 0
+                                         ptr, *alpha.shape, *alpha.strides, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
+
+        if self.closed:
+            tinylib.brush_set_closed(brush)
+
+        xarr = arr[1:, 0]
+        yarr = arr[1:, 1]
+        parr = arr[1:, 2]
+
+        tinylib.brush_paint(brush, n-1, arr_base_ptr(xarr), arr_base_ptr(yarr), 0, arr_base_ptr(parr), 1, 0)
+        tinylib.brush_end_paint(brush, 0)
+        tinylib.brush_free(brush)
 
 def bbox_array(n):
     return np.empty((n,4), dtype=np.int32)
@@ -90,6 +121,17 @@ class CurveSet:
         # these are polyline points bboxes - expand each by its curve's maxPressureWidth brush setting plus a margin to get a bbox
         # of the points affected by the rendering of the polyline
         self.bboxes = bbox_array(0)
+    def add_curve(self, curve):
+        self.curves.append(curve)
+        old_bboxes = self.bboxes
+        self.bboxes = bbox_array(len(self.curves))
+        self.bboxes[0:len(old_bboxes)] = old_bboxes
+        self.bboxes[len(old_bboxes)] = curve.calc_bbox()
+
+    def render(self, alpha):
+        for curve in self.curves:
+            curve.render(alpha)
+
     def to_list(self):
         return [curve.to_dict(bbox) for (curve, bbox) in zip(self.curves,self.bboxes)]
     @staticmethod
@@ -99,6 +141,7 @@ class CurveSet:
         if not curves_and_bboxes:
             return c
         c.curves, bboxes = zip(*curves_and_bboxes)
+        c.curves = list(c.curves)
         c.bboxes = bbox_array(len(ls))
         for i, bbox in enumerate(bboxes):
             c.bboxes[i] = bbox

@@ -132,6 +132,28 @@ export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int
     }
 }
 
+//replace the alpha of the given rbga image with the fg blit on top of bg
+export void blit_2_alphas_into_rgba(uniform uint32 rgba_base[], const uniform uint8 bg_base[], const uniform uint8 fg_base[],
+                                    uniform int rgba_stride, uniform int bg_stride, uniform int fg_stride,
+                                    int width, int start_y, int finish_y)
+{
+    for(uniform int y=start_y; y<finish_y; ++y) {
+        uint32* uniform rgba = rgba_base + (rgba_stride*y>>2);
+        const uniform uint8* bg = bg_base + bg_stride*y;
+        const uniform uint8* fg = fg_base + fg_stride*y;
+
+        foreach(x=0 ... width) {
+            uint32 pix = rgba[x];
+            int ab = bg[x];
+            int af = fg[x];
+            int af8 = af << 8;
+            int ab1minusaf = ab*(256 - af); \
+            uint32 ao = round8b(af8 + ab1minusaf);
+            rgba[x] = (ao << 24) | (pix & 0x00ffffff);
+        }
+    }
+}
+
 //blend between the RGB values of the input array with the given RGB value (giving it the weight a
 //and the input RGB values the weight 256-a), and copy the alpha as is from the input to the output
 export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int start_y, uniform int finish_y,

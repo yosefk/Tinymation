@@ -1156,7 +1156,7 @@ extern "C" void brush_paint(Brush* brush, int npoints, double* x, double* y, con
         SamplePoint s{{x[0],y[0]},time ? time[i-1]+7 : (i+1)*7, pressure ? pressure[0] : 0};
         brush->paint(s, zoom);
     }
-    if(brush->_painter) {
+    if(brush->_painter && region) {
         brush->_painter->getROI(region);
     }
 }
@@ -1167,7 +1167,7 @@ extern "C" void brush_end_paint(Brush* brush, int* region)
         brush->_painter->resetROI();
     }
     brush->endPaint();
-    if(brush->_painter) {
+    if(brush->_painter && region) {
         brush->_painter->getROI(region);
     }
 }
