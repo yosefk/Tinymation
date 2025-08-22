@@ -61,10 +61,8 @@ def surf_array(w, h):
     return np.ndarray((w, h, 4), strides=(4, w*4, 1), dtype=np.uint8)
 
 def alpha_array(w, h):
-    # order='F' gives us the strides (1,w) and "survives" copying (you don't need strides_preserving_copy)
+    # order='F' gives us the strides (1,w). not clear when this layout "survives" copying (we use strides_preserving_copy to not have to find out)
     return np.empty((w, h), order='F', dtype=np.uint8)
-
-def arr_base_ptr(arr): return arr.ctypes.data_as(ct.c_void_p)
 
 # if the code were written from scratch, rather than adapted from a pygame.Surface-based implementation,
 # it might have made sense to stick with the numpy "height, width, channels" convention, different
@@ -184,20 +182,21 @@ class Surface:
         blit_stat.stop(blitw*blith)
 
     def blit_into_alpha(self, bg, fg):
+        '''gets 2 AlphaSurface objects and replaces the alpha channel with fg blit onto bg'''
         blit_alpha_stat.start()
 
-        assert bg.shape == fg.shape
-        assert self.get_size() == bg.shape
-        assert bg.strides[0] == 1
-        assert fg.strides[0] == 1
+        sz = self.get_size()
+
+        assert bg.get_size() == sz
+        assert fg.get_size() == sz
             
         @RangeFunc
         def blit_tile(start_y, finish_y):
-            tinylib.blit_2_alphas_into_rgba(self.base_ptr(), arr_base_ptr(bg), arr_base_ptr(fg),
-                                            self.bytes_per_line(), bg.strides[1], fg.strides[1],
+            tinylib.blit_2_alphas_into_rgba(self.base_ptr(), bg.base_ptr(), fg.base_ptr(),
+                                            self.bytes_per_line(), bg.bytes_per_line(), fg.bytes_per_line(),
                                             self.get_width(), start_y, finish_y)
 
-        blitw, blith = self.get_size()
+        blitw, blith = sz
         tinylib.parallel_for_grain(blit_tile, 0, blith, 0 if (blith*blitw > 500000) else blith)
 
         blit_alpha_stat.stop(blitw*blith)
@@ -322,13 +321,66 @@ class Surface:
         ibuffer = ct.cast(self.base_ptr(), ct.POINTER(ct.c_uint32 * (h * bytes_per_line))).contents
         return np.ndarray((w,h), buffer=ibuffer, strides=(4,bytes_per_line), dtype=np.uint32)
 
-    def get_alpha_channel(self):
-        alpha = alpha_array(*self.get_size())
-        alpha[:] = self._a[:,:,3]
-        return alpha
+    def array(self): return self._a
 
-    def set_alpha_channel(self, alphas):
-        self._a[:,:,3] = alphas
+class AlphaSurface:
+    def __init__(self, size_or_data, base=None, color=None):
+        self._base = base
+        if type(size_or_data) is tuple:
+            w, h = size_or_data
+            w, h = round(w), round(h)
+            self._a = alpha_array(w, h)
+            if color!=COLOR_UNINIT:
+                self.fill(color if color is not None else 0)
+        else:
+            self._a = size_or_data
+            w, h = size_or_data.shape
+            assert color is None
+            assert size_or_data.strides[0] == 1, f'{size_or_data.shape=} {size_or_data.strides=}'
+            assert size_or_data.strides[1] >= w, f'{size_or_data.shape=} {size_or_data.strides=}'
+
+    def get_width(self): return self._a.shape[0]
+    def get_height(self): return self._a.shape[1]
+    def get_rect(self): return (0, 0, self.get_width(), self.get_height())
+    def get_size(self): return self._a.shape[:2]
+    def bytes_per_line(self): return self._a.strides[1]
+    def fill(self, color): self._a[:] = color
+    def base_ptr(self):
+        if self._base is None:
+            self._base = self._a.ctypes.data_as(ct.c_void_p)
+        return self._base.value
+
+    def _ptr_to(self, x, y): return ct.c_void_p(self.base_ptr() + y * self.bytes_per_line() + x)
+    def copy(self): return AlphaSurface(strides_preserving_copy(self._a))
+    def empty_like(self): return Surface(self.get_size(), color=COLOR_UNINIT)
+
+    def subsurface(self, *args, clip=False):
+        assert len(args) in [1, 4]
+        if len(args) == 1:
+            x,y,w,h = [round(i) for i in args[0]]
+        else:
+            x,y,w,h = [round(i) for i in args]
+
+        if not clip:
+            if x < 0 or y < 0 or x+w > self.get_width() or y+h > self.get_height():
+                raise ValueError(f"subsurface rectangle ({x},{y},{w},{h}) outside surface area ({self.get_size()})")
+
+        if x < 0:
+            w += x
+            x = 0
+        if y < 0:
+            h += y
+            y = 0
+        w = max(w, 0)
+        h = max(h, 0)
+        return AlphaSurface(self._a[x:x+w,y:y+h], base=self._ptr_to(x,y))
+
+    def get_at(self, pos):
+        x,y = pos
+        x,y = round(x),round(y)
+        return int(self._a[x,y])
+
+    def array(self): return self._a
 
 def load(fname):
 

@@ -96,10 +96,11 @@ class Curve:
 
         arr = self.polyline
         x, y, p = arr[0]
-        ptr = arr_base_ptr(alpha)
-        width, height = alpha.shape
+        ptr = alpha.base_ptr()
+        width, height = alpha.get_size()
+        ystride = alpha.bytes_per_line()
         brush = tinylib.brush_init_paint(x, y, 0, p, self.brushConfig.minPressureWidth, self.brushConfig.maxPressureWidth, 0, 0, 0, 0, # smoothDist, dry, eraser and soft are all 0
-                                         ptr, *alpha.shape, *alpha.strides, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
+                                         ptr, width, height, 1, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
 
         if self.closed:
             tinylib.brush_set_closed(brush)

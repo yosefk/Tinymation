@@ -28,7 +28,7 @@ import json
 import res
 
 import surf
-from surf import Surface
+from surf import Surface, AlphaSurface
 import curve
 
 FRAME_RATE = 12
@@ -50,10 +50,7 @@ from cache import Cache, CachedItem
 cache = Cache()
 
 def fit_to_resolution(surface):
-    try:
-        w,h = surface.get_width(), surface.get_height()
-    except:
-        w,h = surface.shape # alpha array
+    w,h = surface.get_width(), surface.get_height()
     if w == res.IWIDTH and h == res.IHEIGHT:
         return surface
     elif w == res.IHEIGHT and h == res.IWIDTH:
@@ -123,14 +120,13 @@ class Frame:
             self.curve_set = curve.CurveSet()
 
         if not self.empty():
-            self.raster_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
+            self.raster_alpha = AlphaSurface((res.IWIDTH, res.IHEIGHT))
             # tools such as the pencil edit raster_alpha, from which pixels_alpha(lines) is then produced
             # (it is a cache of the blending of raster_alpha and vector_alpha; it becomes raster_alpha when
             # saved into the lines file)
-            self.raster_alpha[:] = self.lines.get_alpha_channel()
+            self.raster_alpha.array()[:] = self.lines.array()[:,:,3]
 
-            self.vector_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
-            self.vector_alpha[:] = 0
+            self.vector_alpha = AlphaSurface((res.IWIDTH, res.IHEIGHT))
 
             self.curve_set.render(self.vector_alpha)
             self.lines.blit_into_alpha(self.raster_alpha, self.vector_alpha)
@@ -145,8 +141,8 @@ class Frame:
         xmin, ymin, xmax, ymax = bbox
         w, h = xmax-xmin, ymax-ymin
         lines = self.lines.subsurface(xmin, ymin, w, h)
-        raster_alpha = self.raster_alpha[xmin:xmax, ymin:ymax]
-        vector_alpha = self.vector_alpha[xmin:xmax, ymin:ymax]
+        raster_alpha = self.raster_alpha.subsurface(xmin, ymin, w, h)
+        vector_alpha = self.vector_alpha.subsurface(xmin, ymin, w, h)
         lines.blit_into_alpha(raster_alpha, vector_alpha)
 
     def del_pixels(self):
@@ -161,8 +157,8 @@ class Frame:
         self.color = new_frame()
         self.lines = Surface((self.color.get_width(), self.color.get_height()), color=PEN)
         surf.pixels_alpha(self.lines)[:] = 0
-        self.raster_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
-        self.vector_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
+        self.raster_alpha = AlphaSurface((res.IWIDTH, res.IHEIGHT))
+        self.vector_alpha = AlphaSurface((res.IWIDTH, res.IHEIGHT))
         self.raster_alpha[:] = 0
         self.vector_alpha[:] = 0
         self.curve_set = curve.CurveSet()
@@ -235,7 +231,7 @@ class Frame:
     def _save_to_files(self, content, filenames):
         flines, fcolor, fcurves = filenames
         color, lines, raster_alpha, curves = content
-        lines.set_alpha_channel(raster_alpha) # we don't want to save raster_alpha blended with vector_alpha - just raster_alpha
+        lines.array()[:,:,3] = raster_alpha.array() # we don't want to save raster_alpha blended with vector_alpha - just raster_alpha
         surf.save(lines, flines)
         surf.save(color, fcolor)
         curves.save(fcurves)
@@ -1322,10 +1318,9 @@ class PenTool(Button):
             time = layout.event_time
         if pressure is None:
             pressure = layout.pressure
-        if self.color_id:
-            ptr, ystride, width, height = color_c_params(surf.pixels3d(self.lines_array))
-        else:
-            ptr, ystride, width, height = greyscale_c_params(self.lines_array, is_alpha=False)
+        ptr = self.lines_array.base_ptr()
+        width, height = self.lines_array.get_size()
+        ystride = self.lines_array.bytes_per_line()
         lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
         maxPressureWidth = self.maxPressureWidth if self.maxPressureWidth is not None else lineWidth
         self.brush = tinylib.brush_init_paint(x, y, time, pressure, lineWidth, maxPressureWidth, smoothDist, dry,
