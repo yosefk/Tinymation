@@ -71,6 +71,7 @@ class Curve:
         self.closed = closed
         self.brushConfig = brushConfig
 
+    def byte_size(self): return self.polyline.nbytes
     def calc_bbox(self): return polyline_bbox(self.polyline)
 
     def to_dict(self, bbox=None):
@@ -122,12 +123,15 @@ class CurveSet:
         # these are polyline points bboxes - expand each by its curve's maxPressureWidth brush setting plus a margin to get a bbox
         # of the points affected by the rendering of the polyline
         self.bboxes = bbox_array(0)
-    def add_curve(self, curve):
+    def append_curve(self, curve):
         self.curves.append(curve)
         old_bboxes = self.bboxes
         self.bboxes = bbox_array(len(self.curves))
         self.bboxes[0:len(old_bboxes)] = old_bboxes
         self.bboxes[len(old_bboxes)] = curve.calc_bbox()
+    def pop_curve(self):
+        self.bboxes = self.bboxes[:-1]
+        return self.curves.pop()
 
     def render(self, alpha):
         for curve in self.curves:
@@ -155,8 +159,9 @@ class CurveSet:
         return c
 
     def save(self, fname):
+        data = self.to_list()
         with open(fname, "wb") as f:
-            msgpack.dump(self.to_list(), f, use_bin_type=True)
+            msgpack.dump(data, f, use_bin_type=True)
 
     @staticmethod
     def load(fname):

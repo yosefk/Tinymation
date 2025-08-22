@@ -996,12 +996,12 @@ class HistoryItemBase:
         self.restore_pos_before_undo = restore_pos_before_undo
         self.pos_before_undo = movie.pos
         self.layer_pos_before_undo = movie.layer_pos
-        self.editable_pen_line = None
     def is_drawing_change(self): return False
     def from_curr_pos(self): return self.pos_before_undo == movie.pos and self.layer_pos_before_undo == movie.layer_pos
     def byte_size(history_item): return 128
     def nop(history_item): return False
     def bounding_rect(self): return None
+    def optimize(self, bbox=None): pass
     def make_undone_changes_visible(self):
         needed_change = False
         if not self.restore_pos_before_undo:
@@ -1060,7 +1060,6 @@ class HistoryItem(HistoryItemBase):
         movie.seek_frame_and_layer(self.pos_before_undo, self.layer_pos_before_undo) # we should already be here, but just in case (undoing in the wrong frame is a very unfortunate bug...)
 
         redo = HistoryItem(self.surface_id, (self.minx, self.miny, self.maxx, self.maxy) if self.optimized else None)
-        redo.editable_pen_line = self.editable_pen_line
 
         frame = self.curr_surface()
         self.copy_saved_subsurface_into(frame)
@@ -1104,6 +1103,26 @@ class HistoryItem(HistoryItemBase):
     def byte_size(self):
         return self.saved_surface.array().nbytes if not self.nop() else 0
 
+class PopCurveHistoryItem(HistoryItemBase):
+    def __init__(self, curve):
+        HistoryItemBase.__init__(self)
+        self.curve=curve
+    def undo(self):
+        movie.edit_curr_frame().curve_set.append_curve(self.curve)
+        return AppendCurveHistoryItem()
+    def is_drawing_change(self): return True
+    def byte_size(self): return self.curve.byte_size() 
+
+class AppendCurveHistoryItem(HistoryItemBase):
+    def __init__(self):
+        HistoryItemBase.__init__(self)
+    def undo(self):
+        curve = movie.edit_curr_frame().curve_set.pop_curve()
+        return PopCurveHistoryItem(curve)
+    def is_drawing_change(self): return True
+    # we ignore the bounding rect question since this item is always in a HistoryItemSet with the pixel-changing item
+    # which handles this
+
 class HistoryItemSet(HistoryItemBase):
     def __init__(self, items):
         HistoryItemBase.__init__(self)
@@ -1111,7 +1130,7 @@ class HistoryItemSet(HistoryItemBase):
     def is_drawing_change(self):
         for item in self.items:
             if not item.is_drawing_change():
-                return False
+                return False # we're conservative - Ctrl-Z will be required if at least one change is not a drawing change
         return True
     def bounding_rect(self):
         rect = None
@@ -1449,10 +1468,6 @@ class PenTool(Button):
         if not layout.subpixel and not self.eraser and not self.soft:
             self.smooth_line()
 
-        if not self.soft:
-            # add a vector curve
-            self.frame.curve_set.add_curve(curve.Curve(self.polyline, closed=False, brushConfig=curve.BrushConfig(self.width, self.maxPressureWidth)))
-
         self.prev_drawn = None
 
         self.save_history_item()
@@ -1465,13 +1480,23 @@ class PenTool(Button):
 
     def save_history_item(self):
         if self.bbox[-1] >= 0:
-            history_item = HistoryItemSet([self.lines_history_item, self.color_history_item]) if self.eraser else self.lines_history_item
-            history_item.optimize(self.bbox)
+            history_items = [self.lines_history_item]
+            if self.eraser:
+                history_items.append(self.color_history_item)
             if self.editable():
                 if self.brush: # if it's 0 then end_paint already got the polyline
                     self._get_polyline()
-                history_item.editable_pen_line = EditablePenLine(self.polyline, self.get_brush_config()) # can be edited with TweezersTool
-                history_item.editable_pen_line.frame_without_line = self.frame_without_line
+            
+                # add a vector curve. FIXME: this needs to work with undo and with the timer
+                self.frame.curve_set.append_curve(curve.Curve(self.polyline, closed=False, brushConfig=curve.BrushConfig(self.width, self.maxPressureWidth)))
+                history_items.append(AppendCurveHistoryItem())
+
+#                history_item.editable_pen_line = EditablePenLine(self.polyline, self.get_brush_config()) # can be edited with TweezersTool
+#                history_item.editable_pen_line.frame_without_line = self.frame_without_line
+    
+
+            history_item = history_items[0] if len(history_items) == 1 else HistoryItemSet(history_items)
+            history_item.optimize(self.bbox)
 
             history.append_item(history_item)
 
