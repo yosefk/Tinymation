@@ -132,6 +132,12 @@ class CurveSet:
     def pop_curve(self):
         self.bboxes = self.bboxes[:-1]
         return self.curves.pop()
+    def replace_curve(self, index, curve):
+        prev_curve = self.curves[index]
+        self.curves[index] = curve
+        self.bboxes[index] = curve.calc_bbox()
+        return prev_curve
+    def size(self): return len(self.curves)
 
     def render(self, alpha):
         for curve in self.curves:
