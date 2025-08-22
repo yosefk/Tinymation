@@ -131,14 +131,23 @@ class Frame:
 
             self.vector_alpha = surf.alpha_array(res.IWIDTH, res.IHEIGHT)
             self.vector_alpha[:] = 0
-            # FIXME should go into vector_alpha
-            self.curve_set.render(surf.pixels_alpha(self.lines))
+
+            self.curve_set.render(self.vector_alpha)
+            self.lines.blit_into_alpha(self.raster_alpha, self.vector_alpha)
         else:
             self.raster_alpha = None
             self.vector_alpha = None
 
         # only with the pixels read we know that our ID is not None
         cache.update_id(self.cache_id(), self.version)
+
+    def update_lines_alpha(self, bbox):
+        xmin, ymin, xmax, ymax = bbox
+        w, h = xmax-xmin, ymax-ymin
+        lines = self.lines.subsurface(xmin, ymin, w, h)
+        raster_alpha = self.raster_alpha[xmin:xmax, ymin:ymax]
+        vector_alpha = self.vector_alpha[xmin:xmax, ymin:ymax]
+        lines.blit_into_alpha(raster_alpha, vector_alpha)
 
     def del_pixels(self):
         for surf_id in self.mem_surf_ids():
@@ -1233,6 +1242,7 @@ def find_nearest(array, center_x, center_y, value):
 class PenTool(Button):
     def __init__(self, eraser=False, soft=False, width=WIDTH, maxPressureWidth=None, zoom_changes_pixel_width=True, color_id=None):
         Button.__init__(self)
+        self.brush = 0
         self.prev_drawn = None
         self.color = BACKGROUND if eraser else PEN
         self.eraser = eraser
@@ -1245,6 +1255,7 @@ class PenTool(Button):
         self.points = []
         self.polyline = []
         self.lines_array = None
+        self.frame = None
         self.rect = np.zeros(4, dtype=np.int32)
         self.region = arr_base_ptr(self.rect)
         self.bbox = (1000000, 1000000, -1, -1)
@@ -1254,6 +1265,7 @@ class PenTool(Button):
         self.patching = False
         self.color_id = color_id
         self.frame_without_line = None
+        self.surf_id = 'lines' if self.color_id else ('raster_alpha' if self.soft else 'vector_alpha')
         # this is not hard to fix but currently this is the case; maxPressureWidth is not affected by zoom
         assert soft or not zoom_changes_pixel_width, f'{soft=} {zoom_changes_pixel_width=} currently only soft brushes support zoom-dependent width'
 
@@ -1273,7 +1285,7 @@ class PenTool(Button):
         mask_ptr, mask_stride, width, height = greyscale_c_params(self.pen_mask, is_alpha=False)
         flood_code = 2
 
-        color = surf.pixels3d(movie.edit_curr_frame().surf_by_id('color'))
+        color = surf.pixels3d(self.frame.surf_by_id('color'))
         color_ptr, color_stride, color_width, color_height = color_c_params(color)
         assert color_width == width and color_height == height
         # the RGB values of transparent colors can actually matter in some (stupid) contexts - pasting into
@@ -1310,15 +1322,14 @@ class PenTool(Button):
             time = layout.event_time
         if pressure is None:
             pressure = layout.pressure
-        ptr, ystride, width, height = greyscale_c_params(self.lines_array)
         if self.color_id:
-            color = surf.pixels3d(movie.edit_curr_frame().surf_by_id('lines'))
-            color_ptr, color_stride, color_width, color_height = color_c_params(color)
-            ptr = color_ptr
+            ptr, ystride, width, height = color_c_params(surf.pixels3d(self.lines_array))
+        else:
+            ptr, ystride, width, height = greyscale_c_params(self.lines_array, is_alpha=False)
         lineWidth = self.width if not self.zoom_changes_pixel_width else self.width*layout.drawing_area().xscale
         maxPressureWidth = self.maxPressureWidth if self.maxPressureWidth is not None else lineWidth
         self.brush = tinylib.brush_init_paint(x, y, time, pressure, lineWidth, maxPressureWidth, smoothDist, dry,
-                BUCKET_THRESH if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
+                BUCKET_THRESH if self.eraser else 0, 1 if self.soft else 0, ptr, width, height, 4 if self.color_id else 1, ystride, arr_base_ptr(paintWithin) if paintWithin is not None else 0)
         if self.color_id:
             tinylib.brush_set_rgb(self.brush, (ct.c_uint8*3)(*palette.color(self.color_id)[:3]))
 
@@ -1332,7 +1343,8 @@ class PenTool(Button):
         self.points = []
         self.polyline = []
         self.bucket_color = None
-        self.lines_array = surf.pixels_alpha(movie.edit_curr_frame().surf_by_id('lines'))
+        self.frame = movie.edit_curr_frame()
+        self.lines_array = self.frame.surf_by_id(self.surf_id)
         self.frame_without_line = None
 
         cx, cy = layout.drawing_area().xy2frame(x, y)
@@ -1434,14 +1446,12 @@ class PenTool(Button):
         self.points = xys
 
     def on_mouse_up(self, x, y):
-        if self.patching or curr_layer_locked():
+        if self.patching or curr_layer_locked() or not self.brush:
             return
 
         if self.timer is not None and self.timer.isActive():
             self.timer.stop()
 
-        movie.edit_curr_frame()
-    
         self.end_paint()
 
         # it doesn't sound good to smooth "mice erasers"
@@ -1455,13 +1465,14 @@ class PenTool(Button):
 
         if not self.soft:
             # add a vector curve
-            movie.curr_frame().curve_set.add_curve(curve.Curve(self.polyline, closed=False, brushConfig=curve.BrushConfig(self.width, self.maxPressureWidth)))
+            self.frame.curve_set.add_curve(curve.Curve(self.polyline, closed=False, brushConfig=curve.BrushConfig(self.width, self.maxPressureWidth)))
 
         self.prev_drawn = None
 
         self.save_history_item()
 
         self.lines_array = None
+        self.frame = None
 
     def editable(self):
         return not self.soft and not self.eraser # pen rather than pencil or eraser
@@ -1491,7 +1502,7 @@ class PenTool(Button):
         self.set_history_timer()
 
     def on_mouse_move(self, x, y):
-        if self.patching or curr_layer_locked():
+        if self.patching or curr_layer_locked() or not self.brush:
             return
 
         drawing_area = layout.drawing_area()
@@ -1515,6 +1526,8 @@ class PenTool(Button):
             self.update_bbox()
 
             if self.short_term_bbox[-1] >= 0:
+                xmin, ymin, xmax, ymax = self.short_term_bbox
+                self.frame.update_lines_alpha((xmin, ymin, xmax+1, ymax+1))
                 layout.drawing_area().draw_region(self.short_term_bbox)
             
         self.prev_drawn = (x,y) 

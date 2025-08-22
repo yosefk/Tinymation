@@ -135,7 +135,7 @@ export void blits_rgba8888_inplace(uniform SurfaceToBlit surfaces[], uniform int
 //replace the alpha of the given rbga image with the fg blit on top of bg
 export void blit_2_alphas_into_rgba(uniform uint32 rgba_base[], const uniform uint8 bg_base[], const uniform uint8 fg_base[],
                                     uniform int rgba_stride, uniform int bg_stride, uniform int fg_stride,
-                                    int width, int start_y, int finish_y)
+                                    uniform int width, uniform int start_y, uniform int finish_y)
 {
     for(uniform int y=start_y; y<finish_y; ++y) {
         uint32* uniform rgba = rgba_base + (rgba_stride*y>>2);
@@ -147,7 +147,7 @@ export void blit_2_alphas_into_rgba(uniform uint32 rgba_base[], const uniform ui
             int ab = bg[x];
             int af = fg[x];
             int af8 = af << 8;
-            int ab1minusaf = ab*(256 - af); \
+            int ab1minusaf = ab*(256 - af);
             uint32 ao = round8b(af8 + ab1minusaf);
             rgba[x] = (ao << 24) | (pix & 0x00ffffff);
         }

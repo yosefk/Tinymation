@@ -42,6 +42,7 @@ def show_stats():
 
 blit_stat = stat('Surface.blit')
 blits_stat = stat('Surface.blits')
+blit_alpha_stat = stat('Surface.blit_into_alpha')
 fill_stat = stat('Surface.fill')
 copy_stat = stat('Surface.copy')
 blend_stat = stat('Surface.blend')
@@ -62,6 +63,8 @@ def surf_array(w, h):
 def alpha_array(w, h):
     # order='F' gives us the strides (1,w) and "survives" copying (you don't need strides_preserving_copy)
     return np.empty((w, h), order='F', dtype=np.uint8)
+
+def arr_base_ptr(arr): return arr.ctypes.data_as(ct.c_void_p)
 
 # if the code were written from scratch, rather than adapted from a pygame.Surface-based implementation,
 # it might have made sense to stick with the numpy "height, width, channels" convention, different
@@ -179,6 +182,25 @@ class Surface:
         tinylib.parallel_for_grain(blit_tile, 0, blith, 0 if (blith*blitw > 500000) else blith)
 
         blit_stat.stop(blitw*blith)
+
+    def blit_into_alpha(self, bg, fg):
+        blit_alpha_stat.start()
+
+        assert bg.shape == fg.shape
+        assert self.get_size() == bg.shape
+        assert bg.strides[0] == 1
+        assert fg.strides[0] == 1
+            
+        @RangeFunc
+        def blit_tile(start_y, finish_y):
+            tinylib.blit_2_alphas_into_rgba(self.base_ptr(), arr_base_ptr(bg), arr_base_ptr(fg),
+                                            self.bytes_per_line(), bg.strides[1], fg.strides[1],
+                                            self.get_width(), start_y, finish_y)
+
+        blitw, blith = self.get_size()
+        tinylib.parallel_for_grain(blit_tile, 0, blith, 0 if (blith*blitw > 500000) else blith)
+
+        blit_alpha_stat.stop(blitw*blith)
 
     def blits(background, foregrounds, xy=(0,0)):
         '''logically equivalent to, but faster than (2x-ish thanks to less cache spills):

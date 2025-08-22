@@ -85,6 +85,12 @@ BLEND_LIGHT_TABLE_MASK = 1
 tinylib.blits_rgba8888_inplace.argtypes = [ct.c_void_p] + [ct.c_int]*3
 tinylib.blit_rgba8888_inplace.argtypes = [ct.c_void_p]*2 + [ct.c_int]*8
 tinylib.blit_rgba8888.argtypes = [ct.c_void_p]*3 + [ct.c_int]*9
+
+#export void blit_2_alphas_into_rgba(uniform uint32 rgba_base[], const uniform uint8 bg_base[], const uniform uint8 fg_base[],
+#                                    uniform int rgba_stride, uniform int bg_stride, uniform int fg_stride,
+#                                    int width, int start_y, int finish_y)
+tinylib.blit_2_alphas_into_rgba.argtypes = [ct.c_void_p]*3 + [ct.c_int]*6
+
 #export void blend_rgb_copy_alpha(uniform uint32 base[],  uniform int stride, uniform int width, uniform int start_y, uniform int finish_y,
 #                                 uniform int r, uniform int g, uniform int b, uniform int a)
 tinylib.blend_rgb_copy_alpha.argtypes = [ct.c_void_p] + [ct.c_int]*8
