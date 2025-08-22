@@ -1867,7 +1867,8 @@ def simplify_polyline(points, threshold, remap_idx=None, pthresh=0.1):
 class TweezersTool(Button):
     def __init__(self, edit_pressure=False):
         Button.__init__(self)
-        self.editable_pen_line = None
+#        self.editable_pen_line = None
+        self.curve = None
         self.edit_pressure = edit_pressure
 
     def on_mouse_down(self, x, y):
@@ -1875,30 +1876,39 @@ class TweezersTool(Button):
             try_to_close_the_last_editable_line(*layout.drawing_area().xy2frame(x,y))
             return
 
-        last_item = history.last_item()
-        if last_item:
-            self.editable_pen_line = last_item.editable_pen_line
-        if self.editable_pen_line is None:
+        curve_set = movie.curr_frame().curve_set
+        if curve_set is None or curve_set.size() == 0:
             return
 
-        self.lines = movie.edit_curr_frame().surf_by_id('lines')
-        self.frame_without_line = self.editable_pen_line.frame_without_line
-        if self.frame_without_line is None: # the first time we edit a line, we create
+        # FIXME find the closest curve to x,y
+        self.curve_set = curve_set
+        self.index = curve_set.size()-1
+        self.curve = curve_set.curves[self.index] 
+#       last_item = history.last_item()
+#        if last_item:
+#            self.editable_pen_line = last_item.editable_pen_line
+#        if self.editable_pen_line is None:
+#            return
+
+        self.frame = movie.edit_curr_frame()
+        self.lines = self.frame.surf_by_id('vector_alpha')
+#        self.frame_without_line = self.editable_pen_line.frame_without_line
+#        if self.frame_without_line is None: # the first time we edit a line, we create
             # a surface without the line. we do it here rather than at PenTool.on_mouse_up
             # to avoid slowing down repeated pen use without editing
-            self.frame_without_line = self.lines.copy()
-            last_item.copy_saved_subsurface_into(self.frame_without_line)
+#            self.frame_without_line = self.lines.copy()
+#            last_item.copy_saved_subsurface_into(self.frame_without_line)
 
-        pen = TOOLS['pen'].tool
-        self.prev_brush_config = pen.set_brush_config(self.editable_pen_line.brush_config)
-        pen.lines_array = surf.pixels_alpha(self.lines)
+#        pen = TOOLS['pen'].tool
+#        self.prev_brush_config = pen.set_brush_config(self.editable_pen_line.brush_config)
+#        pen.lines_array = surf.pixels_alpha(self.lines)
 
-        self.history_item = HistoryItem('lines')
+        self.history_item = HistoryItem('vector_alpha')
 
-        self.rgba_lines = rgba_array(self.lines)
-        self.rgba_frame_without_line = rgba_array(self.frame_without_line)
+#        self.rgba_lines = rgba_array(self.lines)
+#        self.rgba_frame_without_line = rgba_array(self.frame_without_line)
     
-        self.corners = polyline_corners(self.editable_pen_line.points)
+        self.corners = polyline_corners(self.curve.polyline)
         self.xyp_hist = []
 
         self.prev_closest_to_focus_idx = -1
@@ -1973,16 +1983,17 @@ class TweezersTool(Button):
         self.prev_closest_to_focus_idx = closest_idx
 
     def on_mouse_move(self, x, y):
-        if self.editable_pen_line is None:
+        if self.curve is None:
             return
 
-        start_time = time.time_ns() / 1000000
-        if self.editable_pen_line.start_time is not None:
-            # we're measuring age using the timestamps when
-            age = start_time - self.editable_pen_line.start_time
-            if age > 10:
-                self.editable_pen_line.start_time = start_time
-                return # for very long lines we can't avoid a slowdown,
+# FIXME we want this logic eventually
+#        start_time = time.time_ns() / 1000000
+#        if self.editable_pen_line.start_time is not None:
+#            # we're measuring age using the timestamps when
+#            age = start_time - self.editable_pen_line.start_time
+#            if age > 10:
+#                self.editable_pen_line.start_time = start_time
+#                return # for very long lines we can't avoid a slowdown,
             # and it's not trivial to know when (it's not just a question of line length
             # but of how much the line intersects the region where a change happened and so how
             # much repainting it takes) - so we ignore old events
@@ -1999,10 +2010,10 @@ class TweezersTool(Button):
 
         drawing_area = layout.drawing_area()
         cx, cy = drawing_area.xy2frame(x, y)
-        pen = TOOLS['pen'].tool
+#        pen = TOOLS['pen'].tool
 
-        old_points = self.editable_pen_line.points
-        closed = self.editable_pen_line.closed
+        old_points = self.curve.polyline #self.editable_pen_line.points
+        closed = self.curve.closed #self.editable_pen_line.closed
 
         p = layout.pressure
         sq = (1+p)**5
@@ -2054,9 +2065,31 @@ class TweezersTool(Button):
 
 
         # FIXME with width changes we need to go back maybe?..
-        affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), pen.maxPressureWidth+3)
+        affected_bbox = points_bbox(simplified_new_points + changed_old_points + list(old_points[first_diff-1:first_diff]) + list(old_points[last_diff:last_diff+1]), self.curve.brushConfig.maxPressureWidth+3)
 
-        self.redraw_line(pen, new_points, closed, affected_bbox, start_time)
+        minx, miny, maxx, maxy = [round(c) for c in affected_bbox]
+        minx, miny = res.clip(minx, miny)
+        maxx, maxy = res.clip(maxx, maxy)
+        
+        self.lines.array()[minx:maxx, miny:maxy] = 0
+
+        new_curve = curve.Curve(new_points, closed, brushConfig=self.curve.brushConfig)
+        old_curve = self.curve_set.replace_curve(self.index, new_curve)
+        assert old_curve is self.curve
+
+        paintWithin = np.array([minx, miny, maxx, maxy],dtype=np.int32)
+        # FIXME: filter curves by bbox to avoid touching ones which are outside paintWithin (curve_set can do it)
+        smoothed_polyline, sample2polyline = self.curve_set.render(self.lines, paintWithin, get_polyline_of_index=self.index) 
+        polylen = len(smoothed_polyline)-int(closed)
+        self.update_indexes(sample2polyline, polylen)
+
+        self.curve = curve.Curve(smoothed_polyline, closed, brushConfig=self.curve.brushConfig)
+        self.curve_set.replace_curve(self.index, self.curve)
+
+        self.frame.update_lines_alpha((0,0,res.IWIDTH,res.IHEIGHT))
+        
+        layout.drawing_area().draw_region(affected_bbox)
+#        self.redraw_line(pen, new_points, closed, affected_bbox, start_time)
 
 
     def redraw_line(self, pen, new_points, closed, affected_bbox, start_time):

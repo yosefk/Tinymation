@@ -90,7 +90,7 @@ class Curve:
     def copy(self):
         return Curve(self.polyline.copy(), self.closed, self.brushConfig.copy())
 
-    def render(self, alpha, paintWithin=None):
+    def render(self, alpha, paintWithin=None, get_polyline=False):
         n = len(self.polyline)
         if n == 0:
             return
@@ -112,7 +112,24 @@ class Curve:
 
         tinylib.brush_paint(brush, n-1, arr_base_ptr(xarr), arr_base_ptr(yarr), 0, arr_base_ptr(parr), 1, 0)
         tinylib.brush_end_paint(brush, 0)
+
+        retval = None
+        if get_polyline:
+            polyline_length = tinylib.brush_get_polyline_length(brush)
+            polyline = polyline_array(polyline_length)
+            polyline_x = polyline[:, 0]
+            polyline_y = polyline[:, 1]
+            polyline_p = polyline[:, 2]
+            tinylib.brush_get_polyline(brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, arr_base_ptr(polyline_p))
+
+            nsamples = len(self.polyline)+int(self.closed)
+            sample2polyline = np.empty(nsamples, dtype=np.int32)
+            tinylib.brush_get_sample2polyline(brush, nsamples, arr_base_ptr(sample2polyline))
+
+            retval = (polyline, sample2polyline)
+
         tinylib.brush_free(brush)
+        return retval
 
 def bbox_array(n):
     return np.empty((n,4), dtype=np.int32)
@@ -139,9 +156,13 @@ class CurveSet:
         return prev_curve
     def size(self): return len(self.curves)
 
-    def render(self, alpha):
-        for curve in self.curves:
-            curve.render(alpha)
+    def render(self, alpha, paintWithin=None, get_polyline_of_index=None):
+        polyline = None
+        for i, curve in enumerate(self.curves):
+            curr_polyline = curve.render(alpha, paintWithin, get_polyline=get_polyline_of_index==i)
+            if curr_polyline is not None:
+                polyline = curr_polyline
+        return polyline
 
     def to_list(self):
         return [curve.to_dict(bbox) for (curve, bbox) in zip(self.curves,self.bboxes)]
