@@ -159,8 +159,8 @@ class Frame:
         surf.pixels_alpha(self.lines)[:] = 0
         self.raster_alpha = AlphaSurface((res.IWIDTH, res.IHEIGHT))
         self.vector_alpha = AlphaSurface((res.IWIDTH, res.IHEIGHT))
-        self.raster_alpha[:] = 0
-        self.vector_alpha[:] = 0
+        self.raster_alpha.array()[:] = 0
+        self.vector_alpha.array()[:] = 0
         self.curve_set = curve.CurveSet()
 
     def get_content(self): return self.color.copy(), self.lines.copy(), self.raster_alpha.copy(), self.vector_alpha.copy(), self.curve_set.copy()
@@ -269,6 +269,7 @@ def empty_frame():
     if not _empty_frame.empty() and (_empty_frame.color.get_width() != res.IWIDTH or _empty_frame.color.get_height() != res.IHEIGHT):
         _empty_frame = Frame('')
     _empty_frame._create_surfaces_if_needed()
+    _empty_frame.curve_set = None # just in case
     return _empty_frame
 
 _large_empty_surface = None
@@ -982,18 +983,6 @@ def try_set_cursor(c):
 def restore_cursor():
     try_set_cursor(prev_cursor)
 
-def bounding_rectangle_of_a_boolean_mask(mask):
-    # Sum along the vertical and horizontal axes
-    vertical_sum = np.sum(mask, axis=1)
-    if not np.any(vertical_sum):
-        return None
-    horizontal_sum = np.sum(mask, axis=0)
-
-    minx, maxx = np.where(vertical_sum)[0][[0, -1]]
-    miny, maxy = np.where(horizontal_sum)[0][[0, -1]]
-
-    return minx, maxx, miny, maxy
-
 class EditablePenLine:
     def __init__(self, points, brush_config, start_time=None, closed=False):
         self.points = points
@@ -1081,7 +1070,10 @@ class HistoryItem(HistoryItemBase):
         if self.optimized:
             frame = frame.subsurface(self._subsurface_bbox())
         
-        rgba_array(frame)[:] = rgba_array(self.saved_surface)
+        frame.array()[:] = self.saved_surface.array()[:]
+
+        if self.surface_id in ['raster_alpha','vector_alpha']:
+            movie.curr_frame().update_lines_alpha(self.bounding_rect())
 
     def optimize(self, bbox=None):
         if self.optimized:
@@ -1090,8 +1082,7 @@ class HistoryItem(HistoryItemBase):
         if bbox:
             self.minx, self.miny, self.maxx, self.maxy = bbox
         else:
-            mask = np.any(rgba_array(self.saved_surface) != rgba_array(self.curr_surface()), axis=2)
-            brect = bounding_rectangle_of_a_boolean_mask(mask)
+            brect = self.saved_surface.diffs_bbox(self.curr_surface())
 
             if brect is None: # this can happen eg when drawing lines on an already-filled-with-lines area
                 self.saved_surface = None
@@ -1111,7 +1102,7 @@ class HistoryItem(HistoryItemBase):
         return f'HistoryItem(pos={self.pos}, rect=({self.minx}, {self.miny}, {self.maxx}, {self.maxy}))'
 
     def byte_size(self):
-        return self.saved_surface.get_width() * self.saved_surface.get_height() * 4 if not self.nop() else 0
+        return self.saved_surface.array().nbytes if not self.nop() else 0
 
 class HistoryItemSet(HistoryItemBase):
     def __init__(self, items):
@@ -1368,7 +1359,7 @@ class PenTool(Button):
 
     def new_history_item(self):
         self.bbox = (1000000, 1000000, -1, -1)
-        self.lines_history_item = HistoryItem('lines')
+        self.lines_history_item = HistoryItem(self.surf_id)
         if self.eraser:
             self.color_history_item = HistoryItem('color')
 

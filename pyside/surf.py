@@ -323,6 +323,22 @@ class Surface:
 
     def array(self): return self._a
 
+    def diffs_bbox(self, other):
+        mask = np.any(self._a != other._a, axis=2)
+        return bounding_rectangle_of_a_boolean_mask(mask)
+
+def bounding_rectangle_of_a_boolean_mask(mask):
+    # Sum along the vertical and horizontal axes
+    vertical_sum = np.sum(mask, axis=1)
+    if not np.any(vertical_sum):
+        return None
+    horizontal_sum = np.sum(mask, axis=0)
+
+    minx, maxx = np.where(vertical_sum)[0][[0, -1]]
+    miny, maxy = np.where(horizontal_sum)[0][[0, -1]]
+
+    return minx, maxx, miny, maxy
+
 class AlphaSurface:
     def __init__(self, size_or_data, base=None, color=None):
         self._base = base
@@ -381,6 +397,9 @@ class AlphaSurface:
         return int(self._a[x,y])
 
     def array(self): return self._a
+
+    def diffs_bbox(self, other):
+        return bounding_rectangle_of_a_boolean_mask(self._a != other._a)
 
 def load(fname):
 
