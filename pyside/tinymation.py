@@ -1872,17 +1872,17 @@ class TweezersTool(Button):
         self.edit_pressure = edit_pressure
 
     def on_mouse_down(self, x, y):
+        cx, cy = layout.drawing_area().xy2frame(x,y)
         if ctrl_is_pressed():
-            try_to_close_the_last_editable_line(*layout.drawing_area().xy2frame(x,y))
+            try_to_close_the_last_editable_line(cx, cy)
             return
 
         curve_set = movie.curr_frame().curve_set
         if curve_set is None or curve_set.size() == 0:
             return
 
-        # FIXME find the closest curve to x,y
         self.curve_set = curve_set
-        self.index = curve_set.size()-1
+        self.index = curve_set.closest_curve_index(cx, cy)
         self.curve = curve_set.curves[self.index] 
 #       last_item = history.last_item()
 #        if last_item:

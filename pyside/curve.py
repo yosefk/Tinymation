@@ -184,6 +184,18 @@ class CurveSet:
                 polyline = curr_polyline
         return polyline
 
+    def closest_curve_index(self, x, y):
+        # FIXME do it properly
+        min_dist = 10**9
+        min_ind = -1
+        for i, (xmin, ymin, xmax, ymax) in enumerate(self.bboxes):
+            xmid, ymid = (xmax-xmin)/2+xmin, (ymax-ymin)/2+ymin
+            dist = math.sqrt((xmid-x)**2 + (ymid-y)**2)
+            if dist < min_dist: 
+                min_dist = dist
+                min_ind = i
+        return min_ind
+
     def to_list(self):
         return [curve.to_dict(bbox) for (curve, bbox) in zip(self.curves,self.bboxes)]
     @staticmethod
