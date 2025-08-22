@@ -73,6 +73,10 @@ class Curve:
 
     def byte_size(self): return self.polyline.nbytes
     def calc_bbox(self): return polyline_bbox(self.polyline)
+    def pixels_bbox(self, bbox):
+        xmin, ymin, xmax, ymax = bbox
+        mw = self.brushConfig.maxPressureWidth + 3
+        return xmin-mw, ymin-mw, xmax+mw, ymax+mw
 
     def to_dict(self, bbox=None):
         arr, bbox = compress_polyline(self.polyline, bbox)
@@ -134,6 +138,20 @@ class Curve:
 def bbox_array(n):
     return np.empty((n,4), dtype=np.int32)
 
+def rectangles_intersect(rect1, rect2):
+    x1_min, y1_min, x1_max, y1_max = rect1
+    x2_min, y2_min, x2_max, y2_max = rect2
+
+    # Check if one rectangle is to the left of the other
+    if x1_max < x2_min or x2_max < x1_min:
+        return False
+
+    # Check if one rectangle is above the other
+    if y1_max < y2_min or y2_max < y1_min:
+        return False
+
+    return True
+
 class CurveSet:
     def __init__(self):
         self.curves = []
@@ -159,6 +177,8 @@ class CurveSet:
     def render(self, alpha, paintWithin=None, get_polyline_of_index=None):
         polyline = None
         for i, curve in enumerate(self.curves):
+            if paintWithin is not None and not rectangles_intersect(paintWithin, curve.pixels_bbox(self.bboxes[i])):
+                continue # this curve is not affecting the paintWithin region
             curr_polyline = curve.render(alpha, paintWithin, get_polyline=get_polyline_of_index==i)
             if curr_polyline is not None:
                 polyline = curr_polyline

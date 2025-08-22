@@ -1903,7 +1903,7 @@ class TweezersTool(Button):
 #        self.prev_brush_config = pen.set_brush_config(self.editable_pen_line.brush_config)
 #        pen.lines_array = surf.pixels_alpha(self.lines)
 
-        self.history_item = HistoryItem('vector_alpha')
+        self.history_item = HistoryItemSet([HistoryItem('vector_alpha'), ReplaceCurveHistoryItem(self.index, self.curve)])
 
 #        self.rgba_lines = rgba_array(self.lines)
 #        self.rgba_frame_without_line = rgba_array(self.frame_without_line)
@@ -1914,23 +1914,24 @@ class TweezersTool(Button):
         self.prev_closest_to_focus_idx = -1
 
     def on_mouse_up(self, x, y):
-        if self.editable_pen_line is None:
+        if self.curve is None:
             return
         
-        movie.edit_curr_frame()
+
         self.history_item.optimize()
-        self.history_item.editable_pen_line = self.editable_pen_line
+#        self.history_item.editable_pen_line = self.editable_pen_line
         history.append_item(self.history_item)
 
-        pen = TOOLS['pen'].tool
-        pen.set_brush_config(self.prev_brush_config)
+#        pen = TOOLS['pen'].tool
+#        pen.set_brush_config(self.prev_brush_config)
         self.lines = None
-        pen.lines_array = None
-        self.editable_pen_line = None
+        self.frame = None
+#        pen.lines_array = None
+#        self.editable_pen_line = None
         self.history_item = None
 
-        self.rgba_lines = None
-        self.rgba_frame_without_line = None
+#        self.rgba_lines = None
+#        self.rgba_frame_without_line = None
 
     def _pressure_on_mouse_move(self, x, y, pressure, start_time):
         drawing_area = layout.drawing_area()
@@ -2086,6 +2087,7 @@ class TweezersTool(Button):
         self.curve = curve.Curve(smoothed_polyline, closed, brushConfig=self.curve.brushConfig)
         self.curve_set.replace_curve(self.index, self.curve)
 
+        # FIXME: reflood the color surface
         self.frame.update_lines_alpha((0,0,res.IWIDTH,res.IHEIGHT))
         
         layout.drawing_area().draw_region(affected_bbox)
