@@ -1908,7 +1908,7 @@ class TweezersTool(Button):
 #        self.rgba_lines = rgba_array(self.lines)
 #        self.rgba_frame_without_line = rgba_array(self.frame_without_line)
     
-        self.corners = polyline_corners(self.curve.polyline)
+        self.corners = polyline_corners(self.curve.polyline64())
         self.xyp_hist = []
 
         self.prev_closest_to_focus_idx = -1
@@ -2013,7 +2013,7 @@ class TweezersTool(Button):
         cx, cy = drawing_area.xy2frame(x, y)
 #        pen = TOOLS['pen'].tool
 
-        old_points = self.curve.polyline #self.editable_pen_line.points
+        old_points = self.curve.polyline64() #self.editable_pen_line.points
         closed = self.curve.closed #self.editable_pen_line.closed
 
         p = layout.pressure

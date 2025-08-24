@@ -19,7 +19,7 @@ class BrushConfig:
 
     def copy(self): return BrushConfig.from_dict(self.to_dict())
 
-def polyline_array(n, dtype=float):
+def polyline_array(n, dtype=np.float32):
     return np.empty((n, 3), dtype=dtype, order='F')
 
 def polyline_bbox(polyline):
@@ -50,7 +50,7 @@ def compress_polyline(polyline, bbox=None):
 
 def uncompress_polyline(polyline_bytes, bbox):
     polyline = np.frombuffer(polyline_bytes, dtype=np.uint16)
-    polyline = polyline.reshape((len(polyline)//3, 3), order='F').astype(float)
+    polyline = polyline.reshape((len(polyline)//3, 3), order='F').astype(np.float32)
 
     arr = polyline_array(len(polyline))
     imaxval = 1/(2**16-1)
@@ -67,19 +67,19 @@ def arr_base_ptr(arr): return arr.ctypes.data_as(ct.c_void_p)
 
 class Curve:
     def __init__(self, polyline, closed, brushConfig):
-        self.polyline = polyline
+        self._polyline32 = polyline.astype(np.float32) if polyline is not None else None
         self.closed = closed
         self.brushConfig = brushConfig
 
-    def byte_size(self): return self.polyline.nbytes
-    def calc_bbox(self): return polyline_bbox(self.polyline)
+    def byte_size(self): return self._polyline32.nbytes
+    def calc_bbox(self): return polyline_bbox(self._polyline32)
     def pixels_bbox(self, bbox):
         xmin, ymin, xmax, ymax = bbox
         mw = self.brushConfig.maxPressureWidth + 3
         return xmin-mw, ymin-mw, xmax+mw, ymax+mw
 
     def to_dict(self, bbox=None):
-        arr, bbox = compress_polyline(self.polyline, bbox)
+        arr, bbox = compress_polyline(self._polyline32, bbox)
         return dict(closed=self.closed, brush=self.brushConfig.to_dict(), bbox=bbox, polyline=arr)
 
     @staticmethod
@@ -88,18 +88,21 @@ class Curve:
         c.closed = d['closed']
         c.brushConfig = BrushConfig.from_dict(d['brush'])
         bbox = d['bbox']
-        c.polyline = uncompress_polyline(d['polyline'], bbox)
+        c._polyline32 = uncompress_polyline(d['polyline'], bbox)
         return c, bbox
 
     def copy(self):
-        return Curve(self.polyline.copy(), self.closed, self.brushConfig.copy())
+        return Curve(self._polyline32.copy(), self.closed, self.brushConfig.copy())
+
+    def polyline32(self): return self._polyline32
+    def polyline64(self): return self._polyline32.astype(float)
 
     def render(self, alpha, paintWithin=None, get_polyline=False):
-        n = len(self.polyline)
+        n = len(self._polyline32)
         if n == 0:
             return
 
-        arr = self.polyline
+        arr = self.polyline64()
         x, y, p = arr[0]
         ptr = alpha.base_ptr()
         width, height = alpha.get_size()
@@ -120,13 +123,13 @@ class Curve:
         retval = None
         if get_polyline:
             polyline_length = tinylib.brush_get_polyline_length(brush)
-            polyline = polyline_array(polyline_length)
+            polyline = polyline_array(polyline_length, dtype=float)
             polyline_x = polyline[:, 0]
             polyline_y = polyline[:, 1]
             polyline_p = polyline[:, 2]
             tinylib.brush_get_polyline(brush, polyline_length, arr_base_ptr(polyline_x), arr_base_ptr(polyline_y), 0, arr_base_ptr(polyline_p))
 
-            nsamples = len(self.polyline)+int(self.closed)
+            nsamples = len(self._polyline32)+int(self.closed)
             sample2polyline = np.empty(nsamples, dtype=np.int32)
             tinylib.brush_get_sample2polyline(brush, nsamples, arr_base_ptr(sample2polyline))
 
@@ -136,7 +139,7 @@ class Curve:
         return retval
 
 def bbox_array(n):
-    return np.empty((n,4), dtype=np.int32)
+    return np.empty((n,4), dtype=np.int16)
 
 def rectangles_intersect(rect1, rect2):
     x1_min, y1_min, x1_max, y1_max = rect1
