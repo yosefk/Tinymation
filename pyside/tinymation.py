@@ -4311,17 +4311,23 @@ class MovieList:
     def delete_current_history(self):
         del self.histories[self.clips[self.clip_pos]]
     def reload(self):
-        self.clips = []
-        self.images = []
+        self.clips = [os.path.join(WD, clipdir) for clipdir in get_clip_dirs(sort_by='st_mtime')]
+        self.images = [None]*len(self.clips)
         single_image_height = screen.get_height() * MOVIES_Y_SHARE
-        for clipdir in get_clip_dirs(sort_by='st_mtime'):
-            fulldir = os.path.join(WD, clipdir)
-            frame_file = os.path.join(fulldir, CURRENT_FRAME_FILE)
-            image = load_image(frame_file) if os.path.exists(frame_file) else new_frame()
-            # TODO: avoid reloading images if the file didn't change since the last time
-            # we use best quality here since these change rarely and the vertical ones can really look bad otherwise
-            self.images.append(scale_image(image, height=single_image_height, best_quality=True))
-            self.clips.append(fulldir)
+
+        @RangeFunc
+        def load_clip(istart, iend):
+            for i in range(istart, iend):
+                clipdir = self.clips[i]
+                fulldir = os.path.join(WD, clipdir)
+                frame_file = os.path.join(fulldir, CURRENT_FRAME_FILE)
+                image = load_image(frame_file) if os.path.exists(frame_file) else new_frame()
+                # TODO: avoid reloading images if the file didn't change since the last time
+                # we use best quality here since these change rarely and the vertical ones can really look bad otherwise
+                self.images[i] = scale_image(image, height=single_image_height, best_quality=True)
+
+        tinylib.parallel_for_grain(load_clip, 0, len(self.clips), 1) 
+
         self.clip_pos = 0#[i for i,clip in enumerate(self.clips) if clip == movie.dir][0]
     def open_clip(self, clip_pos):
         if clip_pos == self.clip_pos:

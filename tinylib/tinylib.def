@@ -33,5 +33,7 @@ EXPORTS
     blit_held_mask
 	fill_32b 
 	fill_rounded_rectangle_negative
+    cull_bboxes
+    point_to_curve_segments_distances
 	parallel_set_num_threads 
 	parallel_for_grain 

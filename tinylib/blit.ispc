@@ -60,7 +60,7 @@ static inline int round16b(int val) { return clip((val+(1<<15))>>16); }
 \
             if(check_similarity) { \
                 int similar = (abs(rb-rf) < 30) & (abs(gb-gf) < 30) & (abs(bb-bf) < 30); \
-                int brighten = ((rf + gf + bf) > 192*3) ? -60 : 60; \
+                int brighten = select(((rf + gf + bf) > 192*3), -60, 60); \
                 rf = rf*(1-similar) + (clip0(rf+brighten))*similar; \
                 gf = gf*(1-similar) + (clip0(gf+brighten))*similar; \
                 bf = bf*(1-similar) + (clip0(bf+brighten))*similar; \

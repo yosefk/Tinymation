@@ -64,6 +64,7 @@ def uncompress_polyline(polyline_bytes, bbox):
     return arr
 
 def arr_base_ptr(arr): return arr.ctypes.data_as(ct.c_void_p)
+def ptr_plus_oft(ptr, oft): return ct.c_void_p(ptr.value + oft)
 
 class Curve:
     def __init__(self, polyline, closed, brushConfig):
@@ -96,6 +97,26 @@ class Curve:
 
     def polyline32(self): return self._polyline32
     def polyline64(self): return self._polyline32.astype(float)
+
+    def num_line_segments(self): return len(self._polyline32) - 1 + int(self.closed)
+    def pressure2LineWidth(self, pressure):
+        return self.brushConfig.minPressureWidth * (1-pressure) + self.brushConfig.maxPressureWidth * pressure;
+    def line_segments_into(self, xstarts, ystarts, wstarts, xends, yends, wends):
+        p = self._polyline32
+        e = len(p)-1
+        xstarts[:e] = p[:-1,0]
+        xends[:e] = p[1:,0]
+        ystarts[:e] = p[:-1,1]
+        yends[:e] = p[1:,1]
+        wstarts[:e] = self.pressure2LineWidth(p[:-1,2])
+        wends[:e] = self.pressure2LineWidth(p[1:,2])
+        if self.closed:
+            xstarts[-1] = p[-1,0]
+            xends[-1] = p[0,0]
+            ystarts[-1] = p[-1,1]
+            yends[-1] = p[0,1]
+            wstarts[-1] = self.pressure2LineWidth(p[-1,2])
+            wends[-1] = self.pressure2LineWidth(p[0,2])
 
     def render(self, alpha, paintWithin=None, get_polyline=False):
         n = len(self._polyline32)
@@ -139,7 +160,15 @@ class Curve:
         return retval
 
 def bbox_array(n):
-    return np.empty((n,4), dtype=np.int16)
+    return np.empty((n,4), order='F', dtype=np.int16)
+
+def bbox_base_ptrs(arr):
+    assert arr.dtype == np.int16
+    n, dim = arr.shape
+    assert dim == 4
+    stride = arr.strides[1]
+    p = arr_base_ptr(arr)
+    return [ptr_plus_oft(p, i*stride) for i in range(4)]
 
 def rectangles_intersect(rect1, rect2):
     x1_min, y1_min, x1_max, y1_max = rect1
@@ -188,16 +217,44 @@ class CurveSet:
         return polyline
 
     def closest_curve_index(self, x, y):
-        # FIXME do it properly
-        min_dist = 10**9
-        min_ind = -1
-        for i, (xmin, ymin, xmax, ymax) in enumerate(self.bboxes):
-            xmid, ymid = (xmax-xmin)/2+xmin, (ymax-ymin)/2+ymin
-            dist = math.sqrt((xmid-x)**2 + (ymid-y)**2)
-            if dist < min_dist: 
-                min_dist = dist
-                min_ind = i
-        return min_ind
+        # 1. find the bboxes which could contain x,y
+        n = self.size()
+        indexes = np.empty(n, dtype=np.int32)
+        nrelevant = tinylib.cull_bboxes(round(x), round(y), *bbox_base_ptrs(self.bboxes), n, arr_base_ptr(indexes))
+
+        indexes = indexes[:nrelevant]
+
+        # 2. find distances to the line segments of all polylines in the relevant bboxes
+        ns = sum([self.curves[i].num_line_segments() for i in indexes])
+
+        xstarts = np.empty(ns, dtype=np.float32)
+        xends = np.empty(ns, dtype=np.float32)
+        ystarts = np.empty(ns, dtype=np.float32)
+        yends = np.empty(ns, dtype=np.float32)
+        wstarts = np.empty(ns, dtype=np.float32)
+        wends = np.empty(ns, dtype=np.float32)
+
+        s = 0
+        for i in indexes:
+            curve = self.curves[i]
+            e = s + curve.num_line_segments()
+            curve.line_segments_into(xstarts[s:e], ystarts[s:e], wstarts[s:e], xends[s:e], yends[s:e], wends[s:e])
+            s = e
+
+        distances = np.empty(ns, dtype=np.float32)
+        tinylib.point_to_curve_segments_distances(ns, arr_base_ptr(distances),
+                                                  arr_base_ptr(xstarts), arr_base_ptr(ystarts), arr_base_ptr(wstarts),
+                                                  arr_base_ptr(xends), arr_base_ptr(yends), arr_base_ptr(wends),
+                                                  x, y)
+
+        closest_segment_ind = np.argmin(distances)
+        sum_num_segments = 0
+        for i in indexes:
+            sum_num_segments += self.curves[i].num_line_segments()
+            if closest_segment_ind < sum_num_segments:
+                return i
+
+        assert False, "{closest_segment_ind=} does not belong to any polyline, each having the segment numbers {[self.curves[i].num_line_segments() for i in indexes]}"
 
     def to_list(self):
         return [curve.to_dict(bbox) for (curve, bbox) in zip(self.curves,self.bboxes)]

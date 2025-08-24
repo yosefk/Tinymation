@@ -142,6 +142,18 @@ tinylib.fill_32b.argtypes = [ct.c_void_p] + [ct.c_int]*4 + [ct.c_uint]
 #                                    float corner_radius, const uint8_t* color) {
 tinylib.fill_rounded_rectangle_negative.argtypes = [ct.c_void_p] + [ct.c_int]*7 + [ct.c_float]*2 + [ct.c_uint8*4]
 
+#int cull_bboxes(short x, short y, 
+#                const short xmin[], const short ymin[], 
+#                const short xmax[], const short ymax[], 
+#                int nrects, short indexes[])
+tinylib.cull_bboxes.argtypes = [ct.c_short]*2 + [ct.c_void_p]*4 + [ct.c_int] + [ct.c_void_p]
+
+#export void point_to_curve_segments_distances(uniform int nsegments, uniform float distances[],
+#    uniform const float xstarts[], uniform const float ystarts[], uniform const float wstarts[],
+#    uniform const float xends[], uniform const float yends[], uniform const float wends[], 
+#    uniform float x, uniform float y)
+tinylib.point_to_curve_segments_distances.argtypes = [ct.c_int] + [ct.c_void_p]*7 + [ct.c_float]*2
+
 RangeFunc = ct.CFUNCTYPE(None, ct.c_int, ct.c_int)
 tinylib.parallel_for_grain.argtypes = [RangeFunc] + [ct.c_int]*3
 

@@ -88,7 +88,7 @@ double lineToPointDistance(const Line2D& l, const Point2D& p)
     return fabs(cross) / norm(v);
 }
 
-auto projectPointOntoLineSegument(const Point2D& start, const Point2D& end)
+auto projectPointOntoLineSegment(const Point2D& start, const Point2D& end)
 {
     double lineMag = distance(start, end);
     double invSqLineMag = 1/(lineMag*lineMag);
@@ -96,6 +96,7 @@ auto projectPointOntoLineSegument(const Point2D& start, const Point2D& end)
 
     return [=](const Point2D& p, double& raw_u) {
         if(lineMag < 1e-8) { //the line segment is a point
+            raw_u = 0.5;
             return start;
         }
         //project the point onto the line segment
@@ -593,7 +594,7 @@ void ImagePainter::paintWithin(const int* region)
 void ImagePainter::drawLine(const Point2D& start, const Point2D& end, double startWidth, double endWidth, const unsigned char* rgb)
 {
     double raw_u = 0;
-    auto projOntoLine = projectPointOntoLineSegument(start, end);
+    auto projOntoLine = projectPointOntoLineSegment(start, end);
 
     double maxWidth = std::max(startWidth, endWidth);
     int startx = std::max(floor(std::min(start.x,end.x) - maxWidth), _minPainted.x);
