@@ -1911,6 +1911,8 @@ class TweezersTool(Button):
         self.corners = polyline_corners(self.curve.polyline64())
         self.xyp_hist = []
 
+        self.curve_repainter = curve.CurveRepainter(self.curve_set, self.index, self.lines)
+
         self.prev_closest_to_focus_idx = -1
 
     def on_mouse_up(self, x, y):
@@ -2072,15 +2074,17 @@ class TweezersTool(Button):
         minx, miny = res.clip(minx, miny)
         maxx, maxy = res.clip(maxx, maxy)
         
-        self.lines.array()[minx:maxx, miny:maxy] = 0
+#        self.lines.array()[minx:maxx, miny:maxy] = 0
 
         new_curve = curve.Curve(new_points, closed, brushConfig=self.curve.brushConfig)
         old_curve = self.curve_set.replace_curve(self.index, new_curve)
         assert old_curve is self.curve
 
-        paintWithin = np.array([minx, miny, maxx, maxy],dtype=np.int32)
+#        paintWithin = np.array([minx, miny, maxx, maxy],dtype=np.int32)
         # FIXME: filter curves by bbox to avoid touching ones which are outside paintWithin (curve_set can do it)
-        smoothed_polyline, sample2polyline = self.curve_set.render(self.lines, paintWithin, get_polyline_of_index=self.index) 
+#        smoothed_polyline, sample2polyline = self.curve_set.render(self.lines, paintWithin, get_polyline_of_index=self.index) 
+        smoothed_polyline, sample2polyline = self.curve_repainter.repaint((minx,miny,maxx,maxy))
+
         polylen = len(smoothed_polyline)-int(closed)
         self.update_indexes(sample2polyline, polylen)
 
@@ -2088,7 +2092,9 @@ class TweezersTool(Button):
         self.curve_set.replace_curve(self.index, self.curve)
 
         # FIXME: reflood the color surface
-        self.frame.update_lines_alpha((0,0,res.IWIDTH,res.IHEIGHT))
+        #self.frame.update_lines_alpha((0,0,res.IWIDTH,res.IHEIGHT))
+        # FIXME: smaller region
+        self.frame.update_lines_alpha((minx,miny,maxx,maxy))
         
         layout.drawing_area().draw_region(affected_bbox)
 #        self.redraw_line(pen, new_points, closed, affected_bbox, start_time)
@@ -2937,6 +2943,8 @@ class Layout:
         self.pressure = 1
         self.event_time = 0
         self.update_roi = None
+        self.mouse_move_events = 0
+        self.mouse_move_exceptions = 0
 
     def aspect_ratio(self): return self.width/self.height
 
@@ -3082,6 +3090,8 @@ class Layout:
         if event.type == MOUSEBUTTONDOWN:
             change = tool_change
             self.is_pressed = True
+            self.mouse_move_exceptions = 0
+            self.mouse_move_events = 0
             self.focus_elem = elem
             if self.focus_elem:
                 trace.class_context(self.focus_elem)
@@ -3089,6 +3099,8 @@ class Layout:
             if change == tool_change and self.new_delete_tool():
                 self.restore_tool_on_mouse_up = True
         elif event.type == MOUSEBUTTONUP:
+            if self.mouse_move_exceptions:
+                print(f'mouse move exceptions: {self.mouse_move_exceptions}/{self.mouse_move_events}')
             self.is_pressed = False
             if self.restore_tool_on_mouse_up:
                 restore_tool()
@@ -3102,7 +3114,13 @@ class Layout:
         elif event.type == MOUSEMOTION and self.is_pressed:
             if self.focus_elem:
                 trace.class_context(self.focus_elem)
-                self.focus_elem.on_mouse_move(x,y)
+                self.mouse_move_events += 1
+                try:
+                    self.focus_elem.on_mouse_move(x,y)
+                except:
+                    self.mouse_move_exceptions += 1
+                    if self.mouse_move_exceptions == 1:
+                        raise # otherwise eat the exception to avoid flooding the console/log with them
 
     def drawing_area(self):
         assert isinstance(self.elems[0], DrawingArea)
@@ -6168,6 +6186,12 @@ class TinymationWidget(QWidget):
     def mouseReleaseEvent(self, event): self.mouseEvent(event, MOUSEBUTTONUP)
 
     def tabletEvent(self, event):
+        try:
+            self.tabletEventImpl(event)
+        except: # if the exception is propagated up to Qt it might generate a mouse event as a "fallback" which we don't want
+            traceback.print_exc()
+            event.accept() # this prevents the "fallback"
+    def tabletEventImpl(self, event):
         class Event:
             pass
         e = Event()

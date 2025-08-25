@@ -206,15 +206,11 @@ class CurveSet:
         return prev_curve
     def size(self): return len(self.curves)
 
-    def render(self, alpha, paintWithin=None, get_polyline_of_index=None):
-        polyline = None
+    def render(self, alpha, paintWithin=None):
         for i, curve in enumerate(self.curves):
             if paintWithin is not None and not rectangles_intersect(paintWithin, curve.pixels_bbox(self.bboxes[i])):
                 continue # this curve is not affecting the paintWithin region
-            curr_polyline = curve.render(alpha, paintWithin, get_polyline=get_polyline_of_index==i)
-            if curr_polyline is not None:
-                polyline = curr_polyline
-        return polyline
+            curve.render(alpha, paintWithin)
 
     def closest_curve_index(self, x, y):
         # 1. find the bboxes which could contain x,y
@@ -286,4 +282,51 @@ class CurveSet:
     def load(fname):
         with open(fname, "rb") as f:
             return CurveSet.from_list(msgpack.load(f, raw=False))
+
+import surf
+from functrace import trace
+
+def align_down(n, to): return (n // to) * to
+def align_up(n, to): return ((n + to - 1) // to) * to
+
+class CurveRepainter:
+    tile_width = 128
+    tile_height = 128
+    # one tile is <1% of the pixels in a full HD image
+    def __init__(self, curve_set, curve_index, alpha_surface):
+        self.curve_set = curve_set
+        self.index = curve_index
+        self.alpha_surface = alpha_surface
+        # one thing we could do is render "the frame without the curve" when starting to edit
+        # a line, and then repaint it on top of this frame every time. but this might involve
+        # repainting all the lines, of which there might be many. so we amoritize the cost by
+        # rendering the tiles necesssary
+        w, h = alpha_surface.get_size()
+        self.frame_without_curve = surf.AlphaSurface((w,h))
+        self.rows = align_up(w, self.tile_width) // self.tile_width
+        self.cols = align_up(h, self.tile_height) // self.tile_height
+
+        self.painted = np.zeros((self.rows, self.cols), dtype=bool)
+
+    def repaint(self, bbox):
+        minx, miny, maxx, maxy = bbox
+        w, h = self.alpha_surface.get_size()
+
+        for y in range(align_down(miny, self.tile_height), align_up(maxy, self.tile_height), self.tile_height):
+            for x in range(align_down(minx, self.tile_width), align_up(maxx, self.tile_width), self.tile_width):
+                tile_row = x // self.tile_width
+                tile_col = y // self.tile_height
+                if not self.painted[tile_row, tile_col]:
+                    trace.event('CurveRepainter-render-tiles')
+                    paintWithin = np.array([x, y, min(x+self.tile_width, w), min(y+self.tile_height, h)], dtype=np.int32)
+                    for i, curve in enumerate(self.curve_set.curves):
+                        if i != self.index:
+                            curve.render(self.frame_without_curve, paintWithin)
+                    self.painted[tile_row, tile_col] = True
+
+        self.alpha_surface.array()[minx:maxx,miny:maxy] = self.frame_without_curve.array()[minx:maxx,miny:maxy]
+
+        paintWithin = np.array([minx, miny, maxx, maxy], dtype=np.int32)
+        return self.curve_set.curves[self.index].render(self.alpha_surface, paintWithin, get_polyline=True)
+
 
