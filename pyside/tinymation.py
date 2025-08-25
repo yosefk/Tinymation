@@ -13,6 +13,7 @@ from PySide6.QtGui import QImage
 
 on_windows = os.name == 'nt'
 on_linux = sys.platform == 'linux'
+dev_mode = 'python' in sys.executable
 
 ASSETS = 'assets'
 
@@ -1402,6 +1403,8 @@ class PenTool(Button):
         xmin, ymin, xmax, ymax = self.short_term_bbox
         self.short_term_bbox = (min(xmin, rxmin), min(ymin, rymin), max(xmax, rxmax), max(ymax, rymax))
 
+        self.frame.update_lines_alpha((rxmin, rymin, rxmax+1, rymax+1))
+
     def smooth_line(self):
         assert not self.eraser and not self.soft
         try:
@@ -1555,8 +1558,6 @@ class PenTool(Button):
             self.update_bbox()
 
             if self.short_term_bbox[-1] >= 0:
-                xmin, ymin, xmax, ymax = self.short_term_bbox
-                self.frame.update_lines_alpha((xmin, ymin, xmax+1, ymax+1))
                 layout.drawing_area().draw_region(self.short_term_bbox)
             
         self.prev_drawn = (x,y) 
@@ -2074,15 +2075,10 @@ class TweezersTool(Button):
         minx, miny = res.clip(minx, miny)
         maxx, maxy = res.clip(maxx, maxy)
         
-#        self.lines.array()[minx:maxx, miny:maxy] = 0
-
         new_curve = curve.Curve(new_points, closed, brushConfig=self.curve.brushConfig)
         old_curve = self.curve_set.replace_curve(self.index, new_curve)
         assert old_curve is self.curve
 
-#        paintWithin = np.array([minx, miny, maxx, maxy],dtype=np.int32)
-        # FIXME: filter curves by bbox to avoid touching ones which are outside paintWithin (curve_set can do it)
-#        smoothed_polyline, sample2polyline = self.curve_set.render(self.lines, paintWithin, get_polyline_of_index=self.index) 
         smoothed_polyline, sample2polyline = self.curve_repainter.repaint((minx,miny,maxx,maxy))
 
         polylen = len(smoothed_polyline)-int(closed)
@@ -2092,12 +2088,9 @@ class TweezersTool(Button):
         self.curve_set.replace_curve(self.index, self.curve)
 
         # FIXME: reflood the color surface
-        #self.frame.update_lines_alpha((0,0,res.IWIDTH,res.IHEIGHT))
-        # FIXME: smaller region
         self.frame.update_lines_alpha((minx,miny,maxx,maxy))
         
         layout.drawing_area().draw_region(affected_bbox)
-#        self.redraw_line(pen, new_points, closed, affected_bbox, start_time)
 
 
     def redraw_line(self, pen, new_points, closed, affected_bbox, start_time):
@@ -5759,7 +5752,7 @@ timer_events = [
     HISTORY_TIMER_EVENT,
 ]
 
-keyboard_shortcuts_enabled = 'python' in sys.executable # enabled by Ctrl-A; disabled by default to avoid "surprises"
+keyboard_shortcuts_enabled = dev_mode # enabled by Ctrl-A; disabled by default to avoid "surprises"
 # upon random banging on the keyboard (but enabled when running under the interpreter to make development easier)
 
 def set_clipboard_image(surface):
@@ -6110,6 +6103,13 @@ class TinymationWidget(QWidget):
             self.timers.append(timer)
 
     def start_loading(self):
+        try:
+            self.start_loading_impl()
+        except:
+            traceback.print_exc()
+            print('failed to load - exiting')
+            self.close()
+    def start_loading_impl(self):
         load_clips_dir()
         global history
         history = History()
@@ -6211,10 +6211,25 @@ class TinymationWidget(QWidget):
                 self.redrawScreen()
             event.accept()
 
+    def confirm_quit(self):
+        # Create a QMessageBox instance
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("Confirm exiting")
+        msg_box.setText("Are you sure you want to quit?")
+        msg_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg_box.setDefaultButton(QMessageBox.Cancel)  # Optional: Set Cancel as default
+
+        # Show the dialog and get the user's response
+        response = msg_box.exec()
+
+        # Check which button was clicked
+        return response == QMessageBox.Ok
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
-            self.shutdown()
-            self.close()
+            if dev_mode or self.confirm_quit():
+                self.shutdown()
+                self.close()
             return
 
         if layout.is_pressed:

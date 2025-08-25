@@ -28,7 +28,7 @@ class Stat:
         self.calls += 1
     def show(self):
         if self.things:
-            print(f'{self.op}: {self.ns / self.things} ns/{self.what} ({self.calls} calls)')
+            print(f'{self.op}: {self.ns / self.things:.2f} ns/{self.what} ({self.calls} calls, {self.things // self.calls} {self.what}s/call)')
 
 stats = []
 def stat(op, what='pixel'):
